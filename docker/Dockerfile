@@ -7,7 +7,8 @@
 #
 #   NIXL: ai-dynamo/nixl   ${NIXL_REF} + every patch in patches/nixl/
 #   MORI: ROCm/mori        ${MORI_REF} + every patch in patches/mori/
-#   UCX:  ROCm/ucx         ${UCX_REF}   (source-built so NIXL's UCX backend is
+#   UCX:  ROCm/ucx         ${UCX_REF} + every patch in patches/ucx/
+#                                       (source-built so NIXL's UCX backend is
 #                                        ROCm/HIP-aware; the distro UCX is not)
 #
 # Patches: every *.patch under patches/<component>/ is applied to that
@@ -156,9 +157,18 @@ ARG UCX_FAST=0
 
 ENV UCX_PREFIX=/opt/rocnixl-ucx
 
-COPY docker/scripts/build-ucx.sh /tmp/scripts/
+COPY docker/scripts/clone-src.sh docker/scripts/build-ucx.sh /tmp/scripts/
+COPY patches/ucx/ /tmp/patches/ucx/
+
+RUN SRC_NAME=ucx \
+    SRC_GIT_URL="${UCX_GIT_URL}" \
+    SRC_REF="${UCX_REF}" \
+    SRC_DEST=/tmp/ucx-src \
+    SRC_PATCH_DIR=/tmp/patches/ucx \
+    bash /tmp/scripts/clone-src.sh
+
 RUN --mount=type=cache,target=/root/.cache,sharing=locked \
-    UCX_GIT_URL="${UCX_GIT_URL}" UCX_REF="${UCX_REF}" UCX_FAST="${UCX_FAST}" \
+    UCX_SRC=/tmp/ucx-src UCX_FAST="${UCX_FAST}" \
     bash /tmp/scripts/build-ucx.sh && \
     rm -rf /tmp/ucx-src
 

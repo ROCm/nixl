@@ -225,8 +225,9 @@ wheels:
 # ---- Patches ----------------------------------------------------------------
 
 patch-list:
-	@for c in nixl mori; do \
-		echo "patches/$$c/  ($$c $$( [ $$c = nixl ] && echo $(NIXL_REF) || echo $(MORI_REF) ))"; \
+	@for c in ucx nixl mori; do \
+		case $$c in ucx) r=$(UCX_REF);; nixl) r=$(NIXL_REF);; mori) r=$(MORI_REF);; esac; \
+		echo "patches/$$c/  ($$c $$r)"; \
 		found=0; \
 		for p in patches/$$c/*.patch; do \
 			[ -e "$$p" ] || continue; found=1; echo "    $$(basename $$p)"; \

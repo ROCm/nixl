@@ -12,7 +12,7 @@
 # rebases in seconds instead of after a 30-minute image build.
 #
 #   make patch-check                 # both components
-#   make patch-check COMPONENT=nixl  # just one
+#   make patch-check COMPONENT=nixl  # just one (ucx, nixl or mori)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -88,6 +88,9 @@ check_one() {
 	reset_tree "${src}"
 }
 
+if [[ "${COMPONENT}" == "all" || "${COMPONENT}" == "ucx" ]]; then
+	check_one ucx "$(_arg UCX_GIT_URL)" "$(_arg UCX_REF)"
+fi
 if [[ "${COMPONENT}" == "all" || "${COMPONENT}" == "nixl" ]]; then
 	check_one nixl "$(_arg NIXL_GIT_URL)" "$(_arg NIXL_REF)"
 fi

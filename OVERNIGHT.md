@@ -60,32 +60,47 @@ bandwidth, which is the point of the GPU-direct path.
 > `storage backend <NAME>: filepath=...` line, which now prints for every
 > storage run precisely so this is visible.
 
-### UCX has no RMA over rocm_ipc — this is why NIXL loses intra-node
+### UCX will not use rocm_ipc for RMA — why NIXL loses intra-node
 
 Intra-node GPU-to-GPU needs no NIC: `rocm_ipc` uses HIP IPC handles. peermem
-and dmabuf are about the NIC path and are irrelevant here. The actual cause is
-narrower and shows up in bare `ucx_perftest`, with no NIXL involved and
-`rocm_ipc` explicitly in `UCX_TLS`:
+and dmabuf concern the NIC path and are irrelevant here. The cause shows up in
+bare `ucx_perftest`, no NIXL, with `rocm_ipc` explicitly in `UCX_TLS`:
 
 ```
 perftest intra-node cfg#1  tag(sysv/memory cma/memory rocm_ipc/rocm_ipc)  rma(sysv/memory posix/memory)
 ```
 
-UCX offers `rocm_ipc` on the **tag** (rendezvous) lane but never on the **rma**
-lane. On the tag path it reaches ~511 GB/s GPU-to-GPU. NIXL's UCX backend is
-RMA-based, so it can never select it and ends up staging GPU -> host shared
-memory -> GPU at ~0.69 GB/s. `rocm_ipc` does advertise `put_zcopy`/`get_zcopy`,
-so this is UCX's protocol selection, not a missing capability.
+UCX offers `rocm_ipc` on the **tag** (rendezvous) lane -- ~511 GB/s GPU-to-GPU
+there -- but never on the **rma** lane, despite `rocm_ipc` advertising
+`put_zcopy`/`get_zcopy`. NIXL's UCX backend is RMA-based, so it cannot reach it
+and stages GPU -> host shared memory -> GPU at ~0.69 GB/s.
 
-A second, independent filter sits in front of that one: NIXL's UCX backend
-defaults to `UCP_ERR_HANDLING_MODE_PEER`, and UCX drops every transport that
-cannot do peer error handling -- which includes `rocm_ipc` ("error handling:
-none") and the shared-memory transports. Patch 04 adds
-`--ucx_error_handling_mode` to nixlbench so this is testable; setting it to
-`none` visibly brings `sysv/posix` back into the RMA lane. It does not bring
-back `rocm_ipc`, because of the lane problem above.
+Two filters were identified, and neither fully explains it:
 
-MORI is unaffected: it does its own XGMI/IPC and never asks UCX.
+1. **NIXL's error-handling mode.** NIXL defaults to
+   `UCP_ERR_HANDLING_MODE_PEER`, and UCX drops transports that cannot do peer
+   error handling -- `rocm_ipc` reports "error handling: none", as do the
+   shared-memory transports. Patch 04 adds `--ucx_error_handling_mode` to
+   nixlbench; setting it to `none` visibly brings `sysv/posix` back into the
+   RMA lane, so the filter is real. It does not bring back `rocm_ipc`.
+
+2. **The proposed UCX capability flag
+   ([ai-dynamo/nixl#2039](https://github.com/ai-dynamo/nixl/issues/2039)).**
+   Adding `UCT_IFACE_FLAG_ERRHANDLE_PEER_FAILURE` to `rocm_ipc` fixed this on
+   Radeon PRO W7900 (gfx1100) for the reporter. **It does not fix it here.**
+   Tested on ROCm/ucx v1.19.x and on openucx master 1.23.0 (which already
+   carries openucx/ucx#11299), with the flag verified live via `ucx_info -d`
+   showing `error handling: peer failure` -- NIXL still gets
+   `rma_am(tcp)` at ~0.33 GB/s. The patch is parked, disabled and documented,
+   in `patches/ucx/`.
+
+The untested variable is NIXL itself: the reporter runs NIXL 1.4, which is
+unreleased `main` (no v1.4 tag exists) and carries the explicit ROCm VRAM
+memtype hint (#1536). This tree pins v1.3.2. NIXL `main` + the flag on gfx942
+is the next experiment.
+
+MORI is unaffected: it does its own XGMI/IPC and never asks UCX. That is the
+whole reason MORI_IO gets 46.7 GB/s here and NIXL/UCX gets 0.69.
 
 ### The NIC path: peermem is NOT the only option, but neither works here
 
@@ -135,11 +150,12 @@ shows only `hsa_snoop_up`, because POSIX never touches the GPU.
    highest-value thing outstanding.
 2. **Raise the MORI `ibv_create_qp` failure** with the MORI team — two-line
    repro, independent of NIXL, and it is what blocks MORI on host memory.
-3. **`make dist-bench-2node` has still never run** — the storage partition is
+3. **Test NIXL `main` + the rocm_ipc peer-failure flag on gfx942** — see
+   `patches/ucx/README.md`. It is the one untried combination that might close
+   the intra-node gap, and it would be a useful second data point for
+   ai-dynamo/nixl#2039, which so far only has gfx1100 evidence.
+4. **`make dist-bench-2node` has still never run** — the storage partition is
    a single node, so the cross-node RDMA path remains untested.
-4. Why AIS_MT tops out at 1.7 GB/s is unexplained beyond the peer-memory
-   hypothesis; worth measuring against `fio` on the same drive to separate
-   "the drive is slower than we think" from "the GPU-direct path is bouncing".
 5. Consider whether `mori_backends=auto` should prefer RDMA over XGMI when
    both exist. On a node with both, a benchmark meaning to measure RDMA
    should pass `mori_backends=rdma` explicitly — that makes it required, so

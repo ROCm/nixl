@@ -8,18 +8,18 @@
 # CUDA transport is configured.  NIXL's UCX backend links against this.
 set -euo pipefail
 
-UCX_GIT_URL="${UCX_GIT_URL:-https://github.com/ROCm/ucx.git}"
-UCX_REF="${UCX_REF:-v1.19.x}"
 UCX_PREFIX="${UCX_PREFIX:-/opt/rocnixl-ucx}"
 UCX_SRC="${UCX_SRC:-/tmp/ucx-src}"
 ROCM_PATH="${ROCM_PATH:-/opt/rocm}"
 BUILD_JOBS="${BUILD_JOBS:-$(nproc)}"
 
-git config --global advice.detachedHead false
-
-if [[ ! -d "${UCX_SRC}/.git" ]]; then
-	rm -rf "${UCX_SRC}"
-	git clone --depth 1 --branch "${UCX_REF}" "${UCX_GIT_URL}" "${UCX_SRC}"
+# The checkout is made and patched by clone-src.sh, the same way NIXL and MORI
+# are, so patches/ucx/ works exactly like the other two patchsets.  UCX is
+# patchable because it is the one place a transport-selection fix can go: see
+# patches/ucx/01-rocm-ipc-errhandle-peer-failure.patch.
+if [[ ! -f "${UCX_SRC}/configure.ac" ]]; then
+	echo "ERROR: ${UCX_SRC} is not a UCX checkout (no configure.ac)" >&2
+	exit 1
 fi
 
 cd "${UCX_SRC}"
