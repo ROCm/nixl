@@ -99,8 +99,26 @@ unreleased `main` (no v1.4 tag exists) and carries the explicit ROCm VRAM
 memtype hint (#1536). This tree pins v1.3.2. NIXL `main` + the flag on gfx942
 is the next experiment.
 
-MORI is unaffected: it does its own XGMI/IPC and never asks UCX. That is the
-whole reason MORI_IO gets 46.7 GB/s here and NIXL/UCX gets 0.69.
+### The NIXL-free reproducer
+
+The sharpest form of the problem involves no NIXL. Same node, same
+`UCX_TLS=rocm_ipc,rocm_copy,sm,self,tcp`, same ROCm memory, two UCP APIs:
+
+| `ucx_perftest -m rocm` | lanes | bandwidth |
+|---|---|---|
+| `-t ucp_put_bw` (RMA) | `rma(sysv/posix)` | 362-782 MB/s |
+| `-t tag_bw` (rendezvous) | `tag(... rocm_ipc/rocm_ipc)` | 510,877 MB/s |
+
+`rocm_ipc` is not broken -- on the rendezvous path it moves GPU memory at full
+speed. What is missing is a route from UCP's **RMA API** to it. NIXL's UCX
+backend is RMA-based and inherits that directly.
+
+MORI is unaffected because it never asks UCX: it exports with
+`hipIpcGetMemHandle`, imports with `hipIpcOpenMemHandle` and copies with
+`hipMemcpyAsync` on its own streams. Roughly five HIP calls and no protocol
+negotiation, no lane selection, no AM-lane requirement. That is the whole
+reason MORI_IO gets 46.7 GB/s here and NIXL/UCX gets 0.69 -- not a better copy,
+just a path that reaches the hardware.
 
 ### The NIC path: peermem is NOT the only option, but neither works here
 
