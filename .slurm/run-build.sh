@@ -8,9 +8,18 @@
 # make the result reachable from GPU nodes.
 #
 # Why: the login node is shared and the build is heavy (UCX + NIXL + nixlbench
-# + MORI, ~30 GB of image, all cores for several minutes).  Nothing in the
+# + MORI, ~34 GB of image, all cores for several minutes).  Nothing in the
 # build needs a GPU -- MORI's kernels are JIT-compiled at first use and NIXL is
-# host code -- so a CPUONLY node is the right place for it.
+# host code -- so a CPUONLY node is a reasonable place for it.
+#
+# BUT: if you are going to test on one particular GPU node anyway, build THERE
+# and skip the tarball entirely:
+#
+#   make dist-build-here      # builds on the storage node, NM_SKIP_SAVE=1
+#
+# The save/load round trip is 68 GB of shared-filesystem traffic per iteration
+# and buys nothing when the build node and the test node are the same machine.
+# Use the CPUONLY path when the image has to reach several nodes.
 #
 # Distribution: each node keeps its images in its own local docker storage, so
 # an image built on one node is invisible everywhere else.  /scratch is shared,
@@ -51,6 +60,11 @@
 #   NM_MIN_DISK_GB      refuse to start if the build node has less free space
 #                       than this on the docker filesystem    (default: 120)
 #   NM_BUILD_LOCAL      1 = build on THIS host, no Slurm      (default: unset)
+#   NM_SKIP_SAVE        1 = do not `docker save` a tarball.  Use this when the
+#                       build node IS the node you will test on: the image is
+#                       already in its local docker storage, and a 34 GB save
+#                       to /scratch followed by a 34 GB load back is pure
+#                       overhead.  (default: unset)
 #   MAKE_TARGET         make target to run on the build node  (default: build)
 #   MAKE_ARGS           extra args appended to the make invocation
 #
@@ -63,7 +77,11 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 NM_ROCM_ARCH="${NM_ROCM_ARCH:-gfx942}"
 NM_BUILD_PARTITION="${NM_BUILD_PARTITION:-am}"
-NM_BUILD_CONSTRAINT="${NM_BUILD_CONSTRAINT:-CPUONLY}"
+# ${VAR-default}, NOT ${VAR:-default}: an explicitly empty value must mean
+# "no constraint at all", not "fall back to the default".  With the colon
+# form, asking for an unconstrained node silently re-applied CPUONLY and
+# Slurm rejected the job with BadConstraints.
+NM_BUILD_CONSTRAINT="${NM_BUILD_CONSTRAINT-CPUONLY}"
 NM_BUILD_NODE="${NM_BUILD_NODE:-}"
 NM_BUILD_CPUS="${NM_BUILD_CPUS:-32}"
 NM_BUILD_MEM="${NM_BUILD_MEM:-64G}"
@@ -73,6 +91,7 @@ NM_IMAGE_DIR="${NM_IMAGE_DIR:-/scratch/${USER}/nixl-mori-images}"
 NM_TARGETS="${NM_TARGETS:-}"
 NM_MIN_DISK_GB="${NM_MIN_DISK_GB:-120}"
 NM_BUILD_LOCAL="${NM_BUILD_LOCAL:-}"
+NM_SKIP_SAVE="${NM_SKIP_SAVE:-}"
 MAKE_TARGET="${MAKE_TARGET:-build}"
 MAKE_ARGS="${MAKE_ARGS:-}"
 
@@ -112,23 +131,30 @@ submit() {
 
 	local out="${logdir}/${name}-%j.out"
 	log "submitting ${name} (partition=${NM_BUILD_PARTITION} $*)"
-	local rc=0
-	sbatch --wait \
+	local rc=0 jobid=""
+	# --parsable makes sbatch print just the job id, so we can tail the log this
+	# job actually wrote.  Picking the newest logs/*.out instead looks equivalent
+	# and is not: a concurrent or recently-cancelled job touches its own log
+	# later and gets tailed in place of ours, which reports the wrong build's
+	# outcome -- exactly the sort of thing that wastes an afternoon.
+	jobid="$(sbatch --parsable --wait \
 		--job-name="nm-${name}" \
 		--partition="${NM_BUILD_PARTITION}" \
 		--output="${out}" \
 		--open-mode=append \
 		"$@" \
-		"${script}" || rc=$?
+		"${script}")" || rc=$?
 	rm -f "${script}"
+	jobid="${jobid%%;*}"
 
-	# --wait prints the job id on submission; find the log it actually wrote.
-	local latest
-	latest="$(ls -t "${logdir}/${name}"-*.out 2> /dev/null | head -1 || true)"
-	if [[ -n "${latest}" ]]; then
-		log "----- ${latest} -----"
-		cat "${latest}"
-		log "----- end ${latest} -----"
+	local logfile="${logdir}/${name}-${jobid}.out"
+	if [[ -n "${jobid}" && -f "${logfile}" ]]; then
+		log "----- ${logfile} -----"
+		cat "${logfile}"
+		log "----- end ${logfile} -----"
+	else
+		log "job ${jobid:-<unknown>} wrote no log at ${logfile}"
+		log "state: $(sacct -j "${jobid}" --format=State,Reason%%40 -n 2> /dev/null | head -1)"
 	fi
 	return "${rc}"
 }
@@ -156,6 +182,7 @@ NM_ROCM_ARCH='${NM_ROCM_ARCH}'
 NM_MIN_DISK_GB='${NM_MIN_DISK_GB}'
 MAKE_TARGET='${MAKE_TARGET}'
 MAKE_ARGS='${MAKE_ARGS}'
+SKIP_SAVE='${NM_SKIP_SAVE}'
 PREAMBLE
 		cat << 'BODY'
 
@@ -185,6 +212,12 @@ make "${MAKE_TARGET}" \
 
 # Only the full runtime image is worth shipping; the partial --target builds
 # are for local iteration.
+if [ -n "${SKIP_SAVE}" ]; then
+    echo "NM_SKIP_SAVE set -- image stays in this node's local docker storage"
+    docker image inspect "${IMAGE_REF}" --format 'built: {{.RepoTags}} {{.Id}}'
+    exit 0
+fi
+
 case "${MAKE_TARGET}" in
     build)
         echo "saving ${IMAGE_REF} -> ${TARBALL}"

@@ -29,109 +29,74 @@ Read "Where things stand" first, then "Open items" for what to pick up.
 | Slurm CPU-only build + tarball distribution | done — 34 GB tarball on /scratch |
 | `make dist-bench` (GPU-node benchmark) | written and syntax-clean, **never executed** — see below |
 
-### Both backends run end to end
+### Results on real hardware (storage partition, 1 node, 8x MI300X + CX7)
 
-The goal is met: one harness, one flag apart.
+All numbers from `ctr-smc-mi300x-cx68-25` via the `storage` partition, which
+unlike `defq` is idle and schedulable immediately.
 
-```bash
-make bench BACKEND=UCX     SEG_TYPE=VRAM
-make bench BACKEND=MORI_IO SEG_TYPE=VRAM
-make bench-compare                          # both, back to back
-```
-
-Both exit 0 on both ranks and print nixlbench's full block-size sweep.
-
-**Read the numbers below as a plumbing check, not as a comparison.** They were
-taken on the login node, which has ONE gfx90a and no RDMA NIC. So:
-
-- both ranks share a single GPU — this is loopback, not device-to-device;
-- MORI's RDMA transport cannot initialise at all (no NIC), leaving XGMI/IPC,
-  which on one device is close to a local copy;
-- UCX has no ROCm-capable transport to select here either and is plainly on a
-  degraded path (it flatlines at ~0.5 GB/s regardless of block size, which is
-  not a real UCX number).
-
-Comparing 359 GB/s against 0.5 GB/s would be meaningless. What these runs
-prove is that both paths get through registration, connection, transfer and
-completion without error.
-
-| Block size | UCX (GB/s) | MORI_IO (GB/s) |
+| Path | Backend | Result |
 |---|---|---|
-| 4 KiB | 0.10 | 0.10 |
-| 64 KiB | 0.41 | 1.47 |
-| 1 MiB | 0.51 | 21.6 |
-| 8 MiB | 0.52 | 97.7 |
-| 64 MiB | 0.52 | 359.4 |
+| GPU 0 -> GPU 1, VRAM | MORI_IO | **46.7 GB/s** @ 64 MiB |
+| GPU 0 -> GPU 1, VRAM | NIXL/UCX | 0.6 GB/s — degraded, see below |
+| host DRAM | NIXL/UCX | **46.0 GB/s** @ 16 MiB |
+| host DRAM | MORI_IO | fails — `ibv_create_qp: errno=25` |
+| NVMe, host-staged | NIXL/POSIX (AIO, O_DIRECT) | **7.26 GB/s** @ 1 MiB |
+| NVMe, host-staged | NIXL/POSIX (io_uring) | 7.18 GB/s |
+| NVMe, GPU-direct | NIXL/AIS_MT (VRAM) | 1.1 GB/s (1 thread), 1.7 GB/s (4 threads) |
+| NVMe, GPU-direct | MORI | not available (UMBP/SPDK not built) |
 
-A real comparison needs an MI300X + ConnectX-7 node — see Open items.
+### The one environment fact that explains most of the above
 
-### The GPU queue is the blocker for real numbers
+**The host has no GPU peer-memory support** — `/sys/kernel/mm/memory_peers` is
+absent, no peermem module is loaded. Consequences, all observed:
 
-`make dist-bench` and `make dist-bench-2node` are written and parse, but I was
-**never able to run them**: every GFX942 node on this cluster is booked about
-two weeks out.
+- UCX cannot register ROCm memory with the NIC: `failed to register address
+  ... (rocm) ... Input/output error`, at any size (fails at 256 MiB as readily
+  as at 8 GiB). Host memory registers fine, which is what pins this on GPU
+  peer memory rather than on RDMA generally.
+- With IB unusable for GPU memory, UCX falls back to `rma_am` over
+  `tcp/veth...` and caps around 0.6 GB/s. It never selects `rocm_ipc` even
+  when `UCX_TLS` names it explicitly, and it is not the per-rank GPU masking
+  (tested both ways; `hipDeviceCanAccessPeer(0,1)` returns 1).
+- AIS_MT almost certainly cannot do true NVMe-to-GPU DMA either, which would
+  explain why GPU-direct storage lands at 1.7 GB/s against POSIX's 7.26 —
+  it is probably bouncing through host memory less efficiently than POSIX
+  does explicitly.
 
-```
-$ sbatch --test-only --partition=defq --constraint=GFX942 --gres=gpu:2 --time=00:20:00 --wrap=true
-Job ... to start at 2026-08-24T05:58:36 using 32 processors on nodes ppac-cyxtera-cx62-3
-```
+MORI's GPU path is unaffected because it does not go through the NIC for
+intra-node transfers — it uses XGMI/IPC directly. That is why MORI_IO is the
+only backend here that gets a real GPU-to-GPU number.
 
-So treat those two targets as untested code. Two things I did fix while
-finding this out, which you would otherwise hit immediately:
+### MORI on host memory fails on this node
 
-- `aioss` is not a partition this account can submit to ("invalid partition
-  specified"), despite `sinfo` listing the MI300X+CX7 nodes under it. `defq`
-  reaches the same nodes and works.
-- `-C GFX942&RDMA` is rejected outright with "Invalid feature specification" —
-  an unknown feature is an error, not an empty match. The default is now plain
-  `GFX942`.
+`ibv_create_qp failed: errno=25 (Inappropriate ioctl for device); dev=mlx5_1`,
+with the requested QP well inside the reported device caps. Not container
+capabilities — it fails identically under `--privileged`. UCX drives the same
+NIC in the same container successfully, so the device and the verbs stack work;
+something about MORI's specific QP request does not. Forcing MORI onto XGMI
+only (`MORI_RDMA_DEVICES=__none__`) then fails with "No available backend"
+for DRAM, since XGMI is GPU-memory only. So on this node MORI is GPU-only.
 
-If you already hold an allocation, skip Slurm entirely:
-
-```bash
-make dist-load NM_TARGETS=<node>       # once
-# then on the node:
-docker run --rm --device=/dev/kfd --device=/dev/dri --device=/dev/infiniband \
-    --cap-add=IPC_LOCK --network=host --ipc=host --shm-size=16g \
-    -e BACKEND=MORI_IO -e SEG_TYPE=VRAM \
-    nixl-mori-test:latest run-nixlbench
-```
-
-### One real limitation found: MORI_IO cannot do DRAM here
-
-`make bench BACKEND=MORI_IO SEG_TYPE=DRAM` fails at completion-check time with
-MORI's own error:
-
-```
-No available backend found, please create backend first   (StatusCode 14)
-```
-
-This is not a plugin bug. MORI's `SelectBackend` finds nothing that can carry
-host DRAM to host DRAM on this machine: RDMA (which would handle it) never
-initialised for lack of a NIC, and XGMI is a GPU-memory transport. On a node
-with a NIC the RDMA backend covers DRAM and this should just work — worth
-re-testing there rather than treating it as a code issue.
+Worth raising with the MORI team: it reproduces in two lines and is
+independent of NIXL.
 
 ## Open items (in the order I would do them)
 
-1. **Get onto a GPU node and run `make dist-bench`.** Everything is staged for
-   it — the image tarball is on `/scratch`, `run-bench.sh` handles loading it
-   and running both backends — but the queue meant it never executed, so
-   expect to debug it a little on first run. The 2-node variant
-   (`make dist-bench-2node`) is the one that actually exercises RDMA and is
-   the least tested of all.
-2. **Re-test `SEG_TYPE=DRAM` there.** It fails on this node only because no
-   MORI transport can carry host memory without a NIC; with RDMA up it should
-   work, and if it does not, that is a genuine plugin bug to chase.
-3. **The image is 34 GB**, mostly ROCm base + torch. `make dist-build
-   MAKE_ARGS=INSTALL_TORCH=0` drops torch; nixlbench and `import mori` do not
-   need it, only NIXL's Python `_api` does. Worth doing if the tarball
-   round-trip becomes annoying.
-4. Consider whether `mori_backends=auto` should prefer RDMA over XGMI when
-   both exist (currently it creates both and lets MORI route). On a node with
-   both, a benchmark meaning to measure RDMA should pass
-   `mori_backends=rdma` explicitly — that makes it required, so it fails
-   loudly instead of quietly measuring XGMI.
+1. **Get GPU peer memory working on the node**, or find a node that has it.
+   Until then NIXL has no usable GPU path here and neither UCX-vs-MORI on
+   VRAM nor AIS_MT-vs-POSIX on NVMe is a fair comparison. This is the single
+   highest-value thing outstanding.
+2. **Raise the MORI `ibv_create_qp` failure** with the MORI team — two-line
+   repro, independent of NIXL, and it is what blocks MORI on host memory.
+3. **`make dist-bench-2node` has still never run** — the storage partition is
+   a single node, so the cross-node RDMA path remains untested.
+4. Why AIS_MT tops out at 1.7 GB/s is unexplained beyond the peer-memory
+   hypothesis; worth measuring against `fio` on the same drive to separate
+   "the drive is slower than we think" from "the GPU-direct path is bouncing".
+5. Consider whether `mori_backends=auto` should prefer RDMA over XGMI when
+   both exist. On a node with both, a benchmark meaning to measure RDMA
+   should pass `mori_backends=rdma` explicitly — that makes it required, so
+   it fails loudly instead of quietly measuring XGMI.
 
 ## Environment bugs found and fixed along the way
 
@@ -249,6 +214,17 @@ and MORI's batch API is one level deeper than NIXL's (a vector of descriptor
 *pairs*, each with its own offset/size vector, one `TransferStatus` per pair),
 so consecutive NIXL ranges sharing a registration pair are folded into one
 MORI entry.
+
+## Where to build
+
+`make dist-build-here` builds ON the benchmark node (the storage partition's
+MI300X box, 384 cores) and skips the tarball entirely: ~13 minutes, and the
+image is already where it is needed.
+
+`make dist-build` is the other path — build on a CPUONLY node, `docker save` to
+/scratch, `make dist-load NM_TARGETS=<node>` on each target. Use it only when
+the image has to reach more than one node: the round trip is 68 GB of shared
+filesystem traffic and adds ~35 minutes per iteration.
 
 ## Building off the login node
 

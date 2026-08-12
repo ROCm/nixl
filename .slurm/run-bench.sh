@@ -55,7 +55,11 @@ NM_BENCH_PARTITION="${NM_BENCH_PARTITION:-defq}"
 # GFX942 alone, not GFX942&RDMA: the RDMA feature is not advertised on every
 # partition and an unknown feature is rejected outright ("Invalid feature
 # specification") rather than just matching nothing.
-NM_BENCH_CONSTRAINT="${NM_BENCH_CONSTRAINT:-GFX942}"
+# ${VAR-default}, NOT ${VAR:-default}: an explicitly empty value must mean
+# "no constraint at all", not "fall back to the default".  With the colon
+# form, asking for an unconstrained node silently re-applied GFX942 and
+# Slurm rejected the job with BadConstraints.
+NM_BENCH_CONSTRAINT="${NM_BENCH_CONSTRAINT-GFX942}"
 NM_BENCH_NODELIST="${NM_BENCH_NODELIST:-}"
 NM_BENCH_TIME="${NM_BENCH_TIME:-01:00:00}"
 NM_IMAGE_DIR="${NM_IMAGE_DIR:-/scratch/${USER}/nixl-mori-images}"

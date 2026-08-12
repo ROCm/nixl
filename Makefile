@@ -126,7 +126,7 @@ DIST := $(REPO_ROOT)/.slurm/run-build.sh
 
 .PHONY: help build build-nixl build-mori wheels shell test test-nogpu \
         nixlbench bench bench-nvme bench-compare dist-build dist-load \
-        dist-bench dist-bench-2node \
+        dist-build-here dist-bench dist-bench-2node \
         patch-check patch-list print-tag print-config clean clean-images
 
 .DEFAULT_GOAL := help
@@ -149,6 +149,8 @@ help:
 	@echo "Slurm targets (the build needs no GPU — keep it off the login node):"
 	@echo "  make dist-build      Build on a CPU-only node, save the tarball to"
 	@echo "                       /scratch/\$$USER/nixl-mori-images/ (log -> logs/)"
+	@echo "  make dist-build-here Build ON the benchmark node ($(BENCH_PARTITION)), no tarball —"
+	@echo "                       faster, and skips the 68 GB /scratch round trip"
 	@echo "  make dist-bench      Run nixlbench (UCX + MORI_IO) on a GPU node"
 	@echo "  make dist-bench-2node  Same, initiator and target on two nodes"
 	@echo "  make dist-load NM_TARGETS=<node>[,<node>]"
@@ -305,6 +307,17 @@ _DIST_ARCH := $(if $(filter command line environment,$(origin ROCM_ARCH)),$(ROCM
 
 dist-build:                    # Build on a CPU-only Slurm node, save the tarball
 	$(if $(_DIST_ARCH),NM_ROCM_ARCH="$(_DIST_ARCH)",) \
+		MAKE_ARGS="$(MAKE_ARGS)" $(DIST) build
+
+# Build directly on the GPU node we benchmark on, and skip the tarball.  That
+# node has 384 cores and is where the image is needed, so this is both faster
+# to build and saves a 68 GB round trip through /scratch.  Use dist-build
+# instead when the image has to reach more than one node.
+BENCH_PARTITION ?= storage
+dist-build-here:               # Build on the benchmark node itself, no tarball
+	NM_BUILD_PARTITION="$(BENCH_PARTITION)" NM_BUILD_CONSTRAINT= \
+		NM_BUILD_CPUS=64 NM_SKIP_SAVE=1 \
+		NM_ROCM_ARCH="$(if $(_DIST_ARCH),$(_DIST_ARCH),gfx942)" \
 		MAKE_ARGS="$(MAKE_ARGS)" $(DIST) build
 
 dist-load:                     # docker load the saved tarball onto NM_TARGETS

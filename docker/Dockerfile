@@ -344,7 +344,7 @@ RUN chmod +x /usr/local/bin/nixl-mori-smoke-test /usr/local/bin/run-nixlbench
 RUN set -eu; \
     python3 -c "import mori; print('mori OK', mori.__version__)"; \
     nixlbench --help 2>&1 | grep -q -- "-backend" && echo "nixlbench OK"; \
-    for p in UCX MORI_IO; do \
+    for p in UCX MORI_IO AIS_MT POSIX; do \
         test -e "${NIXL_PLUGIN_DIR}/libplugin_$p.so" || \
             { echo "ERROR: missing NIXL plugin: $p" >&2; exit 1; }; \
         ldd "${NIXL_PLUGIN_DIR}/libplugin_$p.so" | grep "not found" && \
