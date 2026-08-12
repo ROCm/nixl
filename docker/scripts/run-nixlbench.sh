@@ -31,6 +31,13 @@
 #                  for those, ignored otherwise
 #   POSIX_API      AIO, URING or POSIXAIO       (default: AIO)
 #   DIRECT_IO      1 = O_DIRECT, bypass the page cache (default: 1)
+#   HSA_SNOOP      1 = run hsa-snoop alongside the benchmark and print the GPU
+#                  and AIS counters it collected.  Needs --privileged, --pid=host
+#                  and tracefs: CAP_SYS_ADMIN alone is not enough, hsa-snoop
+#                  fails to install its kprobes and then serves an empty
+#                  /metrics, which looks like "no activity" rather than an
+#                  error.  `make bench HSA_SNOOP=1` passes what is required.
+#   HSA_SNOOP_PORT Prometheus port for hsa-snoop   (default: 9488)
 #
 # ROLE lets the two halves run on different NODES: start `ROLE=target` on one
 # and `ROLE=initiator ASIO_ADDR=<target-host>` on the other.  `both` runs the
@@ -57,7 +64,12 @@ _extra=(${EXTRA_ARGS})
 # Storage backends address a file, not a peer's memory.  nixlbench needs
 # --filepath for them and fails with a bare "No such file or directory" if the
 # directory does not exist, so check it here where the message can be useful.
-_STORAGE_BACKENDS=" POSIX GDS GDS_MT HF3FS OBJ GUSLI AZURE_BLOB INFINIA "
+# AIS_MT belongs here: it is hipFile-backed storage, the ROCm counterpart of
+# GDS_MT.  Leaving it out meant --filepath was silently dropped and nixlbench
+# created its test file in the container working directory instead of on the
+# drive under test -- so the run measured the overlay filesystem and looked
+# like a slow NVMe result.
+_STORAGE_BACKENDS=" POSIX GDS GDS_MT AIS_MT HF3FS OBJ GUSLI AZURE_BLOB INFINIA "
 if [[ "${_STORAGE_BACKENDS}" == *" ${BACKEND} "* ]]; then
 	if [[ -z "${FILEPATH:-}" ]]; then
 		echo "ERROR: ${BACKEND} is a storage backend -- set FILEPATH to a writable directory" >&2
@@ -73,7 +85,7 @@ if [[ "${_STORAGE_BACKENDS}" == *" ${BACKEND} "* ]]; then
 	# every later one measures RAM, which is not what an NVMe test is for.
 	_extra+=(--storage_enable_direct "$([[ "${DIRECT_IO:-1}" == "1" ]] && echo true || echo false)")
 	[[ "${BACKEND}" == "POSIX" ]] && _extra+=(--posix_api_type "${POSIX_API:-AIO}")
-	echo "storage backend: filepath=${FILEPATH} direct_io=${DIRECT_IO:-1}" \
+	echo "storage backend ${BACKEND}: filepath=${FILEPATH} direct_io=${DIRECT_IO:-1}" \
 		"${POSIX_API:+api=${POSIX_API}}"
 fi
 
@@ -153,6 +165,50 @@ case "${ROLE}" in
 		exit 2
 		;;
 esac
+
+# --- optional: hsa-snoop alongside the run ----------------------------------
+# nixlbench reports the end-to-end number; hsa-snoop reports what the GPU and
+# the AIS path actually did underneath it.  Started before the ranks so it sees
+# their queues from the first dispatch, and scraped after they exit.
+snoop_pid=""
+HSA_SNOOP_PORT="${HSA_SNOOP_PORT:-9488}"
+if [[ "${HSA_SNOOP:-0}" == "1" ]]; then
+	if ! command -v hsa-snoop > /dev/null 2>&1; then
+		echo "WARNING: HSA_SNOOP=1 but hsa-snoop is not on PATH -- skipping" >&2
+	elif [[ "$(id -u)" != "0" ]]; then
+		echo "WARNING: HSA_SNOOP=1 needs root (tracefs, pagemap, cross-process reads) -- skipping" >&2
+	else
+		hsa-snoop --all --prometheus --prometheus-port "${HSA_SNOOP_PORT}" \
+			> /tmp/hsa-snoop.log 2>&1 &
+		snoop_pid=$!
+		sleep 2
+		if kill -0 "${snoop_pid}" 2> /dev/null; then
+			echo "hsa-snoop running (pid ${snoop_pid}), metrics on :${HSA_SNOOP_PORT}/metrics"
+		else
+			echo "WARNING: hsa-snoop exited immediately; see below" >&2
+			sed 's/^/      /' /tmp/hsa-snoop.log >&2
+			snoop_pid=""
+		fi
+	fi
+fi
+
+report_snoop() {
+	[[ -n "${snoop_pid}" ]] || return 0
+	echo
+	echo "=== hsa-snoop counters ==="
+	# Only the non-zero samples: the exporter publishes a lot of families and a
+	# wall of zeroes hides the few lines that matter.
+	if curl -fsS --max-time 5 "http://127.0.0.1:${HSA_SNOOP_PORT}/metrics" 2> /dev/null |
+		grep -vE '^#' | awk '$NF != 0 && $NF != "0"' | sort | sed 's/^/  /'; then
+		:
+	else
+		echo "  (could not scrape http://127.0.0.1:${HSA_SNOOP_PORT}/metrics)"
+		sed 's/^/  /' /tmp/hsa-snoop.log
+	fi
+	kill "${snoop_pid}" 2> /dev/null || true
+	wait "${snoop_pid}" 2> /dev/null || true
+}
+trap report_snoop EXIT
 
 run_one target "${TARGET_GPU}" &
 target_pid=$!

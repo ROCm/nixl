@@ -166,6 +166,7 @@ help:
 	@echo "  make bench BACKEND=UCX|MORI_IO [SEG_TYPE=VRAM|DRAM]"
 	@echo "                       Two-process nixlbench pair over the ASIO runtime"
 	@echo "  make bench-compare   Same run for UCX then MORI_IO, back to back"
+	@echo "  make bench ... HSA_SNOOP=1   Also collect GPU/AIS counters via hsa-snoop"
 	@echo "  make bench-nvme [NVME_PATH=/mnt/nixl-nvme-0/... POSIX_API=AIO|URING]"
 	@echo "                       NVMe via NIXL's POSIX backend, O_DIRECT"
 	@echo ""
@@ -263,8 +264,18 @@ SEG_TYPE ?= VRAM
 # FILEPATH selects a storage target for the POSIX backend; it is bind-mounted
 # into the container at the same path so the flag nixlbench sees is the flag
 # you typed.
+# HSA_SNOOP=1 runs hsa-snoop alongside the benchmark.  It installs kprobes and
+# reads other processes' memory, which needs --privileged: CAP_SYS_ADMIN plus a
+# tracefs mount is NOT enough (hsa-snoop reports "failed to install kprobe
+# (Permission denied)" and then "failed to start discovery", while still
+# serving an empty /metrics — so it looks like it is working).  Kept out of
+# DOCKER_RUN_FLAGS so ordinary runs are not privileged.
+HSA_SNOOP ?=
+_SNOOP_FLAGS = $(if $(HSA_SNOOP),-e HSA_SNOOP=1 --privileged --pid=host \
+	-v /sys/kernel/tracing:/sys/kernel/tracing $(if $(HSA_SNOOP_PORT),-e HSA_SNOOP_PORT=$(HSA_SNOOP_PORT),),)
+
 bench:
-	docker run $(DOCKER_RUN_FLAGS) \
+	docker run $(DOCKER_RUN_FLAGS) $(_SNOOP_FLAGS) \
 		$(if $(FILEPATH),-v $(FILEPATH):$(FILEPATH) -e FILEPATH=$(FILEPATH),) \
 		$(if $(POSIX_API),-e POSIX_API=$(POSIX_API),) \
 		$(if $(DIRECT_IO),-e DIRECT_IO=$(DIRECT_IO),) \

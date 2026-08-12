@@ -43,6 +43,7 @@
 #   NM_BENCH_EXTRA     extra nixlbench flags, both ranks
 #   NM_ASIO_PORT       rendezvous port for the 2-node case (default: 18515)
 #   NM_FORCE_LOAD      1 = docker load even if the node looks up to date
+#   NM_HSA_SNOOP       1 = also run hsa-snoop and report GPU/AIS counters
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -107,6 +108,7 @@ SEG_TYPE='${NM_SEG_TYPE}'
 NODES='${NM_BENCH_NODES}'
 ASIO_PORT='${NM_ASIO_PORT}'
 BENCH_EXTRA='${NM_BENCH_EXTRA}'
+SNOOP_FLAGS='${NM_HSA_SNOOP:+-e HSA_SNOOP=1 --privileged --pid=host -v /sys/kernel/tracing:/sys/kernel/tracing}'
 DOCKER_FLAGS='${DOCKER_FLAGS}'
 FORCE_LOAD='${NM_FORCE_LOAD:-0}'
 PREAMBLE
@@ -162,7 +164,7 @@ for backend in ${BACKENDS}; do
         # backend cannot initialise, so a single-node run silently measures
         # whatever slow fallback is left.
         # shellcheck disable=SC2086
-        docker run ${DOCKER_FLAGS} \
+        docker run ${DOCKER_FLAGS} ${SNOOP_FLAGS} \
             $([ -d /dev/infiniband ] && echo --device=/dev/infiniband) \
             -e BACKEND="${backend}" -e SEG_TYPE="${SEG_TYPE}" \
             -e EXTRA_ARGS="${BENCH_EXTRA}" \

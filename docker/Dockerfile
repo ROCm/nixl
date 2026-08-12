@@ -19,6 +19,7 @@
 #
 #   base -> ucx ------------> nixl ----\
 #     \---> mori --(SDK)-------^        >-> runtime
+#     \---> hsasnoop -------------------/
 #            \-------------------------/
 #            \------> wheels (scratch; wheel export only)
 #
@@ -260,6 +261,25 @@ RUN --mount=type=cache,target=/root/.cache,sharing=locked \
     NIXL_SRC=/tmp/nixl \
     bash /tmp/scripts/build-nixlbench.sh
 
+# ----- 3b. hsa-snoop (HSA queue/dispatch snooper + Prometheus exporter) ------
+# Observability for the AIS path: nixlbench tells you the end-to-end number,
+# hsa-snoop tells you what AIS actually did underneath it (rx/tx ops, bytes,
+# errors), plus SDMA/dispatch activity and XNACK page faults.  FROM base, so it
+# builds alongside the UCX/NIXL chain rather than after it.
+FROM base AS hsasnoop
+
+ARG HSA_SNOOP_GIT_URL=https://github.com/sbates130272/hsa-snoop.git
+# Deliberately a branch, not a tag: this is being tracked upstream right now.
+# Pin it to a tag (v1.0.0, or `latest`) once the metrics you rely on settle --
+# a moving ref means two builds of the "same" image can differ.
+ARG HSA_SNOOP_REF=main
+
+COPY docker/scripts/build-hsa-snoop.sh /tmp/scripts/
+RUN --mount=type=cache,target=/root/.cache,sharing=locked \
+    HSA_SNOOP_GIT_URL="${HSA_SNOOP_GIT_URL}" HSA_SNOOP_REF="${HSA_SNOOP_REF}" \
+    bash /tmp/scripts/build-hsa-snoop.sh && \
+    rm -rf /tmp/hsa-snoop
+
 # ----- 4. Runtime (both stacks in one image) ---------------------------------
 FROM base AS runtime
 
@@ -292,6 +312,7 @@ COPY --from=ucx  /opt/rocnixl-ucx /opt/rocnixl-ucx
 COPY --from=mori /opt/mori        /opt/mori
 COPY --from=nixl /opt/nixl        /opt/nixl
 COPY --from=nixl /opt/nixlbench   /opt/nixlbench
+COPY --from=hsasnoop /opt/hsa-snoop /opt/hsa-snoop
 COPY --from=mori /wheels          /wheels
 
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
@@ -315,7 +336,7 @@ ENV NIXL_PREFIX=/opt/nixl \
     UCX_PREFIX=/opt/rocnixl-ucx \
     NIXL_PLUGIN_DIR=/opt/nixl/lib/x86_64-linux-gnu/plugins \
     PYTHONPATH=/opt/nixl/lib/python3/dist-packages \
-    PATH=/opt/nixlbench/bin:/opt/rocnixl-ucx/bin:${PATH}
+    PATH=/opt/nixlbench/bin:/opt/hsa-snoop/bin:/opt/rocnixl-ucx/bin:${PATH}
 
 # /opt/mori/lib holds the same libmori_*.so the amd_mori wheel bundles under its
 # package dir.  Both are on the search path, which is fine as long as one
@@ -344,6 +365,7 @@ RUN chmod +x /usr/local/bin/nixl-mori-smoke-test /usr/local/bin/run-nixlbench
 RUN set -eu; \
     python3 -c "import mori; print('mori OK', mori.__version__)"; \
     nixlbench --help 2>&1 | grep -q -- "-backend" && echo "nixlbench OK"; \
+    hsa-snoop --help 2>&1 | grep -q -- "--prometheus" && echo "hsa-snoop OK"; \
     for p in UCX MORI_IO AIS_MT POSIX; do \
         test -e "${NIXL_PLUGIN_DIR}/libplugin_$p.so" || \
             { echo "ERROR: missing NIXL plugin: $p" >&2; exit 1; }; \

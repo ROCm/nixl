@@ -24,61 +24,108 @@ Read "Where things stand" first, then "Open items" for what to pick up.
 | nixlbench built for ROCm (`-Duse_rocm=true`) | done |
 | **nixlbench driving NIXL/UCX** | **done — full result table, exit 0** |
 | NIXL `MORI_IO` backend plugin (new, in `patches/nixl/`) | done — builds, loads, transfers |
-| nixlbench accepting `--backend MORI_IO` | done (patch 03) |
+| nixlbench accepting `--backend MORI_IO` / `AIS_MT` | done (patch 04) |
+| NIXL AIS_MT (GPU-direct NVMe, hipFile) | done — saturates the drive |
+| hsa-snoop in the image (AIS + GPU counters) | done — needs `--privileged` |
 | **nixlbench driving MORI end to end** | **done — full result table, exit 0** |
 | Slurm CPU-only build + tarball distribution | done — 34 GB tarball on /scratch |
-| `make dist-bench` (GPU-node benchmark) | written and syntax-clean, **never executed** — see below |
+| `make dist-build-here` (build on the bench node) | done — ~13 min, no tarball |
+| `make dist-bench` (GPU-node benchmark) | done on the storage partition |
+| `make dist-bench-2node` | **never executed** — storage partition is one node |
 
 ### Results on real hardware (storage partition, 1 node, 8x MI300X + CX7)
 
-All numbers from `ctr-smc-mi300x-cx68-25` via the `storage` partition, which
-unlike `defq` is idle and schedulable immediately.
+All from `ctr-smc-mi300x-cx68-25` via the `storage` partition, which unlike
+`defq` is idle and schedulable immediately. Build there too — see "Where to
+build".
 
 | Path | Backend | Result |
 |---|---|---|
 | GPU 0 -> GPU 1, VRAM | MORI_IO | **46.7 GB/s** @ 64 MiB |
-| GPU 0 -> GPU 1, VRAM | NIXL/UCX | 0.6 GB/s — degraded, see below |
+| GPU 0 -> GPU 1, VRAM | NIXL/UCX | 0.69 GB/s — see "UCX has no RMA over rocm_ipc" |
 | host DRAM | NIXL/UCX | **46.0 GB/s** @ 16 MiB |
 | host DRAM | MORI_IO | fails — `ibv_create_qp: errno=25` |
-| NVMe, host-staged | NIXL/POSIX (AIO, O_DIRECT) | **7.26 GB/s** @ 1 MiB |
-| NVMe, host-staged | NIXL/POSIX (io_uring) | 7.18 GB/s |
-| NVMe, GPU-direct | NIXL/AIS_MT (VRAM) | 1.1 GB/s (1 thread), 1.7 GB/s (4 threads) |
+| NVMe, host-staged | NIXL/POSIX (AIO, O_DIRECT) | **7.26 GB/s**, 212 us submit |
+| NVMe, GPU-direct | NIXL/AIS_MT (VRAM) | **7.14 GB/s**, **4.8 us submit** |
 | NVMe, GPU-direct | MORI | not available (UMBP/SPDK not built) |
 
-### The one environment fact that explains most of the above
+AIS_MT and POSIX both saturate the drive; the difference is submit cost --
+4.8 us against 212 us at 16 MiB, ~44x less CPU-side work for the same
+bandwidth, which is the point of the GPU-direct path.
 
-**The host has no GPU peer-memory support** — `/sys/kernel/mm/memory_peers` is
-absent, no peermem module is loaded. Consequences, all observed:
+> An earlier version of this file reported AIS_MT at 1.1-1.7 GB/s. That was
+> wrong: `run-nixlbench.sh` did not have AIS_MT in its storage-backend list, so
+> `--filepath` was dropped and nixlbench wrote its test file to the container
+> working directory instead of the NVMe mount. Watch for the
+> `storage backend <NAME>: filepath=...` line, which now prints for every
+> storage run precisely so this is visible.
 
-- UCX cannot register ROCm memory with the NIC: `failed to register address
-  ... (rocm) ... Input/output error`, at any size (fails at 256 MiB as readily
-  as at 8 GiB). Host memory registers fine, which is what pins this on GPU
-  peer memory rather than on RDMA generally.
-- With IB unusable for GPU memory, UCX falls back to `rma_am` over
-  `tcp/veth...` and caps around 0.6 GB/s. It never selects `rocm_ipc` even
-  when `UCX_TLS` names it explicitly, and it is not the per-rank GPU masking
-  (tested both ways; `hipDeviceCanAccessPeer(0,1)` returns 1).
-- AIS_MT almost certainly cannot do true NVMe-to-GPU DMA either, which would
-  explain why GPU-direct storage lands at 1.7 GB/s against POSIX's 7.26 —
-  it is probably bouncing through host memory less efficiently than POSIX
-  does explicitly.
+### UCX has no RMA over rocm_ipc — this is why NIXL loses intra-node
 
-MORI's GPU path is unaffected because it does not go through the NIC for
-intra-node transfers — it uses XGMI/IPC directly. That is why MORI_IO is the
-only backend here that gets a real GPU-to-GPU number.
+Intra-node GPU-to-GPU needs no NIC: `rocm_ipc` uses HIP IPC handles. peermem
+and dmabuf are about the NIC path and are irrelevant here. The actual cause is
+narrower and shows up in bare `ucx_perftest`, with no NIXL involved and
+`rocm_ipc` explicitly in `UCX_TLS`:
 
-### MORI on host memory fails on this node
+```
+perftest intra-node cfg#1  tag(sysv/memory cma/memory rocm_ipc/rocm_ipc)  rma(sysv/memory posix/memory)
+```
 
-`ibv_create_qp failed: errno=25 (Inappropriate ioctl for device); dev=mlx5_1`,
-with the requested QP well inside the reported device caps. Not container
-capabilities — it fails identically under `--privileged`. UCX drives the same
-NIC in the same container successfully, so the device and the verbs stack work;
-something about MORI's specific QP request does not. Forcing MORI onto XGMI
-only (`MORI_RDMA_DEVICES=__none__`) then fails with "No available backend"
-for DRAM, since XGMI is GPU-memory only. So on this node MORI is GPU-only.
+UCX offers `rocm_ipc` on the **tag** (rendezvous) lane but never on the **rma**
+lane. On the tag path it reaches ~511 GB/s GPU-to-GPU. NIXL's UCX backend is
+RMA-based, so it can never select it and ends up staging GPU -> host shared
+memory -> GPU at ~0.69 GB/s. `rocm_ipc` does advertise `put_zcopy`/`get_zcopy`,
+so this is UCX's protocol selection, not a missing capability.
 
-Worth raising with the MORI team: it reproduces in two lines and is
-independent of NIXL.
+A second, independent filter sits in front of that one: NIXL's UCX backend
+defaults to `UCP_ERR_HANDLING_MODE_PEER`, and UCX drops every transport that
+cannot do peer error handling -- which includes `rocm_ipc` ("error handling:
+none") and the shared-memory transports. Patch 04 adds
+`--ucx_error_handling_mode` to nixlbench so this is testable; setting it to
+`none` visibly brings `sysv/posix` back into the RMA lane. It does not bring
+back `rocm_ipc`, because of the lane problem above.
+
+MORI is unaffected: it does its own XGMI/IPC and never asks UCX.
+
+### The NIC path: peermem is NOT the only option, but neither works here
+
+Worth recording since it came up. For GPU memory over the NIC there are two
+mechanisms: the legacy peer-memory API, and DMA-BUF, which is the modern
+in-kernel one and needs no peermem. On this node:
+
+- UCX is built for both (`HAVE_DECL_IBV_REG_DMABUF_MR`,
+  `HAVE_HSA_AMD_PORTABLE_EXPORT_DMABUF`) and the mlx5 domain advertises
+  `register: unlimited, dmabuf`.
+- The legacy path fails: no peermem module, so `ibv_reg_mr(...)` returns
+  `Invalid argument` for ROCm memory (any size; 256 MiB fails as readily as
+  8 GiB). Host memory registers fine.
+- The dmabuf path fails too: `UCX_ROCM_COPY_DMABUF=y` gives
+  `rocm_copy_md.c ERROR ROCm dmabuf support requested but not found` -- the
+  ROCm stack does not offer the export. The host amdgpu driver is **7.1.3**
+  while the container ships ROCm **7.14.0** userspace, which is the obvious
+  suspect.
+
+This matters for cross-node RDMA to GPU memory. It does not explain the
+intra-node result above.
+
+### hsa-snoop
+
+Built into the image (`/opt/hsa-snoop/bin/hsa-snoop`, on PATH) with the
+Prometheus exporter, so a run can report what the GPU and the AIS path did,
+not just the end-to-end number:
+
+```bash
+make bench BACKEND=AIS_MT SEG_TYPE=VRAM FILEPATH=/mnt/nixl-nvme-0/x HSA_SNOOP=1
+```
+
+It needs `--privileged` and `--pid=host` -- CAP_SYS_ADMIN plus a tracefs mount
+is not enough, and the failure is quiet: it reports "failed to install kprobe"
+and then serves an empty `/metrics`, which reads as "no activity" rather than
+as an error. The make target passes the right flags.
+
+It also cross-checks the backends: during the AIS_MT run it shows active
+queues, barrier packets and kernel durations per GPU; during the POSIX run it
+shows only `hsa_snoop_up`, because POSIX never touches the GPU.
 
 ## Open items (in the order I would do them)
 

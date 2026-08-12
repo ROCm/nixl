@@ -22,7 +22,7 @@
 # Depends on 01 (which adds the AIS_MT plugin) and 02 (the MORI_IO plugin).
 #
 diff --git a/benchmark/nixlbench/src/utils/utils.cpp b/benchmark/nixlbench/src/utils/utils.cpp
-index 0801ae9..280a51d 100644
+index 0801ae9..b9b0323 100644
 --- a/benchmark/nixlbench/src/utils/utils.cpp
 +++ b/benchmark/nixlbench/src/utils/utils.cpp
 @@ -63,7 +63,7 @@ NB_ARG_STRING(worker_type, XFERBENCH_WORKER_NIXL, "Type of worker [nixl, nvshmem
@@ -34,7 +34,36 @@ index 0801ae9..280a51d 100644
  NB_ARG_STRING(initiator_seg_type,
                XFERBENCH_SEG_TYPE_DRAM,
                "Type of memory segment for initiator [DRAM, VRAM]. Note: Storage backends always "
-@@ -807,6 +807,7 @@ bool
+@@ -124,6 +124,12 @@ NB_ARG_INT32(gds_mt_num_threads, 1, "Number of threads used by GDS MT plugin");
+ NB_ARG_STRING(device_list,
+               "all",
+               "Comma-separated device name to use for communication (only used with nixl worker)");
++NB_ARG_STRING(ucx_error_handling_mode,
++              "",
++              "UCX endpoint error handling mode [none, peer] (UCX backend only). "
++              "Empty keeps NIXL's default of peer; note that peer excludes rocm_ipc, "
++              "which reports no error-handling support, so intra-node GPU transfers "
++              "fall back to a far slower transport.");
+ NB_ARG_STRING(etcd_endpoints,
+               "",
+               "ETCD server endpoints for communication (optional for storage backends)");
+@@ -266,6 +272,7 @@ bool xferBenchConfig::enable_vmm = false;
+ bool xferBenchConfig::use_hugepages = false;
+ std::string xferBenchConfig::device_list = "";
+ std::string xferBenchConfig::etcd_endpoints = "";
++std::string xferBenchConfig::ucx_error_handling_mode = "";
+ std::string xferBenchConfig::asio_address = "127.0.0.1";
+ std::uint16_t xferBenchConfig::asio_port = 12345;
+ std::string xferBenchConfig::benchmark_group = "default";
+@@ -501,6 +508,7 @@ xferBenchConfig::loadParams(void) {
+     warmup_iter = NB_ARG(warmup_iter);
+     num_threads = NB_ARG(num_threads);
+     etcd_endpoints = NB_ARG(etcd_endpoints);
++    ucx_error_handling_mode = NB_ARG(ucx_error_handling_mode);
+     asio_address = NB_ARG(asio_address);
+     asio_port = NB_ARG(asio_port);
+     filepath = NB_ARG(filepath);
+@@ -807,6 +815,7 @@ bool
  xferBenchConfig::isStorageBackend() {
      return (XFERBENCH_BACKEND_GDS == xferBenchConfig::backend ||
              XFERBENCH_BACKEND_GDS_MT == xferBenchConfig::backend ||
@@ -43,7 +72,7 @@ index 0801ae9..280a51d 100644
              XFERBENCH_BACKEND_POSIX == xferBenchConfig::backend ||
              XFERBENCH_BACKEND_OBJ == xferBenchConfig::backend ||
 diff --git a/benchmark/nixlbench/src/utils/utils.h b/benchmark/nixlbench/src/utils/utils.h
-index 6d72568..9b6ef3f 100644
+index 6d72568..bb0a2ce 100644
 --- a/benchmark/nixlbench/src/utils/utils.h
 +++ b/benchmark/nixlbench/src/utils/utils.h
 @@ -112,6 +112,8 @@
@@ -55,8 +84,16 @@ index 6d72568..9b6ef3f 100644
  
  // POSIX API types
  #define XFERBENCH_POSIX_API_AIO "AIO"
+@@ -189,6 +191,7 @@ public:
+     static size_t progress_threads;
+     static std::string device_list;
+     static std::string etcd_endpoints;
++    static std::string ucx_error_handling_mode;
+     static std::string asio_address; // IPv4
+     static uint16_t asio_port;
+     static std::string benchmark_group;
 diff --git a/benchmark/nixlbench/src/worker/nixl/nixl_worker.cpp b/benchmark/nixlbench/src/worker/nixl/nixl_worker.cpp
-index 4a6607b..dbe8a3a 100644
+index 4a6607b..e4b226a 100644
 --- a/benchmark/nixlbench/src/worker/nixl/nixl_worker.cpp
 +++ b/benchmark/nixlbench/src/worker/nixl/nixl_worker.cpp
 @@ -138,6 +138,7 @@ xferBenchNixlWorker::xferBenchNixlWorker(const std::vector<std::string> &devices
@@ -67,7 +104,7 @@ index 4a6607b..dbe8a3a 100644
          xferBenchConfig::isStorageBackend()) {
          backend_name = xferBenchConfig::backend;
      } else {
-@@ -147,7 +148,16 @@ xferBenchNixlWorker::xferBenchNixlWorker(const std::vector<std::string> &devices
+@@ -147,8 +148,26 @@ xferBenchNixlWorker::xferBenchNixlWorker(const std::vector<std::string> &devices
  
      agent->getPluginParams(backend_name, mems, backend_params);
  
@@ -83,5 +120,15 @@ index 4a6607b..dbe8a3a 100644
 +        backend_params["thread_count"] = std::to_string(xferBenchConfig::progress_threads);
 +    } else if (0 == xferBenchConfig::backend.compare(XFERBENCH_BACKEND_UCX)) {
          backend_params["num_threads"] = std::to_string(xferBenchConfig::progress_threads);
++        // NIXL's UCX backend defaults to UCP_ERR_HANDLING_MODE_PEER, and UCX
++        // drops every transport that cannot do peer error handling.  rocm_ipc
++        // reports "error handling: none", so on ROCm that silently disqualifies
++        // the one transport that can move GPU memory between processes on a
++        // node -- intra-node VRAM transfers then fall back to rma_am over tcp,
++        // ~0.6 GB/s against ~500 GB/s for rocm_ipc.  Let the benchmark choose.
++        if (!xferBenchConfig::ucx_error_handling_mode.empty()) {
++            backend_params["ucx_error_handling_mode"] = xferBenchConfig::ucx_error_handling_mode;
++        }
  
          // No need to set device_list if all is specified
+         // fallback to backend preference
