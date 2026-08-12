@@ -1,0 +1,76 @@
+# Teach nixlbench about the MORI_IO backend.
+#
+# nixlbench's --backend is NOT a free-form string: nixl_worker.cpp gates it on
+# a hardcoded list of known names and exits with "Unsupported NIXLBench
+# backend" for anything else, even when the NIXL plugin exists and the agent
+# can see it.  So shipping the MORI_IO plugin (01-nixl-mori-io-backend.patch)
+# is necessary but not sufficient -- nixlbench has to accept the name too.
+#
+# This patch:
+#   utils.h                     + XFERBENCH_BACKEND_MORI_IO
+#   utils.cpp                   + MORI_IO in the --backend help text
+#   worker/nixl/nixl_worker.cpp + MORI_IO in the accepted-backend list, and
+#                                 maps --progress_threads onto the plugin's
+#                                 mori_worker_threads init param
+#
+# After this, the two transports are one flag apart:
+#     nixlbench --backend UCX     ...
+#     nixlbench --backend MORI_IO ...
+# with identical buffer setup, warmup and timing -- which is the entire point
+# of driving MORI through nixlbench rather than through a separate harness.
+#
+# Depends on 01-nixl-mori-io-backend.patch (the plugin this selects).
+#
+diff --git a/benchmark/nixlbench/src/utils/utils.cpp b/benchmark/nixlbench/src/utils/utils.cpp
+index 0801ae9..ef03347 100644
+--- a/benchmark/nixlbench/src/utils/utils.cpp
++++ b/benchmark/nixlbench/src/utils/utils.cpp
+@@ -63,7 +63,7 @@ NB_ARG_STRING(worker_type, XFERBENCH_WORKER_NIXL, "Type of worker [nixl, nvshmem
+ NB_ARG_STRING(backend,
+               XFERBENCH_BACKEND_UCX,
+               "Name of NIXL backend [UCX, GDS, GDS_MT, POSIX, GPUNETIO, Mooncake, HF3FS, OBJ, "
+-              "GUSLI, AZURE_BLOB] (only used with nixl worker)");
++              "GUSLI, AZURE_BLOB, MORI_IO] (only used with nixl worker)");
+ NB_ARG_STRING(initiator_seg_type,
+               XFERBENCH_SEG_TYPE_DRAM,
+               "Type of memory segment for initiator [DRAM, VRAM]. Note: Storage backends always "
+diff --git a/benchmark/nixlbench/src/utils/utils.h b/benchmark/nixlbench/src/utils/utils.h
+index 6d72568..46d872f 100644
+--- a/benchmark/nixlbench/src/utils/utils.h
++++ b/benchmark/nixlbench/src/utils/utils.h
+@@ -112,6 +112,7 @@
+ #define XFERBENCH_BACKEND_UCCL "UCCL"
+ #define XFERBENCH_BACKEND_AZURE_BLOB "AZURE_BLOB"
+ #define XFERBENCH_BACKEND_INFINIA "INFINIA"
++#define XFERBENCH_BACKEND_MORI_IO "MORI_IO"
+ 
+ // POSIX API types
+ #define XFERBENCH_POSIX_API_AIO "AIO"
+diff --git a/benchmark/nixlbench/src/worker/nixl/nixl_worker.cpp b/benchmark/nixlbench/src/worker/nixl/nixl_worker.cpp
+index 4a6607b..7e7957c 100644
+--- a/benchmark/nixlbench/src/worker/nixl/nixl_worker.cpp
++++ b/benchmark/nixlbench/src/worker/nixl/nixl_worker.cpp
+@@ -138,6 +138,7 @@ xferBenchNixlWorker::xferBenchNixlWorker(const std::vector<std::string> &devices
+         0 == xferBenchConfig::backend.compare(XFERBENCH_BACKEND_GPUNETIO) ||
+         0 == xferBenchConfig::backend.compare(XFERBENCH_BACKEND_MOONCAKE) ||
+         0 == xferBenchConfig::backend.compare(XFERBENCH_BACKEND_UCCL) ||
++        0 == xferBenchConfig::backend.compare(XFERBENCH_BACKEND_MORI_IO) ||
+         xferBenchConfig::isStorageBackend()) {
+         backend_name = xferBenchConfig::backend;
+     } else {
+@@ -147,7 +148,14 @@ xferBenchNixlWorker::xferBenchNixlWorker(const std::vector<std::string> &devices
+ 
+     agent->getPluginParams(backend_name, mems, backend_params);
+ 
+-    if (0 == xferBenchConfig::backend.compare(XFERBENCH_BACKEND_UCX)) {
++    if (0 == xferBenchConfig::backend.compare(XFERBENCH_BACKEND_MORI_IO)) {
++        // MORI-IO runs its own worker threads; reuse nixlbench's
++        // --progress_threads for them so the two backends are configured
++        // comparably from one flag.  Everything else (host/port, transport
++        // selection) keeps the plugin's defaults -- see the MORI_IO plugin's
++        // init params.
++        backend_params["mori_worker_threads"] = std::to_string(xferBenchConfig::progress_threads);
++    } else if (0 == xferBenchConfig::backend.compare(XFERBENCH_BACKEND_UCX)) {
+         backend_params["num_threads"] = std::to_string(xferBenchConfig::progress_threads);
+ 
+         // No need to set device_list if all is specified

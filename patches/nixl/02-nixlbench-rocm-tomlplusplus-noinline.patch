@@ -1,0 +1,49 @@
+# Fix the nixlbench ROCm build against toml++ 3.4.0.
+#
+# nixlbench built with -Duse_rocm=true pulls ROCm's host_defines.h into the
+# same translation unit as <toml++/toml.hpp>.  ROCm defines __noinline__ as an
+# object-like macro; toml++'s preprocessor.hpp has
+#
+#     #if TOML_GCC || TOML_CLANG || TOML_HAS_ATTR(__noinline__)
+#
+# and the preprocessor expands the entire #if expression before evaluating it,
+# so the short-circuit on TOML_GCC never saves us -- the build fails with
+#
+#     error: macro "__has_attribute" requires an identifier
+#
+# Fix: push/undef/pop __noinline__ around the toml++ include in utils.h.  Scoped
+# to that one include, and a no-op on the CUDA/CPU paths where __noinline__ is
+# not a macro.
+#
+# Upstream-worthy as-is; drop this patch once nixlbench (or toml++) handles it.
+#
+# To regenerate on a NIXL bump: apply, and if it conflicts just re-add the
+# push_macro/undef/pop_macro trio around the <toml++/toml.hpp> include in
+# benchmark/nixlbench/src/utils/utils.h.
+#
+diff --git a/benchmark/nixlbench/src/utils/utils.h b/benchmark/nixlbench/src/utils/utils.h
+index 425b923..6d72568 100644
+--- a/benchmark/nixlbench/src/utils/utils.h
++++ b/benchmark/nixlbench/src/utils/utils.h
+@@ -27,7 +27,21 @@
+ #include <variant>
+ #include <vector>
+ #include <optional>
++// toml++ 3.4.0's preprocessor.hpp evaluates
++//     #if TOML_GCC || TOML_CLANG || TOML_HAS_ATTR(__noinline__)
++// and the preprocessor macro-expands the WHOLE #if expression before it can
++// short-circuit on TOML_GCC.  ROCm's <hip/amd_detail/host_defines.h> defines
++// __noinline__ as an object-like macro, so by the time toml++ is included on
++// the ROCm path the argument expands to __attribute__((noinline)) and the
++// build dies with "macro __has_attribute requires an identifier".
++//
++// Hide the macro across the toml++ include only, and put it back afterwards,
++// so nothing else in the translation unit changes.  Harmless on CUDA/CPU
++// builds, where __noinline__ is not defined and the push/pop is a no-op.
++#pragma push_macro("__noinline__")
++#undef __noinline__
+ #include <toml++/toml.hpp>
++#pragma pop_macro("__noinline__")
+ #include <utils/common/nixl_time.h>
+ #include "runtime/runtime.h"
+ 

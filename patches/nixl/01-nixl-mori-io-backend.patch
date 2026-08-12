@@ -1,0 +1,1277 @@
+# NIXL MORI-IO backend plugin (MORI_IO) for upstream ai-dynamo/nixl.
+#
+# Adds src/plugins/mori_io/, a NIXL backend engine implemented on top of
+# MORI-IO (ROCm/mori), so any NIXL consumer -- nixlbench in particular -- can
+# drive MORI's point-to-point transport by name:
+#
+#     nixlbench --backend MORI_IO ...
+#
+# This plugin is what makes MORI reachable from NIXL at all.  nixlbench needs
+# one more, small change on top of it -- its --backend flag is gated on a
+# hardcoded list of names, so it rejects MORI_IO even when the agent can see
+# the plugin; that is 03-nixlbench-mori-io-backend.patch.  Together they mean
+# one benchmark, one set of buffer setup/warmup/timing rules, and switching
+# transport is one flag.
+#
+# Scope:
+#   meson_options.txt     + mori_path (empty = plugin not built)
+#   meson.build           + MORI_IO in all_plugins, + mori_dep detection
+#   src/plugins/meson.build + subdir('mori_io') when mori_dep is found
+#   src/plugins/mori_io/  the backend itself (new tree)
+#
+# The plugin is entirely opt-in: with no -Dmori_path the MORI dependency is a
+# disabler, the subdir is skipped, and a stock CUDA build is byte-identical to
+# unpatched upstream.
+#
+# Concept mapping is documented at the top of mori_io_backend.h.
+#
+# To regenerate on a NIXL bump: clone the new tag, `git apply` this patch, and
+# if the three wiring hunks conflict, re-apply them by hand (they are small and
+# additive) and re-export with:
+#   git diff --cached --no-renames -- meson.build meson_options.txt \
+#     src/plugins/meson.build src/plugins/mori_io
+#
+diff --git a/meson.build b/meson.build
+index 0b9c7d0..4d092ca 100644
+--- a/meson.build
++++ b/meson.build
+@@ -29,7 +29,7 @@ if enable_plugins_opt != '' and disable_plugins_opt != ''
+     error('Cannot specify both enable_plugins and disable_plugins options')
+ endif
+ 
+-all_plugins = ['UCX', 'LIBFABRIC', 'POSIX', 'OBJ', 'GDS', 'GDS_MT', 'MOONCAKE', 'HF3FS', 'GUSLI', 'GPUNETIO', 'UCCL', 'AZURE_BLOB', 'INFINIA']
++all_plugins = ['UCX', 'LIBFABRIC', 'POSIX', 'OBJ', 'GDS', 'GDS_MT', 'MOONCAKE', 'HF3FS', 'GUSLI', 'GPUNETIO', 'UCCL', 'AZURE_BLOB', 'INFINIA', 'MORI_IO']
+ 
+ enabled_plugins = {}
+ 
+@@ -285,6 +285,65 @@ else
+     cuda_wheel_dir = 'nixl_cu12'
+ endif
+ 
++# --- MORI (ROCm/mori) C++ SDK, for the MORI_IO backend plugin ---------------
++# Opt-in and path-driven: -Dmori_path=<prefix> pointing at a `cmake --install`
++# of ROCm/mori (include/mori/... plus lib/libmori_io.so).  Left empty -- the
++# default -- mori_dep is a disabler and src/plugins/meson.build skips the
++# plugin entirely, so an unpatched CUDA build is completely unaffected.
++mori_dep = disabler()
++mori_path = get_option('mori_path')
++if mori_path != ''
++    mori_inc = mori_path + '/include'
++    mori_lib = mori_path + '/lib'
++    # MORI's public headers include <hip/hip_runtime_api.h> directly, so a
++    # consumer needs the ROCm include/lib on its own command line.  Upstream
++    # NIXL has no HIP detection at all (meson.build only looks for CUDA), so
++    # resolve it here from ROCM_PATH, the same variable the ROCm toolchain and
++    # MORI itself use.
++    rocm_home = run_command('bash', '-c', 'echo ${ROCM_PATH:-/opt/rocm}',
++                            check: true).stdout().strip()
++    if not fs.exists(rocm_home / 'include' / 'hip' / 'hip_runtime_api.h')
++        error('mori_path is set but no ROCm HIP headers under ' + rocm_home +
++              '; set ROCM_PATH to the ROCm install root.')
++    endif
++    if not fs.exists(mori_inc / 'mori' / 'io' / 'engine.hpp')
++        error('mori_path=' + mori_path + ' has no include/mori/io/engine.hpp; ' +
++              'point it at a `cmake --install` of ROCm/mori.')
++    endif
++    mori_io_lib = cpp.find_library('mori_io', dirs: [mori_lib], required: true)
++    mori_app_lib = cpp.find_library('mori_application', dirs: [mori_lib], required: true)
++    # MORI builds spdlog as a COMPILED static lib with hidden visibility (see
++    # the comment in ROCm/mori's CMakeLists: two copies of spdlog exporting the
++    # same symbols corrupt the heap).  mori/utils/mori_log.hpp is pulled in by
++    # every mori/io header, so a consumer must compile in the same mode
++    # (SPDLOG_COMPILED_LIB) and link MORI's own libspdlog.a -- header-only mode
++    # here would silently instantiate a second, incompatible logger.
++    mori_spdlog_lib = cpp.find_library('spdlog', dirs: [mori_lib], required: true)
++    mori_dep = declare_dependency(
++        dependencies: [mori_io_lib, mori_app_lib, mori_spdlog_lib],
++        # MORI headers include <hip/hip_runtime.h> and <msgpack.hpp>; the
++        # msgpack headers are staged into the same include dir by the image
++        # build because MORI's install rules do not ship its submodule.
++        #
++        # MSGPACK_NO_BOOST mirrors what MORI compiles libmori_io with
++        # (target_compile_definitions(mori_io PUBLIC MSGPACK_NO_BOOST) in
++        # src/io/CMakeLists.txt).  It is not optional: without it msgpack's
++        # sysdep.hpp reaches for <boost/predef/other/endian.h>, and defining it
++        # differently on the two sides of the ABI would be worse than the
++        # missing header.
++        compile_args: ['-D__HIP_PLATFORM_AMD__', '-DMSGPACK_NO_BOOST',
++                       '-DSPDLOG_COMPILED_LIB'],
++        # is_system (-isystem): MORI's and ROCm's headers are third-party here,
++        # and NIXL compiles with -Werror.  Without this, warnings from inside
++        # rdma.hpp (sign-compare, unused-function) fail OUR build -- a warning
++        # in a dependency's header is not something this plugin can fix.
++        include_directories: include_directories(mori_inc, rocm_home + '/include',
++                                                 is_system: true),
++        link_args: ['-L' + mori_lib, '-Wl,-rpath,' + mori_lib,
++                    '-L' + rocm_home + '/lib', '-lamdhip64'])
++    message('MORI SDK found at ' + mori_path + '; MORI_IO backend enabled')
++endif
++
+ # Allow callers (e.g. ROCm CI/Dockerfile) to override the wheel variant suffix
+ # without otherwise affecting the build. Non-empty value wins over the
+ # autodetected CUDA-major value above: e.g. -Dwheel_variant=rocm -> nixl_rocm.
+diff --git a/meson_options.txt b/meson_options.txt
+index d447843..144ffc2 100644
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -23,6 +23,7 @@ option('disable_infinia_backend', type : 'boolean', value : false, description :
+ option('infinia_path', type: 'string', value: '/opt/ddn/red/', description: 'Path to Infinia client install')
+ option('install_headers', type : 'boolean', value : true, description : 'install headers')
+ option('gds_path', type: 'string', value: '/usr/local/cuda/', description: 'Path to GDS CuFile install')
++option('mori_path', type: 'string', value: '', description: 'Path to the MORI (ROCm/mori) C++ SDK install prefix for the MORI_IO backend. Empty disables the plugin.')
+ option('cudapath_inc', type: 'string', value: '', description: 'Include path for CUDA')
+ option('cudapath_lib', type: 'string', value: '', description: 'Library path for CUDA')
+ option('cudapath_stub', type: 'string', value: '', description: 'Extra Stub path for CUDA')
+diff --git a/src/plugins/meson.build b/src/plugins/meson.build
+index 055ed17..a47aef0 100644
+--- a/src/plugins/meson.build
++++ b/src/plugins/meson.build
+@@ -140,4 +140,12 @@ if enabled_plugins.get('GPUNETIO')
+     endif
+ endif
+ 
++if enabled_plugins.get('MORI_IO')
++    if not mori_dep.found() and is_explicit_enable
++        error('MORI_IO plugin requested but the MORI SDK was not found (-Dmori_path=<prefix>)')
++    elif mori_dep.found()
++        subdir('mori_io')
++    endif
++endif
++
+ subdir('telemetry')
+diff --git a/src/plugins/mori_io/meson.build b/src/plugins/mori_io/meson.build
+new file mode 100644
+index 0000000..5dd3768
+--- /dev/null
++++ b/src/plugins/mori_io/meson.build
+@@ -0,0 +1,38 @@
++# SPDX-FileCopyrightText: Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++
++mori_io_sources = [
++    'mori_io_backend.cpp',
++    'mori_io_backend.h',
++    'mori_io_plugin.cpp',
++]
++
++mori_io_plugin_deps = [nixl_infra, nixl_common_dep, mori_dep]
++
++if 'MORI_IO' in static_plugins
++    mori_io_backend_lib = static_library('MORI_IO',
++        mori_io_sources,
++        dependencies: mori_io_plugin_deps,
++        cpp_args: ['-DSTATIC_PLUGIN_MORI_IO'] + compile_flags,
++        include_directories: [nixl_inc_dirs, utils_inc_dirs],
++        install: false,
++        name_prefix: 'libplugin_')
++else
++    mori_io_backend_lib = shared_library('MORI_IO',
++        mori_io_sources,
++        dependencies: mori_io_plugin_deps,
++        cpp_args: ['-fPIC'],
++        include_directories: [nixl_inc_dirs, utils_inc_dirs],
++        install: true,
++        name_prefix: 'libplugin_',
++        install_dir: plugin_install_dir,
++        install_rpath: '$ORIGIN/..')
++    if get_option('buildtype') == 'debug'
++        run_command('sh', '-c',
++            'echo "MORI_IO=' + mori_io_backend_lib.full_path() + '" >> ' + plugin_build_dir + '/pluginlist',
++            check: true
++        )
++    endif
++endif
++
++mori_io_backend_interface = declare_dependency(link_with: mori_io_backend_lib)
+diff --git a/src/plugins/mori_io/mori_io_backend.cpp b/src/plugins/mori_io/mori_io_backend.cpp
+new file mode 100644
+index 0000000..a45451e
+--- /dev/null
++++ b/src/plugins/mori_io/mori_io_backend.cpp
+@@ -0,0 +1,796 @@
++/*
++ * SPDX-FileCopyrightText: Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include "mori_io_backend.h"
++
++#include <arpa/inet.h>
++#include <netinet/in.h>
++#include <netinet/tcp.h>
++#include <poll.h>
++#include <sys/socket.h>
++#include <unistd.h>
++
++#include <cstdlib>
++#include <cstring>
++#include <sstream>
++#include <stdexcept>
++
++#include <msgpack.hpp>
++
++#include "common/nixl_log.h"
++
++namespace {
++
++// --- msgpack helpers --------------------------------------------------------
++// MORI's EngineDesc/MemoryDesc already declare MSGPACK_DEFINE, so the wire
++// format for conn info and public MD is simply their msgpack encoding.  Using
++// MORI's own serialisation rather than a hand-rolled one means a MORI version
++// bump that adds a field cannot silently desync the two sides.
++
++template <typename T>
++std::string
++pack(const T &value) {
++    std::stringstream ss;
++    msgpack::pack(ss, value);
++    return ss.str();
++}
++
++template <typename T>
++bool
++unpack(const std::string &blob, T &out) {
++    try {
++        msgpack::object_handle oh = msgpack::unpack(blob.data(), blob.size());
++        oh.get().convert(out);
++        return true;
++    }
++    catch (const std::exception &e) {
++        NIXL_ERROR << "MORI_IO: failed to decode msgpack blob: " << e.what();
++        return false;
++    }
++}
++
++// --- init params ------------------------------------------------------------
++
++std::string
++paramOr(const nixl_b_params_t *params, const std::string &key, const std::string &fallback) {
++    if (params == nullptr) return fallback;
++    const auto it = params->find(key);
++    return (it == params->end() || it->second.empty()) ? fallback : it->second;
++}
++
++// The out-of-band TCP endpoint MORI uses to exchange its own metadata.  Port 0
++// lets the kernel choose, which is what we want by default: the resulting port
++// travels to the peer inside EngineDesc via getConnInfo, so nothing needs to be
++// agreed in advance.
++mori::io::IOEngineConfig
++engineConfig(const nixl_b_params_t *params) {
++    mori::io::IOEngineConfig cfg;
++    cfg.host = paramOr(params, "mori_host", "0.0.0.0");
++    cfg.port = static_cast<uint16_t>(std::stoi(paramOr(params, "mori_port", "0")));
++    return cfg;
++}
++
++// Which MORI transports to bring up.
++//
++// "auto" (the default) asks for RDMA and XGMI and treats a failure of either as
++// non-fatal -- what matters is that at least one comes up.  That distinction is
++// the difference between working and not on two common machines: a node with
++// NICs but no GPU peering, and a single node with peered GPUs but no RDMA
++// device (where MORI's RdmaBackend throws "no active RDMA device on this host").
++//
++// Naming transports explicitly -- mori_backends=rdma / xgmi / rdma,xgmi -- makes
++// each one REQUIRED instead, so a benchmark that means to measure RDMA fails
++// loudly rather than quietly measuring XGMI.  mori_backends=none creates the
++// engine with no transport, which is only useful for testing the plumbing.
++std::vector<mori::io::BackendType>
++requestedBackends(const nixl_b_params_t *params, bool &required) {
++    const std::string spec = paramOr(params, "mori_backends", "auto");
++    std::vector<mori::io::BackendType> out;
++    required = (spec != "auto");
++    if (spec == "none") return out;
++    if (spec == "auto") {
++        out.push_back(mori::io::BackendType::RDMA);
++        out.push_back(mori::io::BackendType::XGMI);
++        return out;
++    }
++    std::stringstream ss(spec);
++    std::string tok;
++    while (std::getline(ss, tok, ',')) {
++        if (tok == "rdma" || tok == "RDMA")
++            out.push_back(mori::io::BackendType::RDMA);
++        else if (tok == "xgmi" || tok == "XGMI")
++            out.push_back(mori::io::BackendType::XGMI);
++        else if (tok == "tcp" || tok == "TCP")
++            out.push_back(mori::io::BackendType::TCP);
++        else if (tok == "fabric" || tok == "FABRIC")
++            out.push_back(mori::io::BackendType::FABRIC);
++        else
++            NIXL_WARN << "MORI_IO: ignoring unknown mori_backends entry '" << tok << "'";
++    }
++    return out;
++}
++
++const char *
++backendName(mori::io::BackendType type) {
++    switch (type) {
++    case mori::io::BackendType::XGMI: return "XGMI";
++    case mori::io::BackendType::RDMA: return "RDMA";
++    case mori::io::BackendType::TCP: return "TCP";
++    case mori::io::BackendType::FABRIC: return "FABRIC";
++    default: return "Unknown";
++    }
++}
++
++mori::io::MemoryLocationType
++memLocation(const nixl_mem_t &mem) {
++    return (mem == VRAM_SEG) ? mori::io::MemoryLocationType::GPU :
++                               mori::io::MemoryLocationType::CPU;
++}
++
++
++// The conn info blob a peer needs: MORI's own EngineDesc plus where to reach
++// this engine's notif listener.  One msgpack object so the two can never be
++// exchanged out of step.
++struct MoriIoConnInfo {
++    mori::io::EngineDesc engine;
++    std::string notifHost;
++    uint32_t notifPort{0};
++    MSGPACK_DEFINE(engine, notifHost, notifPort);
++};
++
++// Blocking read of exactly n bytes; false on EOF or error.
++bool
++readExactly(int fd, void *buf, size_t n) {
++    auto *p = static_cast<uint8_t *>(buf);
++    while (n > 0) {
++        const ssize_t got = ::read(fd, p, n);
++        if (got == 0) return false;
++        if (got < 0) {
++            if (errno == EINTR) continue;
++            return false;
++        }
++        p += got;
++        n -= static_cast<size_t>(got);
++    }
++    return true;
++}
++
++bool
++writeExactly(int fd, const void *buf, size_t n) {
++    const auto *p = static_cast<const uint8_t *>(buf);
++    while (n > 0) {
++        const ssize_t put = ::write(fd, p, n);
++        if (put <= 0) {
++            if (put < 0 && errno == EINTR) continue;
++            return false;
++        }
++        p += put;
++        n -= static_cast<size_t>(put);
++    }
++    return true;
++}
++
++} // namespace
++
++// --- notif channel ----------------------------------------------------------
++
++nixlMoriIoNotifChannel::~nixlMoriIoNotifChannel() {
++    stop();
++}
++
++bool
++nixlMoriIoNotifChannel::start(const std::string &host) {
++    listenFd_ = ::socket(AF_INET, SOCK_STREAM, 0);
++    if (listenFd_ < 0) {
++        NIXL_ERROR << "MORI_IO: notif socket(): " << strerror(errno);
++        return false;
++    }
++    const int one = 1;
++    ::setsockopt(listenFd_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
++
++    sockaddr_in addr{};
++    addr.sin_family = AF_INET;
++    // Port 0: the kernel picks a free one and we advertise whatever it chose,
++    // so nothing has to be reserved or agreed in advance.
++    addr.sin_port = 0;
++    if (host.empty() || host == "0.0.0.0") {
++        addr.sin_addr.s_addr = INADDR_ANY;
++    } else if (::inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
++        addr.sin_addr.s_addr = INADDR_ANY;
++    }
++
++    if (::bind(listenFd_, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0 ||
++        ::listen(listenFd_, 64) < 0) {
++        NIXL_ERROR << "MORI_IO: notif bind/listen: " << strerror(errno);
++        ::close(listenFd_);
++        listenFd_ = -1;
++        return false;
++    }
++
++    sockaddr_in bound{};
++    socklen_t len = sizeof(bound);
++    if (::getsockname(listenFd_, reinterpret_cast<sockaddr *>(&bound), &len) < 0) {
++        NIXL_ERROR << "MORI_IO: notif getsockname(): " << strerror(errno);
++        ::close(listenFd_);
++        listenFd_ = -1;
++        return false;
++    }
++    port_ = ntohs(bound.sin_port);
++    host_ = host;
++
++    running_ = true;
++    reader_ = std::thread([this] { readerLoop(); });
++    NIXL_DEBUG << "MORI_IO: notif channel listening on " << host_ << ":" << port_;
++    return true;
++}
++
++void
++nixlMoriIoNotifChannel::stop() {
++    if (!running_.exchange(false)) {
++        if (listenFd_ >= 0) {
++            ::close(listenFd_);
++            listenFd_ = -1;
++        }
++        return;
++    }
++    // Shut the listener down so the poll in readerLoop wakes and the accept
++    // fails immediately, rather than waiting out the poll timeout.
++    if (listenFd_ >= 0) ::shutdown(listenFd_, SHUT_RDWR);
++    if (reader_.joinable()) reader_.join();
++    if (listenFd_ >= 0) {
++        ::close(listenFd_);
++        listenFd_ = -1;
++    }
++}
++
++void
++nixlMoriIoNotifChannel::readerLoop() {
++    while (running_) {
++        pollfd pfd{listenFd_, POLLIN, 0};
++        // Bounded wait so a stop() that races the poll is noticed promptly.
++        const int ready = ::poll(&pfd, 1, 200);
++        if (ready <= 0) continue;
++
++        const int fd = ::accept(listenFd_, nullptr, nullptr);
++        if (fd < 0) continue;
++
++        // One frame per connection: [u32 fromLen][from][u32 msgLen][msg].
++        uint32_t fromLen = 0, msgLen = 0;
++        std::string from, msg;
++        bool ok = readExactly(fd, &fromLen, sizeof(fromLen));
++        if (ok) {
++            fromLen = ntohl(fromLen);
++            from.resize(fromLen);
++            ok = (fromLen == 0) || readExactly(fd, from.data(), fromLen);
++        }
++        if (ok) ok = readExactly(fd, &msgLen, sizeof(msgLen));
++        if (ok) {
++            msgLen = ntohl(msgLen);
++            msg.resize(msgLen);
++            ok = (msgLen == 0) || readExactly(fd, msg.data(), msgLen);
++        }
++        ::close(fd);
++
++        if (!ok) {
++            NIXL_WARN << "MORI_IO: truncated notif frame, dropped";
++            continue;
++        }
++        std::lock_guard<std::mutex> lock(queueMu_);
++        queue_.emplace_back(std::move(from), std::move(msg));
++    }
++}
++
++bool
++nixlMoriIoNotifChannel::send(const std::string &peerHost,
++                             uint16_t peerPort,
++                             const std::string &from,
++                             const std::string &msg) const {
++    if (peerPort == 0) {
++        NIXL_ERROR << "MORI_IO: no notif endpoint for the peer (conn info not loaded?)";
++        return false;
++    }
++
++    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
++    if (fd < 0) return false;
++
++    sockaddr_in addr{};
++    addr.sin_family = AF_INET;
++    addr.sin_port = htons(peerPort);
++    const std::string h = (peerHost.empty() || peerHost == "0.0.0.0") ? "127.0.0.1" : peerHost;
++    if (::inet_pton(AF_INET, h.c_str(), &addr.sin_addr) != 1) {
++        NIXL_ERROR << "MORI_IO: bad notif peer address '" << h << "'";
++        ::close(fd);
++        return false;
++    }
++
++    if (::connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0) {
++        NIXL_ERROR << "MORI_IO: notif connect to " << h << ":" << peerPort << ": "
++                   << strerror(errno);
++        ::close(fd);
++        return false;
++    }
++    const int one = 1;
++    ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
++
++    const uint32_t fromLen = htonl(static_cast<uint32_t>(from.size()));
++    const uint32_t msgLen = htonl(static_cast<uint32_t>(msg.size()));
++    const bool ok = writeExactly(fd, &fromLen, sizeof(fromLen)) &&
++                    (from.empty() || writeExactly(fd, from.data(), from.size())) &&
++                    writeExactly(fd, &msgLen, sizeof(msgLen)) &&
++                    (msg.empty() || writeExactly(fd, msg.data(), msg.size()));
++    ::close(fd);
++    if (!ok) NIXL_ERROR << "MORI_IO: short write sending notif";
++    return ok;
++}
++
++void
++nixlMoriIoNotifChannel::drain(notif_list_t &out) {
++    std::lock_guard<std::mutex> lock(queueMu_);
++    while (!queue_.empty()) {
++        out.push_back(std::move(queue_.front()));
++        queue_.pop_front();
++    }
++}
++
++// ---------------------------------------------------------------------------
++
++nixlMoriIoEngine::nixlMoriIoEngine(const nixlBackendInitParams *init_params)
++    : nixlBackendEngine(init_params) {
++    const nixl_b_params_t *params = init_params->customParams;
++
++    try {
++        // The NIXL agent name doubles as the MORI EngineKey: agent names are
++        // already unique within a NIXL job, which is exactly MORI's
++        // requirement, and it keeps the two namespaces from drifting.
++        engine_ = std::make_unique<mori::io::IOEngine>(localAgent, engineConfig(params));
++
++        // NIXL will not create this backend at all unless supportsNotif() is
++        // true, so a channel we cannot bind is a fatal init error, not a
++        // degradation.
++        if (!notif_.start(paramOr(params, "mori_notif_host", "0.0.0.0"))) {
++            throw std::runtime_error("could not start the MORI_IO notification channel");
++        }
++
++        bool required = false;
++        const auto backends = requestedBackends(params, required);
++        int created = 0;
++
++        for (const auto &backend : backends) {
++            const char *name = backendName(backend);
++            try {
++                switch (backend) {
++                case mori::io::BackendType::RDMA: {
++                    mori::io::RdmaBackendConfig cfg{};
++                    cfg.qpPerTransfer = std::stoi(paramOr(params, "mori_qp_per_transfer", "1"));
++                    cfg.numWorkerThreads = std::stoi(paramOr(params, "mori_worker_threads", "1"));
++                    engine_->CreateBackend(backend, cfg);
++                    break;
++                }
++                case mori::io::BackendType::XGMI: {
++                    mori::io::XgmiBackendConfig cfg{};
++                    engine_->CreateBackend(backend, cfg);
++                    break;
++                }
++                default: {
++                    mori::io::BackendConfig cfg{backend};
++                    engine_->CreateBackend(backend, cfg);
++                    break;
++                }
++                }
++                ++created;
++                NIXL_INFO << "MORI_IO: " << name << " transport up";
++            }
++            catch (const std::exception &e) {
++                if (required) throw;
++                // Autodetect: this transport is simply not available here.
++                NIXL_DEBUG << "MORI_IO: " << name << " transport unavailable: " << e.what();
++            }
++        }
++
++        if (!backends.empty() && created == 0) {
++            throw std::runtime_error(
++                "no MORI transport could be created (no RDMA device and no GPU peering?)");
++        }
++    }
++    catch (const std::exception &e) {
++        // A backend that cannot come up must not take the process down: NIXL
++        // probes plugins by constructing them, and initErr is how a plugin
++        // says "not usable here" (e.g. a node with no RDMA device).
++        NIXL_ERROR << "MORI_IO: engine init failed: " << e.what();
++        engine_.reset();
++        initErr = true;
++    }
++}
++
++nixlMoriIoEngine::~nixlMoriIoEngine() {
++    notif_.stop();
++    {
++        std::lock_guard<std::mutex> lock(mdsMu_);
++        for (auto *md : ownedMDs_)
++            delete md;
++        ownedMDs_.clear();
++    }
++    if (engine_) {
++        std::lock_guard<std::mutex> lock(remotesMu_);
++        for (const auto &kv : remotes_) {
++            try {
++                engine_->DeregisterRemoteEngine(kv.second);
++            }
++            catch (const std::exception &e) {
++                NIXL_WARN << "MORI_IO: deregistering remote " << kv.first << ": " << e.what();
++            }
++        }
++        remotes_.clear();
++    }
++}
++
++// --- memory -----------------------------------------------------------------
++
++nixl_status_t
++nixlMoriIoEngine::registerMem(const nixlBlobDesc &mem,
++                              const nixl_mem_t &nixl_mem,
++                              nixlBackendMD *&out) {
++    if (!engine_) return NIXL_ERR_BACKEND;
++    if (nixl_mem != DRAM_SEG && nixl_mem != VRAM_SEG) return NIXL_ERR_NOT_SUPPORTED;
++
++    auto md = std::make_unique<nixlMoriIoMD>(true, true);
++    try {
++        // devId is the HIP device ordinal for VRAM.  For DRAM MORI wants -1
++        // (no device), and NIXL leaves devId unset/0 for host memory, so do
++        // not pass a 0 that would be read as "GPU 0".
++        const int device = (nixl_mem == VRAM_SEG) ? static_cast<int>(mem.devId) : -1;
++        md->desc = engine_->RegisterMemory(reinterpret_cast<void *>(mem.addr),
++                                           mem.len,
++                                           device,
++                                           memLocation(nixl_mem));
++    }
++    catch (const std::exception &e) {
++        NIXL_ERROR << "MORI_IO: RegisterMemory failed: " << e.what();
++        return NIXL_ERR_BACKEND;
++    }
++
++    out = md.release();
++    return NIXL_SUCCESS;
++}
++
++nixl_status_t
++nixlMoriIoEngine::deregisterMem(nixlBackendMD *meta) {
++    auto *md = dynamic_cast<nixlMoriIoMD *>(meta);
++    if (md == nullptr) return NIXL_ERR_INVALID_PARAM;
++    if (engine_ && md->local) {
++        try {
++            engine_->DeregisterMemory(md->desc);
++        }
++        catch (const std::exception &e) {
++            NIXL_ERROR << "MORI_IO: DeregisterMemory failed: " << e.what();
++            delete md;
++            return NIXL_ERR_BACKEND;
++        }
++    }
++    delete md;
++    return NIXL_SUCCESS;
++}
++
++// --- connection -------------------------------------------------------------
++
++nixl_status_t
++nixlMoriIoEngine::connect(const std::string &remote_agent) {
++    // MORI has no separate connect step: RegisterRemoteEngine (from
++    // loadRemoteConnInfo) is what establishes reachability, and the transport
++    // connects lazily on first transfer.
++    return NIXL_SUCCESS;
++}
++
++nixl_status_t
++nixlMoriIoEngine::disconnect(const std::string &remote_agent) {
++    if (!engine_) return NIXL_SUCCESS;
++    std::lock_guard<std::mutex> lock(remotesMu_);
++    const auto it = remotes_.find(remote_agent);
++    if (it == remotes_.end()) return NIXL_SUCCESS;
++    try {
++        engine_->DeregisterRemoteEngine(it->second);
++    }
++    catch (const std::exception &e) {
++        NIXL_ERROR << "MORI_IO: DeregisterRemoteEngine failed: " << e.what();
++        return NIXL_ERR_BACKEND;
++    }
++    remotes_.erase(it);
++    notifPeers_.erase(remote_agent);
++    return NIXL_SUCCESS;
++}
++
++nixl_status_t
++nixlMoriIoEngine::getConnInfo(std::string &str) const {
++    if (!engine_) return NIXL_ERR_BACKEND;
++
++    MoriIoConnInfo info;
++    info.engine = engine_->GetEngineDesc();
++    // Advertise the address MORI already resolved for this engine rather than
++    // our own bind address, which is usually the 0.0.0.0 wildcard and useless
++    // to a peer on another node.
++    info.notifHost = info.engine.host.empty() ? notif_.host() : info.engine.host;
++    info.notifPort = notif_.port();
++    str = pack(info);
++    return NIXL_SUCCESS;
++}
++
++nixl_status_t
++nixlMoriIoEngine::loadRemoteConnInfo(const std::string &remote_agent,
++                                     const std::string &remote_conn_info) {
++    if (!engine_) return NIXL_ERR_BACKEND;
++
++    MoriIoConnInfo info;
++    if (!unpack(remote_conn_info, info)) return NIXL_ERR_MISMATCH;
++
++    std::lock_guard<std::mutex> lock(remotesMu_);
++    if (remotes_.count(remote_agent) != 0) return NIXL_SUCCESS;
++
++    try {
++        engine_->RegisterRemoteEngine(info.engine);
++    }
++    catch (const std::exception &e) {
++        NIXL_ERROR << "MORI_IO: RegisterRemoteEngine(" << remote_agent << ") failed: " << e.what();
++        return NIXL_ERR_BACKEND;
++    }
++    remotes_.emplace(remote_agent, info.engine);
++    notifPeers_[remote_agent] =
++        NotifEndpoint{info.notifHost, static_cast<uint16_t>(info.notifPort)};
++    return NIXL_SUCCESS;
++}
++
++// --- notifications ----------------------------------------------------------
++
++nixl_status_t
++nixlMoriIoEngine::getNotifs(notif_list_t &notif_list) {
++    notif_.drain(notif_list);
++    return NIXL_SUCCESS;
++}
++
++nixl_status_t
++nixlMoriIoEngine::genNotif(const std::string &remote_agent, const std::string &msg) const {
++    NotifEndpoint ep;
++    {
++        std::lock_guard<std::mutex> lock(remotesMu_);
++        const auto it = notifPeers_.find(remote_agent);
++        if (it == notifPeers_.end()) {
++            NIXL_ERROR << "MORI_IO: genNotif to unknown agent '" << remote_agent << "'";
++            return NIXL_ERR_NOT_FOUND;
++        }
++        ep = it->second;
++    }
++    // The peer identifies us by our agent name, which is also our MORI
++    // EngineKey -- one identity, no second namespace to keep in sync.
++    return notif_.send(ep.host, ep.port, localAgent, msg) ? NIXL_SUCCESS : NIXL_ERR_BACKEND;
++}
++
++// --- metadata ---------------------------------------------------------------
++
++nixl_status_t
++nixlMoriIoEngine::getPublicData(const nixlBackendMD *meta, std::string &str) const {
++    const auto *md = dynamic_cast<const nixlMoriIoMD *>(meta);
++    if (md == nullptr) return NIXL_ERR_INVALID_PARAM;
++    str = pack(md->desc);
++    return NIXL_SUCCESS;
++}
++
++nixl_status_t
++nixlMoriIoEngine::loadRemoteMD(const nixlBlobDesc &input,
++                               const nixl_mem_t &nixl_mem,
++                               const std::string &remote_agent,
++                               nixlBackendMD *&output) {
++    auto md = std::make_unique<nixlMoriIoMD>(false, false);
++    if (!unpack(input.metaInfo, md->desc)) return NIXL_ERR_MISMATCH;
++
++    auto *raw = md.release();
++    {
++        std::lock_guard<std::mutex> lock(mdsMu_);
++        ownedMDs_.push_back(raw);
++    }
++    output = raw;
++    return NIXL_SUCCESS;
++}
++
++nixl_status_t
++nixlMoriIoEngine::loadLocalMD(nixlBackendMD *input, nixlBackendMD *&output) {
++    // Loopback: a local transfer uses the same MemoryDesc on both sides.  The
++    // copy (rather than handing back `input`) keeps ownership unambiguous --
++    // unloadMD must be able to free what loadLocalMD produced without
++    // destroying the caller's registration.
++    const auto *src = dynamic_cast<const nixlMoriIoMD *>(input);
++    if (src == nullptr) return NIXL_ERR_INVALID_PARAM;
++
++    auto *md = new nixlMoriIoMD(false, false);
++    md->desc = src->desc;
++    {
++        std::lock_guard<std::mutex> lock(mdsMu_);
++        ownedMDs_.push_back(md);
++    }
++    output = md;
++    return NIXL_SUCCESS;
++}
++
++nixl_status_t
++nixlMoriIoEngine::unloadMD(nixlBackendMD *input) {
++    auto *md = dynamic_cast<nixlMoriIoMD *>(input);
++    if (md == nullptr) return NIXL_ERR_INVALID_PARAM;
++    std::lock_guard<std::mutex> lock(mdsMu_);
++    for (auto it = ownedMDs_.begin(); it != ownedMDs_.end(); ++it) {
++        if (*it == md) {
++            ownedMDs_.erase(it);
++            delete md;
++            return NIXL_SUCCESS;
++        }
++    }
++    // Not ours (a local registration handed straight back): the agent frees it
++    // through deregisterMem, so there is nothing to do here.
++    return NIXL_SUCCESS;
++}
++
++// --- transfers --------------------------------------------------------------
++
++nixl_status_t
++nixlMoriIoEngine::prepXfer(const nixl_xfer_op_t &operation,
++                           const nixl_meta_dlist_t &local,
++                           const nixl_meta_dlist_t &remote,
++                           const std::string &remote_agent,
++                           nixlBackendReqH *&handle,
++                           const nixl_opt_b_args_t *opt_args) const {
++    if (!engine_) return NIXL_ERR_BACKEND;
++    if (local.descCount() != remote.descCount()) return NIXL_ERR_MISMATCH;
++    if (local.descCount() == 0) return NIXL_ERR_INVALID_PARAM;
++
++    // MORI needs no per-transfer preparation beyond somewhere to hold the
++    // completion state, so prepXfer just allocates the handle and postXfer
++    // does the work.  Keeping it split still buys NIXL's prep/post reuse.
++    handle = new nixlMoriIoReqH();
++    return NIXL_SUCCESS;
++}
++
++nixl_status_t
++nixlMoriIoEngine::postXfer(const nixl_xfer_op_t &operation,
++                           const nixl_meta_dlist_t &local,
++                           const nixl_meta_dlist_t &remote,
++                           const std::string &remote_agent,
++                           nixlBackendReqH *&handle,
++                           const nixl_opt_b_args_t *opt_args) const {
++    if (!engine_) return NIXL_ERR_BACKEND;
++
++    auto *req = dynamic_cast<nixlMoriIoReqH *>(handle);
++    if (req == nullptr) return NIXL_ERR_INVALID_PARAM;
++    if (local.descCount() != remote.descCount()) return NIXL_ERR_MISMATCH;
++
++    const int count = local.descCount();
++
++    // MORI's batch API is one level deeper than NIXL's: it takes a vector of
++    // (local, remote) MemoryDesc *pairs*, and for each pair a vector of
++    // offsets/sizes inside that pair -- one TransferStatus and one id per pair,
++    // not per range.  NIXL hands us a flat list of ranges, so consecutive
++    // ranges that share the same registration pair are folded into one MORI
++    // entry; that is what lets MORI coalesce them onto a single QP batch.
++    mori::io::MemDescVec localDescs;
++    mori::io::MemDescVec remoteDescs;
++    mori::io::BatchSizeVec localOffsets;
++    mori::io::BatchSizeVec remoteOffsets;
++    mori::io::BatchSizeVec sizes;
++
++    req->statuses.clear();
++    req->statusPtrs.clear();
++    req->ids.clear();
++
++    const nixlMoriIoMD *curLocal = nullptr;
++    const nixlMoriIoMD *curRemote = nullptr;
++
++    for (int i = 0; i < count; ++i) {
++        const auto *lmd = dynamic_cast<const nixlMoriIoMD *>(local[i].metadataP);
++        const auto *rmd = dynamic_cast<const nixlMoriIoMD *>(remote[i].metadataP);
++        if (lmd == nullptr || rmd == nullptr) return NIXL_ERR_INVALID_PARAM;
++        if (local[i].len != remote[i].len) return NIXL_ERR_MISMATCH;
++
++        // NIXL descriptors are absolute addresses; MORI wants an offset from
++        // the registration base.  A descriptor outside its own registration is
++        // a caller bug that would otherwise become a wild remote write.
++        if (local[i].addr < lmd->desc.data ||
++            local[i].addr + local[i].len > lmd->desc.data + lmd->desc.size) {
++            NIXL_ERROR << "MORI_IO: local descriptor " << i << " is outside its registration";
++            return NIXL_ERR_INVALID_PARAM;
++        }
++        if (remote[i].addr < rmd->desc.data ||
++            remote[i].addr + remote[i].len > rmd->desc.data + rmd->desc.size) {
++            NIXL_ERROR << "MORI_IO: remote descriptor " << i << " is outside its registration";
++            return NIXL_ERR_INVALID_PARAM;
++        }
++
++        if (lmd != curLocal || rmd != curRemote) {
++            curLocal = lmd;
++            curRemote = rmd;
++            localDescs.push_back(lmd->desc);
++            remoteDescs.push_back(rmd->desc);
++            localOffsets.emplace_back();
++            remoteOffsets.emplace_back();
++            sizes.emplace_back();
++            req->statuses.push_back(std::make_unique<mori::io::TransferStatus>());
++            req->statusPtrs.push_back(req->statuses.back().get());
++            req->ids.push_back(engine_->AllocateTransferUniqueId());
++        }
++
++        localOffsets.back().push_back(local[i].addr - lmd->desc.data);
++        remoteOffsets.back().push_back(remote[i].addr - rmd->desc.data);
++        sizes.back().push_back(local[i].len);
++    }
++
++    try {
++        if (operation == NIXL_WRITE) {
++            engine_->BatchWrite(localDescs,
++                                localOffsets,
++                                remoteDescs,
++                                remoteOffsets,
++                                sizes,
++                                req->statusPtrs,
++                                req->ids);
++        } else if (operation == NIXL_READ) {
++            engine_->BatchRead(localDescs,
++                               localOffsets,
++                               remoteDescs,
++                               remoteOffsets,
++                               sizes,
++                               req->statusPtrs,
++                               req->ids);
++        } else {
++            return NIXL_ERR_INVALID_PARAM;
++        }
++    }
++    catch (const std::exception &e) {
++        NIXL_ERROR << "MORI_IO: batch " << (operation == NIXL_WRITE ? "write" : "read")
++                   << " failed: " << e.what();
++        return NIXL_ERR_BACKEND;
++    }
++
++    req->posted = true;
++    req->notifSent = false;
++    req->remoteAgent = remote_agent;
++    req->hasNotif = (opt_args != nullptr) && opt_args->hasNotif;
++    if (req->hasNotif) req->notifMsg = opt_args->notifMsg;
++
++    return NIXL_IN_PROG;
++}
++
++nixl_status_t
++nixlMoriIoEngine::checkXfer(nixlBackendReqH *handle) const {
++    auto *req = dynamic_cast<nixlMoriIoReqH *>(handle);
++    if (req == nullptr) return NIXL_ERR_INVALID_PARAM;
++    if (!req->posted) return NIXL_ERR_NOT_POSTED;
++
++    bool inProgress = false;
++    for (auto &status : req->statuses) {
++        // WaitFor(0) polls MORI's progress engine once and returns without
++        // blocking, which is what NIXL's non-blocking checkXfer contract wants.
++        const mori::io::StatusCode code = status->WaitFor(0);
++        if (code == mori::io::StatusCode::IN_PROGRESS || code == mori::io::StatusCode::INIT) {
++            inProgress = true;
++        } else if (code != mori::io::StatusCode::SUCCESS) {
++            NIXL_ERROR << "MORI_IO: transfer failed (" << static_cast<uint32_t>(code)
++                       << "): " << status->Message();
++            return NIXL_ERR_BACKEND;
++        }
++    }
++    if (inProgress) return NIXL_IN_PROG;
++
++    // Complete.  Send the notif now, and only once -- checkXfer is polled, so
++    // a caller that keeps calling after success must not re-notify.
++    if (req->hasNotif && !req->notifSent) {
++        const nixl_status_t st = genNotif(req->remoteAgent, req->notifMsg);
++        if (st != NIXL_SUCCESS) return st;
++        req->notifSent = true;
++    }
++    return NIXL_SUCCESS;
++}
++
++nixl_status_t
++nixlMoriIoEngine::releaseReqH(nixlBackendReqH *handle) const {
++    auto *req = dynamic_cast<nixlMoriIoReqH *>(handle);
++    if (req == nullptr) return NIXL_ERR_INVALID_PARAM;
++    delete req;
++    return NIXL_SUCCESS;
++}
+diff --git a/src/plugins/mori_io/mori_io_backend.h b/src/plugins/mori_io/mori_io_backend.h
+new file mode 100644
+index 0000000..26c4630
+--- /dev/null
++++ b/src/plugins/mori_io/mori_io_backend.h
+@@ -0,0 +1,242 @@
++/*
++ * SPDX-FileCopyrightText: Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * NIXL backend engine backed by MORI-IO (ROCm/mori), so any NIXL consumer --
++ * nixlbench included -- can drive MORI's point-to-point transport with
++ * --backend MORI_IO.
++ *
++ * Mapping (NIXL concept -> MORI-IO concept):
++ *
++ *   agent                -> mori::io::IOEngine, keyed by the NIXL agent name
++ *   getConnInfo          -> msgpack(EngineDesc)
++ *   loadRemoteConnInfo   -> IOEngine::RegisterRemoteEngine(EngineDesc)
++ *   registerMem          -> IOEngine::RegisterMemory -> MemoryDesc
++ *   getPublicData        -> msgpack(MemoryDesc)
++ *   loadRemoteMD         -> msgpack-unpack into a remote MemoryDesc
++ *   postXfer WRITE/READ  -> IOEngine::BatchWrite / BatchRead
++ *   checkXfer            -> poll the per-transfer TransferStatus objects
++ *
++ * MORI addresses memory as (MemoryDesc, offset); NIXL descriptors carry
++ * absolute addresses.  The offset is therefore desc.addr - registration base,
++ * which is why each nixlMoriIoMD keeps the MemoryDesc it was registered with.
++ */
++
++#ifndef NIXL_SRC_PLUGINS_MORI_IO_MORI_IO_BACKEND_H
++#define NIXL_SRC_PLUGINS_MORI_IO_MORI_IO_BACKEND_H
++
++#include <atomic>
++#include <deque>
++#include <memory>
++#include <mutex>
++#include <string>
++#include <thread>
++#include <unordered_map>
++#include <vector>
++
++#include <mori/io/io.hpp>
++
++#include "backend/backend_engine.h"
++
++// NIXL requires supportsRemote() => supportsNotif(): an agent refuses to create
++// a remote-capable backend that cannot deliver notifications
++// ("backend 'X' supportsRemote but not notifications").
++//
++// MORI-IO has no equivalent.  Its PopInboundTransferStatus reports the
++// completion of a specific transfer id; NIXL notifs are opaque
++// (remote_agent, payload) messages the initiator can send at will, and are how
++// the target side of a transfer learns anything happened.  There is nothing to
++// map onto, so the plugin carries its own channel.
++//
++// It is deliberately the dumbest thing that satisfies the contract: one
++// listening TCP socket per engine, a short-lived connection per message,
++// length-prefixed [agent][payload] frames, one reader thread.  Notifs are
++// control-plane traffic -- a handful of small messages per transfer -- so this
++// is not on the path being benchmarked.  The listen address is advertised to
++// peers inside getConnInfo alongside MORI's own EngineDesc.
++class nixlMoriIoNotifChannel {
++public:
++    nixlMoriIoNotifChannel() = default;
++    ~nixlMoriIoNotifChannel();
++
++    // Bind an ephemeral port on `host` and start the reader thread.
++    bool
++    start(const std::string &host);
++    void
++    stop();
++
++    std::string
++    host() const {
++        return host_;
++    }
++    uint16_t
++    port() const {
++        return port_;
++    }
++
++    // Connect, send one [from][msg] frame, close.  Blocking, but only ever
++    // called from genNotif/postXfer, never from the measured inner loop.
++    bool
++    send(const std::string &peerHost,
++         uint16_t peerPort,
++         const std::string &from,
++         const std::string &msg) const;
++
++    // Move everything received so far into `out`.
++    void
++    drain(notif_list_t &out);
++
++private:
++    void
++    readerLoop();
++
++    std::string host_;
++    uint16_t port_{0};
++    int listenFd_{-1};
++    std::atomic<bool> running_{false};
++    std::thread reader_;
++
++    mutable std::mutex queueMu_;
++    std::deque<std::pair<std::string, std::string>> queue_;
++};
++
++// Metadata handed back to NIXL for every registered (local) or loaded (remote)
++// buffer.  `desc.data` is the registration base that xfer offsets are measured
++// from; `local` distinguishes a registration we own and must deregister from a
++// remote descriptor that was merely deserialised.
++class nixlMoriIoMD : public nixlBackendMD {
++public:
++    nixlMoriIoMD(bool is_private, bool is_local)
++        : nixlBackendMD(is_private),
++          local(is_local) {}
++    ~nixlMoriIoMD() = default;
++
++    mori::io::MemoryDesc desc{};
++    bool local{true};
++};
++
++// One in-flight (or prepared) transfer.  MORI reports completion through
++// TransferStatus objects that must outlive the transfer, so the handle owns
++// them; TransferStatus is neither copyable nor movable, hence unique_ptr.
++class nixlMoriIoReqH : public nixlBackendReqH {
++public:
++    nixlMoriIoReqH() = default;
++    ~nixlMoriIoReqH() = default;
++
++    std::vector<std::unique_ptr<mori::io::TransferStatus>> statuses;
++    std::vector<mori::io::TransferStatus *> statusPtrs;
++    std::vector<mori::io::TransferUniqueId> ids;
++    // Set once postXfer has actually submitted to MORI; checkXfer on an
++    // unposted handle is a caller error rather than a completed transfer.
++    bool posted{false};
++
++    // NIXL's notif semantics are "the target learns AFTER the data lands", so
++    // the message is held here and sent by checkXfer on the transition to
++    // complete -- not at postXfer time, when nothing has arrived yet.
++    bool hasNotif{false};
++    bool notifSent{false};
++    std::string notifMsg;
++    std::string remoteAgent;
++};
++
++class nixlMoriIoEngine : public nixlBackendEngine {
++public:
++    explicit nixlMoriIoEngine(const nixlBackendInitParams *init_params);
++    ~nixlMoriIoEngine();
++
++    bool
++    supportsRemote() const override {
++        return true;
++    }
++    bool
++    supportsLocal() const override {
++        return true;
++    }
++    // Backed by nixlMoriIoNotifChannel, not by MORI -- see its comment.  This
++    // MUST be true: NIXL rejects a remote-capable backend without notifs.
++    bool
++    supportsNotif() const override {
++        return true;
++    }
++
++    nixl_mem_list_t
++    getSupportedMems() const override {
++        return {DRAM_SEG, VRAM_SEG};
++    }
++
++    nixl_status_t
++    registerMem(const nixlBlobDesc &mem, const nixl_mem_t &nixl_mem, nixlBackendMD *&out) override;
++    nixl_status_t
++    deregisterMem(nixlBackendMD *meta) override;
++
++    nixl_status_t
++    connect(const std::string &remote_agent) override;
++    nixl_status_t
++    disconnect(const std::string &remote_agent) override;
++    nixl_status_t
++    unloadMD(nixlBackendMD *input) override;
++
++    nixl_status_t
++    prepXfer(const nixl_xfer_op_t &operation,
++             const nixl_meta_dlist_t &local,
++             const nixl_meta_dlist_t &remote,
++             const std::string &remote_agent,
++             nixlBackendReqH *&handle,
++             const nixl_opt_b_args_t *opt_args = nullptr) const override;
++    nixl_status_t
++    postXfer(const nixl_xfer_op_t &operation,
++             const nixl_meta_dlist_t &local,
++             const nixl_meta_dlist_t &remote,
++             const std::string &remote_agent,
++             nixlBackendReqH *&handle,
++             const nixl_opt_b_args_t *opt_args = nullptr) const override;
++    nixl_status_t
++    checkXfer(nixlBackendReqH *handle) const override;
++    nixl_status_t
++    releaseReqH(nixlBackendReqH *handle) const override;
++
++    nixl_status_t
++    getPublicData(const nixlBackendMD *meta, std::string &str) const override;
++    nixl_status_t
++    getConnInfo(std::string &str) const override;
++    nixl_status_t
++    loadRemoteConnInfo(const std::string &remote_agent,
++                       const std::string &remote_conn_info) override;
++    nixl_status_t
++    loadRemoteMD(const nixlBlobDesc &input,
++                 const nixl_mem_t &nixl_mem,
++                 const std::string &remote_agent,
++                 nixlBackendMD *&output) override;
++    nixl_status_t
++    loadLocalMD(nixlBackendMD *input, nixlBackendMD *&output) override;
++
++    nixl_status_t
++    getNotifs(notif_list_t &notif_list) override;
++    nixl_status_t
++    genNotif(const std::string &remote_agent, const std::string &msg) const override;
++
++private:
++    std::unique_ptr<mori::io::IOEngine> engine_;
++
++    // Remote engines we have registered, so disconnect() can deregister and a
++    // repeated loadRemoteConnInfo is idempotent.
++    mutable std::mutex remotesMu_;
++    std::unordered_map<std::string, mori::io::EngineDesc> remotes_;
++
++    // Where each remote agent's notif listener lives, learned from its conn
++    // info.  Separate from remotes_ only because it is our channel, not MORI's.
++    struct NotifEndpoint {
++        std::string host;
++        uint16_t port{0};
++    };
++    std::unordered_map<std::string, NotifEndpoint> notifPeers_;
++
++    mutable nixlMoriIoNotifChannel notif_;
++
++    // MDs created by loadRemoteMD/loadLocalMD are owned here and freed in the
++    // destructor, per the backend contract ("deleted in the destructor").
++    mutable std::mutex mdsMu_;
++    std::vector<nixlMoriIoMD *> ownedMDs_;
++};
++
++#endif // NIXL_SRC_PLUGINS_MORI_IO_MORI_IO_BACKEND_H
+diff --git a/src/plugins/mori_io/mori_io_plugin.cpp b/src/plugins/mori_io/mori_io_plugin.cpp
+new file mode 100644
+index 0000000..14fa747
+--- /dev/null
++++ b/src/plugins/mori_io/mori_io_plugin.cpp
+@@ -0,0 +1,36 @@
++/*
++ * SPDX-FileCopyrightText: Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include "backend/backend_plugin.h"
++#include "mori_io_backend.h"
++
++using mori_io_plugin_t = nixlBackendPluginCreator<nixlMoriIoEngine>;
++
++// Init params surfaced to `nixl_agent.get_plugin_params("MORI_IO")` and
++// settable through the agent's backend params / nixlbench --backend_params.
++static const nixl_b_params_t mori_io_params = {
++    {"mori_host", "0.0.0.0"},
++    {"mori_port", "0"},
++    {"mori_backends", "auto"},
++    {"mori_qp_per_transfer", "1"},
++    {"mori_worker_threads", "1"},
++};
++
++#ifdef STATIC_PLUGIN_MORI_IO
++nixlBackendPlugin *
++createStaticMORI_IOPlugin() {
++    return mori_io_plugin_t::create(
++        NIXL_PLUGIN_API_VERSION, "MORI_IO", "0.1.0", mori_io_params, {DRAM_SEG, VRAM_SEG});
++}
++#else
++extern "C" NIXL_PLUGIN_EXPORT nixlBackendPlugin *
++nixl_plugin_init() {
++    return mori_io_plugin_t::create(
++        NIXL_PLUGIN_API_VERSION, "MORI_IO", "0.1.0", mori_io_params, {DRAM_SEG, VRAM_SEG});
++}
++
++extern "C" NIXL_PLUGIN_EXPORT void
++nixl_plugin_fini() {}
++#endif

@@ -1,0 +1,12 @@
+# patch-check clones + any local build scratch
+/build/
+# `make wheels` output
+/dist/
+# editor / tooling
+.cline_storage/
+*.swp
+/logs/
+# core dumps from crashed benchmark runs (the container runs as root,
+# and nixlbench aborts on an ASIO rendezvous timeout)
+/core
+core.*
