@@ -37,6 +37,11 @@ Disabled because we could not reproduce that result here. Tested both:
 |---|---|---|
 | ROCm/ucx v1.19.x + patch | — | `rma_am(tcp/veth)`, 0.34 GB/s |
 | openucx master 1.23.0 + patch | yes, `error handling: peer failure` | `rma_am(tcp/eth2)`, 0.33 GB/s |
+| **NIXL main + master + patch** | yes | `rma_am(tcp/eth2)`, 0.60 GB/s |
+
+The last row is the reporter's exact stack -- NIXL `main` (their "1.4"),
+UCX post-#11299, flag applied. It does not reproduce on gfx942, so the
+remaining difference is the hardware itself.
 
 The flag is verifiably applied (`ucx_info -d` reports `error handling: peer
 failure` for `rocm_ipc`) and `rocm_ipc` still never enters the RMA lane on
