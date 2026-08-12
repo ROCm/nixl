@@ -154,6 +154,9 @@ ARG UCX_GIT_URL=https://github.com/ROCm/ucx.git
 ARG UCX_REF=v1.19.x
 # UCX_FAST=1 drops logging/asserts/param-checks for a quicker dev rebuild.
 ARG UCX_FAST=0
+# UCX_DEBUG_LOG=1 keeps ucs_debug/ucs_trace compiled in, which is the only way
+# to see UCX's transport-selection reasoning.  Diagnostic builds only.
+ARG UCX_DEBUG_LOG=0
 
 ENV UCX_PREFIX=/opt/rocnixl-ucx
 
@@ -168,7 +171,7 @@ RUN SRC_NAME=ucx \
     bash /tmp/scripts/clone-src.sh
 
 RUN --mount=type=cache,target=/root/.cache,sharing=locked \
-    UCX_SRC=/tmp/ucx-src UCX_FAST="${UCX_FAST}" \
+    UCX_SRC=/tmp/ucx-src UCX_FAST="${UCX_FAST}" UCX_DEBUG_LOG="${UCX_DEBUG_LOG}" \
     bash /tmp/scripts/build-ucx.sh && \
     rm -rf /tmp/ucx-src
 

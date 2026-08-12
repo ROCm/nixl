@@ -77,6 +77,7 @@ _BUILD_ARGS := \
 	--build-arg UCX_GIT_URL=$(UCX_GIT_URL) \
 	--build-arg UCX_REF=$(UCX_REF) \
 	--build-arg UCX_FAST=$(UCX_FAST) \
+	$(if $(UCX_DEBUG_LOG),--build-arg UCX_DEBUG_LOG=$(UCX_DEBUG_LOG),) \
 	--build-arg VERSION=$(VERSION) \
 	--build-arg INSTALL_TORCH=$(INSTALL_TORCH) \
 	$(if $(ROCM_BASE_IMAGE),--build-arg ROCM_BASE_IMAGE=$(ROCM_BASE_IMAGE),) \

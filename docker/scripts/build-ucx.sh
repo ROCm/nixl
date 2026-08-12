@@ -40,6 +40,15 @@ UCX_CONFIGURE_FLAGS=(
 	--enable-mt
 )
 
+# UCX_DEBUG_LOG=1 keeps ucs_debug()/ucs_trace() compiled in.  A release build
+# strips them, which matters because UCX's transport-selection reasoning -- why
+# a given transport was rejected for a lane -- is only emitted at debug level.
+# Without this, `UCX_LOG_LEVEL=debug` silently produces nothing and you are left
+# guessing at ucp_wireup_select.c.  Costs some performance; do not ship it.
+if [[ "${UCX_DEBUG_LOG:-0}" == "1" ]]; then
+	UCX_CONFIGURE_FLAGS+=(--enable-logging --enable-debug-data)
+fi
+
 # UCX_FAST=1 trades diagnostics for compile time on the dev edit-build loop.
 if [[ "${UCX_FAST:-0}" == "1" ]]; then
 	UCX_CONFIGURE_FLAGS+=(

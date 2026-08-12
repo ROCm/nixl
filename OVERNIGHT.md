@@ -99,26 +99,51 @@ unreleased `main` (no v1.4 tag exists) and carries the explicit ROCm VRAM
 memtype hint (#1536). This tree pins v1.3.2. NIXL `main` + the flag on gfx942
 is the next experiment.
 
-### The NIXL-free reproducer
+### The NIXL-free reproducer, and the actual root cause
 
-The sharpest form of the problem involves no NIXL. Same node, same
-`UCX_TLS=rocm_ipc,rocm_copy,sm,self,tcp`, same ROCm memory, two UCP APIs:
+Same node, same `UCX_TLS`, same ROCm memory, two UCP APIs:
 
 | `ucx_perftest -m rocm` | lanes | bandwidth |
 |---|---|---|
-| `-t ucp_put_bw` (RMA) | `rma(sysv/posix)` | 362-782 MB/s |
-| `-t tag_bw` (rendezvous) | `tag(... rocm_ipc/rocm_ipc)` | 510,877 MB/s |
+| `-t ucp_put_bw` (RMA) | `rma(sysv/posix)` | ~0.4 GB/s |
+| `-t tag_bw` (rendezvous) | `tag(... rocm_ipc/rocm_ipc)` | ~511 GB/s |
 
-`rocm_ipc` is not broken -- on the rendezvous path it moves GPU memory at full
-speed. What is missing is a route from UCP's **RMA API** to it. NIXL's UCX
-backend is RMA-based and inherits that directly.
+`rocm_ipc` is neither broken nor slow. Two distinct things go wrong on the RMA
+path, and only the first is a capability problem:
 
-MORI is unaffected because it never asks UCX: it exports with
-`hipIpcGetMemHandle`, imports with `hipIpcOpenMemHandle` and copies with
-`hipMemcpyAsync` on its own streams. Roughly five HIP calls and no protocol
-negotiation, no lane selection, no AM-lane requirement. That is the whole
-reason MORI_IO gets 46.7 GB/s here and NIXL/UCX gets 0.69 -- not a better copy,
-just a path that reaches the hardware.
+**1. `rocm_ipc` was not eligible for an `rma_bw` lane.**
+`ucp_wireup_add_rma_bw_lanes` adds `UCT_MD_FLAG_INVALIDATE_RMA` to its criteria
+whenever the endpoint requests peer error handling, which NIXL does by default.
+`cuda_ipc` advertises that flag; `rocm_ipc` does not. Bringing `rocm_ipc`'s MD
+and iface flags to parity with `cuda_ipc` fixes it, verifiably:
+
+```
+without patch:  no rma_bw lane for rocm_ipc at all
+with patch:     ep lane[2]: 7:rocm_ipc/rocm_ipc.0 md[6] -> ... rma_bw#0
+```
+
+**2. UCP's RMA protocol selection never uses that lane.** `UCX_PROTO_INFO=y`,
+GPU to GPU:
+
+```
+| remote memory write by ucp_put*(multi) from rocm/GPU1 to rocm/dev[0] |
+| 0..inf | software emulation | tcp/eth2                              |
+```
+
+Software emulation over TCP across the whole size range, with an `rma_bw` lane
+on `rocm_ipc` sitting unused — because `rma_bw` lanes are consumed by the
+*rendezvous* protocols, which is why `tag_bw` flies on that same lane.
+
+So the parity patch is a real, verified half-fix that does not move end-to-end
+bandwidth (0.33 GB/s either way). What remains is a missing put/get zcopy
+protocol for GPU memory in UCP's protocol layer — a feature, not a flag. See
+`patches/ucx/README.md`.
+
+MORI is unaffected because it never asks UCX: `hipIpcGetMemHandle` on the
+exporter, `hipIpcOpenMemHandle` on the importer, `hipMemcpyAsync` on its own
+streams. Five HIP calls, no protocol negotiation. That is the whole reason
+MORI_IO gets 46.7 GB/s here and NIXL/UCX gets 0.69 — not a better copy, just a
+path that reaches the hardware.
 
 ### The NIC path: peermem is NOT the only option, but neither works here
 

@@ -4,9 +4,73 @@ Applied to `ROCm/ucx` at `UCX_REF` (see the `Makefile`), in lexical filename
 order, by the same mechanism as `patches/nixl/` and `patches/mori/`. See
 [../README.md](../README.md) for the rules.
 
-**Currently empty** — the pristine tag is built. Two patches are parked here
-disabled, as a record of what was tried against the intra-node `rocm_ipc`
-problem. Neither fixes it. Read on before enabling either.
+**Currently empty** — the pristine tag is built, because the one patch worth
+having only applies to openucx `master` and this tree pins ROCm/ucx `v1.19.x`.
+
+Files here:
+
+| File | |
+|---|---|
+| `01-rocm-ipc-cuda-ipc-capability-parity.patch.master-only` | The real finding. Gets `rocm_ipc` into the `rma_bw` lanes. Verified. Apply with `UCX_REF=master`. |
+| `01-rocm-ipc-errhandle-peer-failure.patch.disabled` | Superseded by the above — it is a strict subset. |
+| `02-rocm-ipc-rkey-ptr-flag.patch.disabled` | Also superseded; set the component flag but not the MD flag. |
+
+## The diagnosis, in full
+
+`rocm_ipc` is not slow and is not broken. Two UCP APIs, same node, same
+transports, same GPU memory:
+
+```
+ucx_perftest -t tag_bw     -m rocm  ->  tag(... rocm_ipc/rocm_ipc)  ~511 GB/s
+ucx_perftest -t ucp_put_bw -m rocm  ->  rma(sysv/posix)             ~0.4 GB/s
+```
+
+Two separate things go wrong on the RMA path, and only the first is a
+capability problem:
+
+**1. `rocm_ipc` was not eligible for an `rma_bw` lane.** `ucp_wireup_add_rma_bw_lanes`
+adds `UCT_MD_FLAG_INVALIDATE_RMA` to its criteria whenever the endpoint asks
+for peer error handling, which NIXL does by default. `cuda_ipc` advertises that
+flag; `rocm_ipc` did not. **The parity patch fixes this**, and it is directly
+observable:
+
+```
+without patch:  no rma_bw lane for rocm_ipc at all
+with patch:     ep lane[2]: 7:rocm_ipc/rocm_ipc.0 md[6] -> ... rma_bw#0
+```
+
+**2. UCP's RMA protocol selection never uses that lane.** With
+`UCX_PROTO_INFO=y`, for a GPU-to-GPU transfer:
+
+```
+| remote memory write by ucp_put*(multi) from rocm/GPU1 to rocm/dev[0] |
+| 0..inf | software emulation | tcp/eth2                              |
+```
+
+Software emulation over TCP for the entire size range, while an `rma_bw` lane
+on `rocm_ipc` sits unused. `rma_bw` lanes are consumed by the **rendezvous**
+protocols — which is exactly why `tag_bw` flies on that lane and `ucp_put_bw`
+does not.
+
+So end-to-end bandwidth is unchanged by the patch: 0.33 GB/s before, 0.33 GB/s
+after. The remaining gap is a missing put/get zcopy protocol for GPU memory in
+UCP's protocol layer. That is a feature, not a flag, and it needs a decision
+from whoever owns UCP protocol selection.
+
+### How to build with it
+
+```bash
+mv patches/ucx/01-rocm-ipc-cuda-ipc-capability-parity.patch.master-only \
+   patches/ucx/01-rocm-ipc-cuda-ipc-capability-parity.patch
+make dist-build-here MAKE_ARGS="UCX_GIT_URL=https://github.com/openucx/ucx.git UCX_REF=master"
+```
+
+Add `UCX_DEBUG_LOG=1` to keep `ucs_debug`/`ucs_trace` compiled in — without it
+`UCX_LOG_LEVEL=debug` prints nothing and none of the above is visible.
+
+## Superseded experiments
+
+
 
 ## Why UCX is patchable at all
 
