@@ -9,7 +9,7 @@
 # This plugin is what makes MORI reachable from NIXL at all.  nixlbench needs
 # one more, small change on top of it -- its --backend flag is gated on a
 # hardcoded list of names, so it rejects MORI_IO even when the agent can see
-# the plugin; that is 03-nixlbench-mori-io-backend.patch.  Together they mean
+# the plugin; that is 04-nixlbench-extra-backends.patch.  Together they mean
 # one benchmark, one set of buffer setup/warmup/timing rules, and switching
 # transport is one flag.
 #
@@ -32,46 +32,46 @@
 #     src/plugins/meson.build src/plugins/mori_io
 #
 diff --git a/meson.build b/meson.build
-index 0b9c7d0..4d092ca 100644
+index 10ba75f..8e0c118 100644
 --- a/meson.build
 +++ b/meson.build
 @@ -29,7 +29,7 @@ if enable_plugins_opt != '' and disable_plugins_opt != ''
      error('Cannot specify both enable_plugins and disable_plugins options')
  endif
  
--all_plugins = ['UCX', 'LIBFABRIC', 'POSIX', 'OBJ', 'GDS', 'GDS_MT', 'MOONCAKE', 'HF3FS', 'GUSLI', 'GPUNETIO', 'UCCL', 'AZURE_BLOB', 'INFINIA']
-+all_plugins = ['UCX', 'LIBFABRIC', 'POSIX', 'OBJ', 'GDS', 'GDS_MT', 'MOONCAKE', 'HF3FS', 'GUSLI', 'GPUNETIO', 'UCCL', 'AZURE_BLOB', 'INFINIA', 'MORI_IO']
+-all_plugins = ['UCX', 'LIBFABRIC', 'POSIX', 'OBJ', 'GDS', 'GDS_MT', 'AIS_MT', 'MOONCAKE', 'HF3FS', 'GUSLI', 'GPUNETIO', 'UCCL', 'AZURE_BLOB', 'INFINIA']
++all_plugins = ['UCX', 'LIBFABRIC', 'POSIX', 'OBJ', 'GDS', 'GDS_MT', 'AIS_MT', 'MOONCAKE', 'HF3FS', 'GUSLI', 'GPUNETIO', 'UCCL', 'AZURE_BLOB', 'INFINIA', 'MORI_IO']
  
  enabled_plugins = {}
  
-@@ -285,6 +285,65 @@ else
-     cuda_wheel_dir = 'nixl_cu12'
- endif
+@@ -312,6 +312,54 @@ endif
+ 
+ has_gpu = cuda_dep.found() or hip_dep.found()
  
 +# --- MORI (ROCm/mori) C++ SDK, for the MORI_IO backend plugin ---------------
 +# Opt-in and path-driven: -Dmori_path=<prefix> pointing at a `cmake --install`
 +# of ROCm/mori (include/mori/... plus lib/libmori_io.so).  Left empty -- the
 +# default -- mori_dep is a disabler and src/plugins/meson.build skips the
 +# plugin entirely, so an unpatched CUDA build is completely unaffected.
++#
++# ROCm detection is done here rather than reusing hip_dep so this patch stands
++# on its own: it applies with or without the AIS_MT/HIP patch ahead of it.
 +mori_dep = disabler()
 +mori_path = get_option('mori_path')
 +if mori_path != ''
 +    mori_inc = mori_path + '/include'
 +    mori_lib = mori_path + '/lib'
 +    # MORI's public headers include <hip/hip_runtime_api.h> directly, so a
-+    # consumer needs the ROCm include/lib on its own command line.  Upstream
-+    # NIXL has no HIP detection at all (meson.build only looks for CUDA), so
-+    # resolve it here from ROCM_PATH, the same variable the ROCm toolchain and
-+    # MORI itself use.
-+    rocm_home = run_command('bash', '-c', 'echo ${ROCM_PATH:-/opt/rocm}',
-+                            check: true).stdout().strip()
-+    if not fs.exists(rocm_home / 'include' / 'hip' / 'hip_runtime_api.h')
-+        error('mori_path is set but no ROCm HIP headers under ' + rocm_home +
-+              '; set ROCM_PATH to the ROCm install root.')
-+    endif
++    # consumer needs the ROCm include/lib on its own command line.
++    mori_rocm_home = run_command('bash', '-c', 'echo ${ROCM_PATH:-/opt/rocm}',
++                                 check: true).stdout().strip()
 +    if not fs.exists(mori_inc / 'mori' / 'io' / 'engine.hpp')
 +        error('mori_path=' + mori_path + ' has no include/mori/io/engine.hpp; ' +
 +              'point it at a `cmake --install` of ROCm/mori.')
++    endif
++    if not fs.exists(mori_rocm_home / 'include' / 'hip' / 'hip_runtime_api.h')
++        error('mori_path is set but no ROCm HIP headers under ' + mori_rocm_home +
++              '; set ROCM_PATH to the ROCm install root.')
 +    endif
 +    mori_io_lib = cpp.find_library('mori_io', dirs: [mori_lib], required: true)
 +    mori_app_lib = cpp.find_library('mori_application', dirs: [mori_lib], required: true)
@@ -79,31 +79,20 @@ index 0b9c7d0..4d092ca 100644
 +    # the comment in ROCm/mori's CMakeLists: two copies of spdlog exporting the
 +    # same symbols corrupt the heap).  mori/utils/mori_log.hpp is pulled in by
 +    # every mori/io header, so a consumer must compile in the same mode
-+    # (SPDLOG_COMPILED_LIB) and link MORI's own libspdlog.a -- header-only mode
-+    # here would silently instantiate a second, incompatible logger.
++    # (SPDLOG_COMPILED_LIB) and link MORI's own libspdlog.a.
 +    mori_spdlog_lib = cpp.find_library('spdlog', dirs: [mori_lib], required: true)
 +    mori_dep = declare_dependency(
 +        dependencies: [mori_io_lib, mori_app_lib, mori_spdlog_lib],
-+        # MORI headers include <hip/hip_runtime.h> and <msgpack.hpp>; the
-+        # msgpack headers are staged into the same include dir by the image
-+        # build because MORI's install rules do not ship its submodule.
-+        #
 +        # MSGPACK_NO_BOOST mirrors what MORI compiles libmori_io with
-+        # (target_compile_definitions(mori_io PUBLIC MSGPACK_NO_BOOST) in
-+        # src/io/CMakeLists.txt).  It is not optional: without it msgpack's
-+        # sysdep.hpp reaches for <boost/predef/other/endian.h>, and defining it
-+        # differently on the two sides of the ABI would be worse than the
-+        # missing header.
++        # (target_compile_definitions(mori_io PUBLIC MSGPACK_NO_BOOST)).
 +        compile_args: ['-D__HIP_PLATFORM_AMD__', '-DMSGPACK_NO_BOOST',
 +                       '-DSPDLOG_COMPILED_LIB'],
 +        # is_system (-isystem): MORI's and ROCm's headers are third-party here,
-+        # and NIXL compiles with -Werror.  Without this, warnings from inside
-+        # rdma.hpp (sign-compare, unused-function) fail OUR build -- a warning
-+        # in a dependency's header is not something this plugin can fix.
-+        include_directories: include_directories(mori_inc, rocm_home + '/include',
++        # and NIXL compiles with -Werror.
++        include_directories: include_directories(mori_inc, mori_rocm_home + '/include',
 +                                                 is_system: true),
 +        link_args: ['-L' + mori_lib, '-Wl,-rpath,' + mori_lib,
-+                    '-L' + rocm_home + '/lib', '-lamdhip64'])
++                    '-L' + mori_rocm_home + '/lib', '-lamdhip64'])
 +    message('MORI SDK found at ' + mori_path + '; MORI_IO backend enabled')
 +endif
 +
@@ -111,22 +100,22 @@ index 0b9c7d0..4d092ca 100644
  # without otherwise affecting the build. Non-empty value wins over the
  # autodetected CUDA-major value above: e.g. -Dwheel_variant=rocm -> nixl_rocm.
 diff --git a/meson_options.txt b/meson_options.txt
-index d447843..144ffc2 100644
+index e4bf861..c32eca9 100644
 --- a/meson_options.txt
 +++ b/meson_options.txt
-@@ -23,6 +23,7 @@ option('disable_infinia_backend', type : 'boolean', value : false, description :
- option('infinia_path', type: 'string', value: '/opt/ddn/red/', description: 'Path to Infinia client install')
+@@ -25,6 +25,7 @@ option('infinia_path', type: 'string', value: '/opt/ddn/red/', description: 'Pat
  option('install_headers', type : 'boolean', value : true, description : 'install headers')
  option('gds_path', type: 'string', value: '/usr/local/cuda/', description: 'Path to GDS CuFile install')
+ option('rocm_ais_path', type: 'string', value: '', description: 'Path to hipFile install for AIS_MT (default: auto-detect via ROCM_PATH or /opt/rocm)')
 +option('mori_path', type: 'string', value: '', description: 'Path to the MORI (ROCm/mori) C++ SDK install prefix for the MORI_IO backend. Empty disables the plugin.')
  option('cudapath_inc', type: 'string', value: '', description: 'Include path for CUDA')
  option('cudapath_lib', type: 'string', value: '', description: 'Library path for CUDA')
  option('cudapath_stub', type: 'string', value: '', description: 'Extra Stub path for CUDA')
 diff --git a/src/plugins/meson.build b/src/plugins/meson.build
-index 055ed17..a47aef0 100644
+index 4b69d29..23b487e 100644
 --- a/src/plugins/meson.build
 +++ b/src/plugins/meson.build
-@@ -140,4 +140,12 @@ if enabled_plugins.get('GPUNETIO')
+@@ -155,4 +155,12 @@ if enabled_plugins.get('GPUNETIO')
      endif
  endif
  

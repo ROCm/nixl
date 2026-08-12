@@ -6,13 +6,17 @@
 # Regenerate 01-nixl-mori-io-backend.patch from a NIXL work tree.
 #
 # The patch is large and mostly new files, so it is developed as a real
-# checkout rather than by editing the .patch: clone NIXL at the pinned ref,
-# `git apply` the current patch, edit, then run this to export it again with
-# its comment header preserved.
+# checkout rather than by editing the .patch.
+#
+# It is patch 02, and patch 01 touches some of the same lines, so the work tree
+# must have 01 applied AND COMMITTED first -- this script diffs against HEAD,
+# so whatever is committed becomes the baseline the patch is expressed against.
 #
 #   WORK=/tmp/nixl-mori-work/nixl
 #   git clone --depth 1 --branch v1.3.2 https://github.com/ai-dynamo/nixl.git "$WORK"
-#   git -C "$WORK" apply patches/nixl/01-nixl-mori-io-backend.patch
+#   git -C "$WORK" apply patches/nixl/01-nixl-rocm-hip-ais-mt.patch
+#   git -C "$WORK" add -A && git -C "$WORK" commit -m "baseline: patch 01"
+#   git -C "$WORK" apply patches/nixl/02-nixl-mori-io-backend.patch
 #   # ...edit $WORK...
 #   patches/nixl/regen-mori-io-patch.sh "$WORK"
 #
@@ -20,7 +24,7 @@
 set -euo pipefail
 
 PATCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PATCH="${PATCH_DIR}/01-nixl-mori-io-backend.patch"
+PATCH="${PATCH_DIR}/02-nixl-mori-io-backend.patch"
 WORK="${1:-/tmp/nixl-mori-work/nixl}"
 
 # Paths the patch owns.  Keep in sync with the patch header's regenerate note.

@@ -27,6 +27,10 @@
 #   EXTRA_ARGS     appended to both invocations
 #   TIMEOUT        seconds before giving up     (default: 300)
 #   ROLE           initiator|target|both        (default: both)
+#   FILEPATH       directory for storage backends (POSIX/GDS/...); required
+#                  for those, ignored otherwise
+#   POSIX_API      AIO, URING or POSIXAIO       (default: AIO)
+#   DIRECT_IO      1 = O_DIRECT, bypass the page cache (default: 1)
 #
 # ROLE lets the two halves run on different NODES: start `ROLE=target` on one
 # and `ROLE=initiator ASIO_ADDR=<target-host>` on the other.  `both` runs the
@@ -49,6 +53,29 @@ fi
 
 # shellcheck disable=SC2206  # intentional word split
 _extra=(${EXTRA_ARGS})
+
+# Storage backends address a file, not a peer's memory.  nixlbench needs
+# --filepath for them and fails with a bare "No such file or directory" if the
+# directory does not exist, so check it here where the message can be useful.
+_STORAGE_BACKENDS=" POSIX GDS GDS_MT HF3FS OBJ GUSLI AZURE_BLOB INFINIA "
+if [[ "${_STORAGE_BACKENDS}" == *" ${BACKEND} "* ]]; then
+	if [[ -z "${FILEPATH:-}" ]]; then
+		echo "ERROR: ${BACKEND} is a storage backend -- set FILEPATH to a writable directory" >&2
+		echo "       e.g. FILEPATH=/mnt/nixl-nvme-0/bench (an NVMe mount on the node)" >&2
+		exit 2
+	fi
+	if ! mkdir -p "${FILEPATH}" 2> /dev/null || [[ ! -w "${FILEPATH}" ]]; then
+		echo "ERROR: FILEPATH=${FILEPATH} is not writable from inside the container" >&2
+		exit 2
+	fi
+	_extra+=(--filepath "${FILEPATH}")
+	# O_DIRECT by default: without it the first run warms the page cache and
+	# every later one measures RAM, which is not what an NVMe test is for.
+	_extra+=(--storage_enable_direct "$([[ "${DIRECT_IO:-1}" == "1" ]] && echo true || echo false)")
+	[[ "${BACKEND}" == "POSIX" ]] && _extra+=(--posix_api_type "${POSIX_API:-AIO}")
+	echo "storage backend: filepath=${FILEPATH} direct_io=${DIRECT_IO:-1}" \
+		"${POSIX_API:+api=${POSIX_API}}"
+fi
 
 # The pair rendezvouses by "first one to bind wins, the other connects".  If
 # something ELSE already holds the port -- easy with --network=host on a shared

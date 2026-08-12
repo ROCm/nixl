@@ -90,8 +90,14 @@ DOCKER_BUILD := DOCKER_BUILDKIT=1 docker build --progress=$(PROGRESS) -f $(DOCKE
 
 # ---- Container run flags ----------------------------------------------------
 # ROCm needs /dev/kfd + /dev/dri and the render/video groups; RDMA (NIXL UCX,
-# MORI IBGDA) additionally needs the verbs devices, IPC_LOCK for pinned memory,
-# and host networking + IPC for multi-process runs.
+# MORI IBGDA) additionally needs the verbs devices, and host networking + IPC
+# for multi-process runs.
+#
+# IPC_LOCK *and* an unlimited memlock ulimit are both required, and the second
+# is the one that is easy to miss: docker defaults memlock to 64 KiB, so a
+# GPUDirect registration of a multi-GiB buffer fails with a bare
+# "failed to register address ... Input/output error" from UCX and the run
+# quietly falls back to a slow transport.
 _GROUP_ADDS := $(shell for g in video render; do getent group $$g >/dev/null && echo --group-add $$g; done)
 DOCKER_RUN_FLAGS ?= \
 	--rm \
@@ -100,6 +106,7 @@ DOCKER_RUN_FLAGS ?= \
 	$(if $(wildcard /dev/infiniband),--device=/dev/infiniband,) \
 	$(_GROUP_ADDS) \
 	--cap-add=IPC_LOCK \
+	--ulimit memlock=-1:-1 \
 	--cap-add=SYS_PTRACE \
 	--security-opt seccomp=unconfined \
 	--ipc=host \
@@ -118,7 +125,7 @@ COMPONENT ?= all
 DIST := $(REPO_ROOT)/.slurm/run-build.sh
 
 .PHONY: help build build-nixl build-mori wheels shell test test-nogpu \
-        nixlbench bench bench-compare dist-build dist-load \
+        nixlbench bench bench-nvme bench-compare dist-build dist-load \
         dist-bench dist-bench-2node \
         patch-check patch-list print-tag print-config clean clean-images
 
@@ -157,6 +164,8 @@ help:
 	@echo "  make bench BACKEND=UCX|MORI_IO [SEG_TYPE=VRAM|DRAM]"
 	@echo "                       Two-process nixlbench pair over the ASIO runtime"
 	@echo "  make bench-compare   Same run for UCX then MORI_IO, back to back"
+	@echo "  make bench-nvme [NVME_PATH=/mnt/nixl-nvme-0/... POSIX_API=AIO|URING]"
+	@echo "                       NVMe via NIXL's POSIX backend, O_DIRECT"
 	@echo ""
 	@echo "Introspection:"
 	@echo "  make print-tag       Print the derived image tag"
@@ -249,11 +258,26 @@ nixlbench:
 # directly comparable: same buffers, same warmup, same timing code.
 BACKEND  ?= UCX
 SEG_TYPE ?= VRAM
+# FILEPATH selects a storage target for the POSIX backend; it is bind-mounted
+# into the container at the same path so the flag nixlbench sees is the flag
+# you typed.
 bench:
 	docker run $(DOCKER_RUN_FLAGS) \
+		$(if $(FILEPATH),-v $(FILEPATH):$(FILEPATH) -e FILEPATH=$(FILEPATH),) \
+		$(if $(POSIX_API),-e POSIX_API=$(POSIX_API),) \
+		$(if $(DIRECT_IO),-e DIRECT_IO=$(DIRECT_IO),) \
 		-e BACKEND=$(BACKEND) -e SEG_TYPE=$(SEG_TYPE) \
 		$(if $(BENCH_EXTRA),-e EXTRA_ARGS='$(BENCH_EXTRA)',) \
 		"$(IMAGE_REF)" run-nixlbench
+
+# NVMe through NIXL's POSIX backend.  FILEPATH must be a directory on the drive
+# under test; the node's drives are mounted at /mnt/nixl-nvme-N.
+NVME_PATH ?= /mnt/nixl-nvme-0/nixlbench-$(USER)
+bench-nvme:
+	@test -d "$(dir $(NVME_PATH))" || { echo "ERROR: $(dir $(NVME_PATH)) does not exist — is this an NVMe node?" >&2; exit 1; }
+	@mkdir -p "$(NVME_PATH)"
+	$(MAKE) --no-print-directory bench BACKEND=POSIX SEG_TYPE=DRAM \
+		FILEPATH="$(NVME_PATH)" POSIX_API=$(if $(POSIX_API),$(POSIX_API),AIO)
 
 bench-compare:                 # UCX then MORI_IO, same settings, back to back
 	@$(MAKE) --no-print-directory bench BACKEND=UCX      SEG_TYPE=$(SEG_TYPE) || true

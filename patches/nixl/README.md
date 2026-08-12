@@ -7,7 +7,7 @@ filename order. See [../README.md](../README.md) for the rules.
 |---|---|
 | `01-nixl-mori-io-backend.patch` | New `src/plugins/mori_io/` — a NIXL backend engine implemented on MORI-IO, plus the meson wiring (`-Dmori_path=`). |
 | `02-nixlbench-rocm-tomlplusplus-noinline.patch` | Fixes the nixlbench ROCm build: HIP defines `__noinline__` as a macro, which breaks toml++'s `__has_attribute` check. |
-| `03-nixlbench-mori-io-backend.patch` | Adds `MORI_IO` to nixlbench's accepted `--backend` list. |
+| `04-nixlbench-extra-backends.patch` | Adds `MORI_IO` to nixlbench's accepted `--backend` list. |
 
 ## Why a MORI plugin exists here
 
@@ -44,7 +44,7 @@ TCP listener on an ephemeral port, advertised to peers inside `getConnInfo`.
 ```bash
 WORK=/tmp/nixl-mori-work/nixl
 git clone --depth 1 --branch v1.3.2 https://github.com/ai-dynamo/nixl.git "$WORK"
-git -C "$WORK" apply patches/nixl/01-nixl-mori-io-backend.patch
+git -C "$WORK" apply patches/nixl/02-nixl-mori-io-backend.patch
 # ...edit $WORK...
 patches/nixl/regen-mori-io-patch.sh "$WORK"
 make patch-check COMPONENT=nixl && make build-nixl

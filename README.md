@@ -130,7 +130,7 @@ three patches:
 |---|---|
 | `01-nixl-mori-io-backend.patch` | New `src/plugins/mori_io/`: a NIXL backend engine on top of MORI-IO, plus meson wiring (`-Dmori_path=`). This is what makes `--backend MORI_IO` possible. |
 | `02-nixlbench-rocm-tomlplusplus-noinline.patch` | ROCm defines `__noinline__` as a macro, which breaks toml++'s `__has_attribute` check and the nixlbench ROCm build. |
-| `03-nixlbench-mori-io-backend.patch` | nixlbench gates `--backend` on a hardcoded list; this adds MORI_IO to it. |
+| `04-nixlbench-extra-backends.patch` | nixlbench gates `--backend` on a hardcoded list; this adds MORI_IO to it. |
 
 Patch 01 is developed as a real checkout rather than by editing the `.patch` —
 `patches/nixl/regen-mori-io-patch.sh <work-tree>` re-exports it with its

@@ -197,7 +197,7 @@ None of these are in NIXL or MORI source; all are fixed in-tree.
    NIXL plugin named MORI_IO would be selectable with no nixlbench change.
    Wrong: `nixl_worker.cpp` gates the flag on a hardcoded list and exits with
    "Unsupported NIXLBench backend" even when the agent can see the plugin.
-   → `patches/nixl/03-nixlbench-mori-io-backend.patch`.
+   → `patches/nixl/04-nixlbench-extra-backends.patch`.
 
 8. **`nixlbench --help` exits 1** (gflags convention), so any check of the form
    `nixlbench --help && echo ok` silently never fires. Checks now assert on
@@ -218,7 +218,7 @@ None of these are in NIXL or MORI source; all are fixed in-tree.
 |---|---|
 | `01-nixl-mori-io-backend.patch` | New `src/plugins/mori_io/` — a NIXL backend engine on top of MORI-IO, plus the meson wiring (`-Dmori_path=`). ~900 lines, mostly new files. |
 | `02-nixlbench-rocm-tomlplusplus-noinline.patch` | The HIP/toml++ `__noinline__` collision above. |
-| `03-nixlbench-mori-io-backend.patch` | Teach nixlbench's `--backend` about MORI_IO. |
+| `04-nixlbench-extra-backends.patch` | Teach nixlbench's `--backend` about MORI_IO. |
 
 `patches/mori/` is still empty — MORI v1.2.2 builds pristine.
 

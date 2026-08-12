@@ -42,6 +42,7 @@
 #   NM_IMAGE_DIR       where the tarball lives        (default: /scratch/$USER/nixl-mori-images)
 #   NM_BENCH_EXTRA     extra nixlbench flags, both ranks
 #   NM_ASIO_PORT       rendezvous port for the 2-node case (default: 18515)
+#   NM_FORCE_LOAD      1 = docker load even if the node looks up to date
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -81,9 +82,13 @@ TARBALL="${NM_IMAGE_DIR}/${IMAGE_REF//[:\/]/_}.tar"
 
 BACKENDS="${NM_BACKENDS//,/ }"
 
-# Docker flags: ROCm devices, the verbs devices for RDMA, IPC_LOCK for pinned
-# memory registration, host networking so the two nodes can see each other.
+# Docker flags: ROCm devices, host networking so two nodes can see each other,
+# and the two things GPUDirect registration needs -- CAP_IPC_LOCK and an
+# unlimited memlock ulimit.  Docker's 64 KiB memlock default is what makes UCX
+# report "failed to register address ... (rocm) ... Input/output error" and
+# then fall back to a transport orders of magnitude slower.
 DOCKER_FLAGS='--rm --device=/dev/kfd --device=/dev/dri --cap-add=IPC_LOCK
+    --ulimit memlock=-1:-1
     --cap-add=SYS_PTRACE --security-opt seccomp=unconfined --ipc=host
     --network=host --shm-size=16g'
 
@@ -99,6 +104,7 @@ NODES='${NM_BENCH_NODES}'
 ASIO_PORT='${NM_ASIO_PORT}'
 BENCH_EXTRA='${NM_BENCH_EXTRA}'
 DOCKER_FLAGS='${DOCKER_FLAGS}'
+FORCE_LOAD='${NM_FORCE_LOAD:-0}'
 PREAMBLE
 	cat << 'BODY'
 
@@ -107,17 +113,32 @@ echo "bench nodes: ${SLURM_JOB_NODELIST:-$(hostname)}"
 
 # Make sure every node in the job has the image before any rank starts, so a
 # slow `docker load` on one node cannot look like a rendezvous timeout.
+# "Is the tag present" is NOT a sufficient test for whether to load.  The image
+# tag encodes the component versions (ROCm/NIXL/MORI), not the state of this
+# tree, so a rebuild with new patches produces the SAME tag -- and a node that
+# already holds the previous build will happily skip the load and run stale
+# code.  That has bitten twice: a benchmark reporting a bug that was already
+# fixed, because the node was running yesterday's image.
+#
+# So compare timestamps: reload whenever the tarball is newer than the image
+# that is loaded.  NM_FORCE_LOAD=1 reloads unconditionally.
 load_image() {
-    if docker image inspect "${IMAGE_REF}" >/dev/null 2>&1; then
-        echo "$(hostname): ${IMAGE_REF} already present"
-        return 0
-    fi
     [ -f "${TARBALL}" ] || { echo "$(hostname): no tarball at ${TARBALL} (run make dist-build)" >&2; exit 1; }
+
+    if [ "${FORCE_LOAD}" != "1" ] && docker image inspect "${IMAGE_REF}" >/dev/null 2>&1; then
+        img_epoch="$(date -d "$(docker image inspect --format '{{.Created}}' "${IMAGE_REF}")" +%s 2>/dev/null || echo 0)"
+        tar_epoch="$(stat -c %Y "${TARBALL}" 2>/dev/null || echo 0)"
+        if [ "${img_epoch}" -ge "${tar_epoch}" ] && [ "${img_epoch}" -gt 0 ]; then
+            echo "$(hostname): ${IMAGE_REF} is current (image $(date -d @${img_epoch} +%H:%M) >= tarball $(date -d @${tar_epoch} +%H:%M))"
+            return 0
+        fi
+        echo "$(hostname): loaded image ($(date -d @${img_epoch} +%H:%M)) is older than the tarball ($(date -d @${tar_epoch} +%H:%M)) -- reloading"
+    fi
     echo "$(hostname): loading ${TARBALL}"
     docker load -i "${TARBALL}" >/dev/null
 }
 export -f load_image
-export IMAGE_REF TARBALL
+export IMAGE_REF TARBALL FORCE_LOAD
 
 if [ "${NODES}" = "1" ]; then
     load_image
@@ -132,8 +153,13 @@ for backend in ${BACKENDS}; do
     if [ "${NODES}" = "1" ]; then
         # Both ranks in one container on one node; run-nixlbench picks a free
         # rendezvous port itself and pairs GPU 0 with GPU 1.
+        # /dev/infiniband must be passed through here too, not just in the
+        # 2-node branch: without it UCX has no IB transport and MORI's RDMA
+        # backend cannot initialise, so a single-node run silently measures
+        # whatever slow fallback is left.
         # shellcheck disable=SC2086
         docker run ${DOCKER_FLAGS} \
+            $([ -d /dev/infiniband ] && echo --device=/dev/infiniband) \
             -e BACKEND="${backend}" -e SEG_TYPE="${SEG_TYPE}" \
             -e EXTRA_ARGS="${BENCH_EXTRA}" \
             "${IMAGE_REF}" run-nixlbench || echo "backend ${backend} FAILED"
