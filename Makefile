@@ -19,8 +19,8 @@ NIXL_GIT_URL ?= https://github.com/ai-dynamo/nixl.git
 NIXL_REF     ?= v1.3.2
 MORI_GIT_URL ?= https://github.com/ROCm/mori.git
 MORI_REF     ?= v1.2.2
-UCX_GIT_URL  ?= https://github.com/ROCm/ucx.git
-UCX_REF      ?= v1.19.x
+UCX_GIT_URL  ?= https://github.com/openucx/ucx.git
+UCX_REF      ?= v1.22.0
 
 override VERSION := $(strip $(file <$(REPO_ROOT)/VERSION))
 

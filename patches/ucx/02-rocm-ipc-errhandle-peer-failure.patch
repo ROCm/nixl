@@ -58,6 +58,14 @@
 # RMA protocol selection then declines to use.  It needs patch 01 to matter,
 # and patch 01 needs it to matter to NIXL.  Neither is sufficient alone.
 #
+# TREE
+#
+# Written against openucx master, rebased onto the v1.22.0 tag (the current
+# release, and what UCX_REF pins).  The context differs: master ends the
+# cap.flags chain with UCT_IFACE_FLAG_DEVICE_EP, which v1.22.0 does not have,
+# so this will not apply to master as written.  Re-measured after the rebase:
+# 47.99 GB/s at 64 MiB, against 0.44 stock.
+#
 # MEASURED, MI300X gfx942, GPU 0 to GPU 1, 64 MiB, nixlbench --backend UCX
 #
 #   ground truth (hipMemcpyPeer)        48.8 GB/s
@@ -67,16 +75,16 @@
 #   MORI-IO, same benchmark             46.8 GB/s
 #
 diff --git a/src/uct/rocm/ipc/rocm_ipc_iface.c b/src/uct/rocm/ipc/rocm_ipc_iface.c
-index 89c82d1..4f89324 100644
+index f667a61..e15c61a 100644
 --- a/src/uct/rocm/ipc/rocm_ipc_iface.c
 +++ b/src/uct/rocm/ipc/rocm_ipc_iface.c
-@@ -124,7 +124,8 @@ static ucs_status_t uct_rocm_ipc_iface_query(uct_iface_h tl_iface,
+@@ -123,7 +123,8 @@ static ucs_status_t uct_rocm_ipc_iface_query(uct_iface_h tl_iface,
      iface_attr->cap.flags               = UCT_IFACE_FLAG_GET_ZCOPY |
-                                           UCT_IFACE_FLAG_PUT_ZCOPY | UCT_IFACE_FLAG_PENDING |
-                                           UCT_IFACE_FLAG_CONNECT_TO_IFACE |
--                                          UCT_IFACE_FLAG_DEVICE_EP;
-+                                          UCT_IFACE_FLAG_DEVICE_EP |
+                                           UCT_IFACE_FLAG_PUT_ZCOPY |
+                                           UCT_IFACE_FLAG_PENDING   |
+-                                          UCT_IFACE_FLAG_CONNECT_TO_IFACE;
++                                          UCT_IFACE_FLAG_CONNECT_TO_IFACE |
 +                                          UCT_IFACE_FLAG_ERRHANDLE_PEER_FAILURE;
-     iface_attr->ctl_device              = UCS_SYS_DEVICE_ID_UNKNOWN;
  
      iface_attr->latency = ucs_linear_func_make(iface->config.latency, 0);
+     iface_attr->bandwidth.dedicated     = 0;

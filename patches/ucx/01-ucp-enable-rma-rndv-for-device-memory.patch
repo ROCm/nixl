@@ -67,10 +67,10 @@
 # sufficient on its own there.
 #
 diff --git a/src/ucp/core/ucp_context.c b/src/ucp/core/ucp_context.c
-index f3e59c2..cc7fd48 100644
+index 9501940..ce15306 100644
 --- a/src/ucp/core/ucp_context.c
 +++ b/src/ucp/core/ucp_context.c
-@@ -400,8 +400,12 @@ static ucs_config_field_t ucp_context_config_table[] = {
+@@ -390,8 +390,12 @@ static ucs_config_field_t ucp_context_config_table[] = {
     "even if invalidation workflow isn't supported",
     ucs_offsetof(ucp_context_config_t, rndv_errh_ppln_enable), UCS_CONFIG_TYPE_BOOL},
  
@@ -79,14 +79,14 @@ index f3e59c2..cc7fd48 100644
 +  {"RMA_PPLN_ENABLE", "y",
 +   "Enable the RMA rendezvous put/get protocols.  These are the only RMA\n"
 +   "protocols that can use an rma_bw lane, and therefore the only ones that\n"
-+   "can reach an IPC transport for device memory; with them disabled, a\n"
-+   "ucp_put/ucp_get between two GPUs falls back to software emulation over\n"
-+   "shared memory or TCP.  Set to 'n' to restore the previous behaviour.",
++   "can reach a zero-copy-only IPC transport (rocm_ipc, cuda_ipc) for device\n"
++   "memory; with them disabled, a put or get on device memory falls back to\n"
++   "software emulation.  Set to 'n' to restore the previous behaviour.",
     ucs_offsetof(ucp_context_config_t, rma_ppln_enable), UCS_CONFIG_TYPE_BOOL},
  
    {"FLUSH_WORKER_EPS", "y",
 diff --git a/src/ucp/rma/rma_rndv.c b/src/ucp/rma/rma_rndv.c
-index e9bd4d0..e761f98 100644
+index 24aedbc..b4ea23e 100644
 --- a/src/ucp/rma/rma_rndv.c
 +++ b/src/ucp/rma/rma_rndv.c
 @@ -38,8 +38,7 @@ ucp_proto_rma_rndv_probe_check(const ucp_proto_init_params_t *init_params,

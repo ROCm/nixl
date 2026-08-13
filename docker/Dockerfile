@@ -7,7 +7,7 @@
 #
 #   NIXL: ai-dynamo/nixl   ${NIXL_REF} + every patch in patches/nixl/
 #   MORI: ROCm/mori        ${MORI_REF} + every patch in patches/mori/
-#   UCX:  ROCm/ucx         ${UCX_REF} + every patch in patches/ucx/
+#   UCX:  openucx/ucx      ${UCX_REF} + every patch in patches/ucx/
 #                                       (source-built so NIXL's UCX backend is
 #                                        ROCm/HIP-aware; the distro UCX is not)
 #
@@ -147,11 +147,14 @@ RUN printf '%s\n' /opt/rocm/lib /opt/rocm/lib64 > /etc/ld.so.conf.d/rocm.conf &&
     ldconfig -p | grep -q libamdhip64 || \
     { echo "ERROR: libamdhip64 still not in the ldconfig cache" >&2; exit 1; }
 
-# ----- 1. UCX (ROCm/ucx, source-built with HIP memory support) ---------------
+# ----- 1. UCX (source-built with HIP memory support) -------------------------
+# openucx rather than the ROCm fork: the fork has no v1.22 tag, only a v1.22.x
+# branch whose head is the identical commit to openucx's v1.22.0 tag, and a tag
+# is reproducible where a branch head is not.  Revisit if the fork diverges.
 FROM base AS ucx
 
-ARG UCX_GIT_URL=https://github.com/ROCm/ucx.git
-ARG UCX_REF=v1.19.x
+ARG UCX_GIT_URL=https://github.com/openucx/ucx.git
+ARG UCX_REF=v1.22.0
 # UCX_FAST=1 drops logging/asserts/param-checks for a quicker dev rebuild.
 ARG UCX_FAST=0
 # UCX_DEBUG_LOG=1 keeps ucs_debug/ucs_trace compiled in, which is the only way

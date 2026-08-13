@@ -15,12 +15,20 @@ ahead of MORI_IO at every block size from 16 KiB up.
 | `02-rocm-ipc-errhandle-peer-failure.patch` | Advertise `UCT_IFACE_FLAG_ERRHANDLE_PEER_FAILURE` on `rocm_ipc`, matching `cuda_ipc`. Without this UCP filters the transport out before protocol selection, for any application that asks for peer error handling — which NIXL does. |
 | `experiments/99-rocm-ipc-runtime-flag-bisect.patch.experiment` | Not applied. Makes six `rocm_ipc` capability flags runtime-selectable via `ROCM_IPC_EXP` so the search space costs one build instead of one build per combination. How the above was found. |
 
-Both apply to openucx `master`. Check before building:
+All three apply to openucx **v1.22.0**, which is what `UCX_REF` pins. Check
+before building:
 
 ```bash
-make patch-check COMPONENT=ucx
-make build UCX_GIT_URL=https://github.com/openucx/ucx.git UCX_REF=master
+make patch-check COMPONENT=ucx   # the two shipped patches; skips experiments/
+make build
 ```
+
+The patches were originally developed against `master`, where
+`uct_rocm_ipc_iface_query` ends its `cap.flags` chain with
+`UCT_IFACE_FLAG_DEVICE_EP` and `rocm_ipc_md.c` wraps the component in a
+`uct_rocm_ipc_component_t`. Neither exists in v1.22.0, so patches 02 and 99
+carry v1.22.0 context and will not apply to `master` unchanged; patch 01 is
+context-identical on both.
 
 ## The diagnosis
 
@@ -110,6 +118,30 @@ below). Ground truth for this pair, `hipMemcpyPeer` at 64 MiB: **48.8 GB/s**.
 
 Nothing is set in the environment for the patched column — the patches are the
 whole configuration.
+
+### Re-verified on v1.22.0
+
+The numbers above were taken on the v1.19-era tree the patches were first
+written against. Rebuilt on openucx v1.22.0 with the reworked patches, same
+node, same pair, same pinned `UCX_TLS`:
+
+| block | stock-equivalent | patched | MORI_IO |
+|---|---|---|---|
+| 64 KiB | 0.39 | 1.87 | 1.67 |
+| 1 MiB | 0.44 | 19.34 | 17.08 |
+| 16 MiB | 0.44 | 43.92 | 42.35 |
+| 64 MiB | 0.44 | **47.99** | 47.02 |
+
+"Stock-equivalent" is the patched image with `UCX_RMA_PPLN_ENABLE=n`, which
+switches patch 01 back off at runtime and reproduces the stock curve without a
+second 13-minute build. Patch 02's flag is still compiled in for that column,
+which is exactly the "patch 02 alone does nothing" row of the evidence table
+above — and it reads 0.44 GB/s flat, as it should.
+
+The DRAM control is unchanged to three digits either way, 9.738 vs 9.746 GB/s
+at 64 MiB, so the host path is still untouched on this tree. (The absolute
+number is lower than the 46.8 above because these runs pin `UCX_TLS` away from
+IB; only the before/after comparison is meaningful.)
 
 ### Caveat: this node cannot run UCX VRAM with the default `UCX_TLS`
 

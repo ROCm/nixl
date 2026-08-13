@@ -475,14 +475,74 @@ This also settles the earlier POSIX comparison in AIS_MT's favour more strongly
 than the single-GPU table did: POSIX's ceiling is a software one that gets worse
 with scale, AIS_MT's is a link that you can add more of.
 
+## Moving the UCX pin to v1.22.0
+
+The patches were developed against openucx `master`, which is not a thing you
+can pin. openucx **v1.22.0** is the current release, so that is now `UCX_REF`.
+
+`UCX_GIT_URL` moved from the ROCm fork to openucx at the same time. The fork has
+no v1.22 tag — only a `v1.22.x` branch whose head is commit `8a6b06f`, byte for
+byte the same commit openucx tags v1.22.0. A tag is reproducible where a branch
+head is not, and nothing is lost by taking it from upstream. Revisit if the fork
+starts carrying ROCm-only commits again.
+
+**Patch 01 needed no rework** beyond line numbers; `rma_rndv.c`'s probe and the
+`RMA_PPLN_ENABLE` config entry are identical on both trees.
+
+**Patch 02 genuinely needed rework.** `master`'s `uct_rocm_ipc_iface_query`
+ends its `cap.flags` chain with `UCT_IFACE_FLAG_DEVICE_EP`, which does not exist
+in v1.22.0 — the whole context line the patch hangs off is different. The
+`experiments/` bisect patch needed more: v1.22.0's `rocm_ipc_md.c` has no
+`uct_rocm_ipc_component_t` wrapper struct (so the `'c'` flag sets
+`uct_rocm_ipc_component.flags`, not `.super.flags`), no `UCT_MD_FLAG_MEMTYPE_COPY`
+in `md_query`, and no `uct_device_types.h` include. Both are regenerated against
+v1.22.0 and will no longer apply to `master` unchanged; that trade is recorded
+in `patches/ucx/README.md`.
+
+Rebuilt and re-measured, GPU 0 to GPU 1, same node, same pinned `UCX_TLS`:
+
+| block | stock-equivalent | patched | MORI_IO |
+|---|---|---|---|
+| 64 KiB | 0.39 | 1.87 | 1.67 |
+| 1 MiB | 0.44 | 19.34 | 17.08 |
+| 16 MiB | 0.44 | 43.92 | 42.35 |
+| 64 MiB | 0.44 | **47.99** | 47.02 |
+
+The fix survives the bump intact — 47.99 GB/s against 47.67 on the older tree,
+and still ahead of MORI_IO at every size. DRAM-to-DRAM is 9.738 vs 9.746 GB/s
+before and after, so the host path is untouched here too. (Lower absolute DRAM
+numbers than the tables further up because these runs pin `UCX_TLS` away from
+IB; only the before/after difference is being read.)
+
+"Stock-equivalent" is the patched image run with `UCX_RMA_PPLN_ENABLE=n`, which
+turns patch 01 off at runtime rather than costing a second 13-minute build. It
+leaves patch 02 compiled in, which is the "patch 02 alone changes nothing" row
+of the flag-bisect table — and it does indeed read 0.44 GB/s flat.
+
+NIXL and MORI were checked at the same time: **v1.3.2** and **v1.2.2** are
+already the latest tags of each. No bump needed.
+
+Two things bit on the way through, both now fixed:
+
+- The Slurm hold job had no `--gres=gpu`, so `rocm_agent_enumerator` inside the
+  container found nothing. Every bench looked broken until the allocation was
+  read rather than the output.
+- `run-nixlbench.sh` computed `_gpus` with `grep -c '^gfx' || echo 0`. `grep -c`
+  already prints `0` when it matches nothing; it just exits 1 while doing it. So
+  the fallback appended a *second* line, `_gpus` became `"0\n0"`, `$(( ))` threw
+  a syntax error and `TARGET_GPU` was left unset. The bug could only fire in a
+  container with no GPUs — precisely when the diagnostic was needed.
+
 ## Where this leaves things
 
 Done:
 
 - `patches/ucx/01-ucp-enable-rma-rndv-for-device-memory.patch` and
-  `02-rocm-ipc-errhandle-peer-failure.patch`, both applying cleanly to openucx
-  master (`make patch-check COMPONENT=ucx`), both verified in a clean build with
-  no environment gating.
+  `02-rocm-ipc-errhandle-peer-failure.patch`, both applying cleanly
+  (`make patch-check COMPONENT=ucx`), both verified in a clean build with no
+  environment gating.
+- The UCX pin moved to **openucx v1.22.0**, the current release, and the
+  patches were reworked onto it (see below).
 - `patches/ucx/README.md` rewritten around the real diagnosis.
 - `docker/scripts/storage-sweep.sh` plus `make storage-sweep SWEEP_SET=...`
   (`quick`, `rw`, `threads`, `drives`, `wide`, `readscale`, `direct`, `full`),

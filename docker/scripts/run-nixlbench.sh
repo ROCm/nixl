@@ -52,7 +52,12 @@ TIMEOUT="${TIMEOUT:-300}"
 ROLE="${ROLE:-both}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 
-_gpus="$(rocm_agent_enumerator 2>/dev/null | grep -c '^gfx' || echo 0)"
+# No `|| echo 0` here: `grep -c` already prints 0 when it matches nothing, it
+# just exits 1 while doing it, so the fallback appended a *second* line and
+# _gpus became "0\n0" -- which then blew up as a syntax error inside $(( )) and
+# left TARGET_GPU unset.  A container with no GPUs is exactly when this path
+# runs, so the bug only ever showed up where the diagnostic mattered most.
+_gpus="$(rocm_agent_enumerator 2>/dev/null | grep -c '^gfx')"
 INITIATOR_GPU="${INITIATOR_GPU:-0}"
 if [[ -z "${TARGET_GPU:-}" ]]; then
 	TARGET_GPU=$(((_gpus > 1) ? 1 : 0))
