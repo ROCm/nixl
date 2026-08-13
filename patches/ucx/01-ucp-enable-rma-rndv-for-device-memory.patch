@@ -1,0 +1,101 @@
+# ucp: enable the RMA rendezvous protocols by default
+#
+# THE PROBLEM
+#
+# A ucp_put or ucp_get between two GPUs on the same node does not use the IPC
+# transport, even when that transport is present, healthy and selected for
+# other lanes.  On an MI300X node (gfx942, ROCm 7.14, 8x GPU, peer bandwidth
+# measured at 48.8 GB/s with hipMemcpyPeer):
+#
+#   ucx_perftest -t ucp_put_bw -m rocm,rocm     0.8 GB/s   software emulation
+#
+# UCX_PROTO_INFO=y shows why:
+#
+#   | remote memory write by ucp_put* from rocm/dev[0] to rocm/dev[1] |
+#   | 0..inf | software emulation | sysv/memory                       |
+#
+# Software emulation through host shared memory, for the entire size range,
+# for a transfer that never needed to leave the fabric.
+#
+# THE CAUSE
+#
+# rocm_ipc (and cuda_ipc) offer only put_zcopy/get_zcopy -- no bcopy, no short.
+# UCP's non-rendezvous RMA protocols cannot drive a zcopy-only transport, so
+# the only protocol that can reach an IPC transport for device memory is the
+# RMA rendezvous protocol in src/ucp/rma/rma_rndv.c.
+#
+# That protocol exists and works.  It is simply disabled: ucp_proto_rma_rndv_
+# probe_check() returns 0 unless UCX_RMA_PPLN_ENABLE is set, which defaults to
+# "n", or unless the host CPU happens to be UCS_CPU_MODEL_NVIDIA_VERA.  The
+# accompanying TODO says the check should go away once protocol prioritization
+# is implemented.
+#
+# The effect is that the RMA path for device memory works on exactly one CPU
+# model and is off everywhere else, including on every AMD platform.
+#
+# WHAT THIS PATCH DOES
+#
+# Flips the default of UCX_RMA_PPLN_ENABLE from "n" to "y" and drops the
+# NVIDIA_VERA special case, which the new default subsumes.  The knob stays, so
+# UCX_RMA_PPLN_ENABLE=n restores the old behaviour exactly.
+#
+# Nothing else in probe_check changes.  In particular its final test is
+# unchanged, so host-to-host RMA never selects this protocol and continues to
+# use direct zcopy:
+#
+#     return !UCP_MEM_IS_HOST(sel_param->mem_type) ||
+#            !UCP_MEM_IS_HOST(init_params->rkey_config_key->mem_type);
+#
+# MEASURED, MI300X gfx942, GPU 0 to GPU 1, 64 MiB
+#
+#   hipMemcpyPeer (ground truth)               48.8 GB/s
+#
+#   ucx_perftest ucp_put_bw    before           0.8 GB/s   software emulation
+#   ucx_perftest ucp_put_bw    after           43.7 GB/s   rocm_ipc/rocm_ipc
+#
+#   nixlbench --backend UCX    before           0.42 GB/s
+#   nixlbench --backend UCX    after           47.3 GB/s   (97% of ground truth)
+#
+# For comparison, MORI-IO on the same node and the same benchmark, which uses
+# HIP IPC directly and never asks UCX, gets 46.8 GB/s.  So this closes the gap
+# entirely rather than narrowing it.
+#
+# NIXL additionally needs the rocm_ipc capability flags in patch 02: it creates
+# endpoints with UCP_ERR_HANDLING_MODE_PEER, and that pulls extra criteria into
+# ucp_wireup_add_rma_bw_lanes() which rocm_ipc does not currently satisfy.
+# ucx_perftest does not request peer error handling, which is why this patch is
+# sufficient on its own there.
+#
+diff --git a/src/ucp/core/ucp_context.c b/src/ucp/core/ucp_context.c
+index f3e59c2..cc7fd48 100644
+--- a/src/ucp/core/ucp_context.c
++++ b/src/ucp/core/ucp_context.c
+@@ -400,8 +400,12 @@ static ucs_config_field_t ucp_context_config_table[] = {
+    "even if invalidation workflow isn't supported",
+    ucs_offsetof(ucp_context_config_t, rndv_errh_ppln_enable), UCS_CONFIG_TYPE_BOOL},
+ 
+-  {"RMA_PPLN_ENABLE", "n",
+-   "Force-enable the RMA rendezvous put/get protocols.",
++  {"RMA_PPLN_ENABLE", "y",
++   "Enable the RMA rendezvous put/get protocols.  These are the only RMA\n"
++   "protocols that can use an rma_bw lane, and therefore the only ones that\n"
++   "can reach an IPC transport for device memory; with them disabled, a\n"
++   "ucp_put/ucp_get between two GPUs falls back to software emulation over\n"
++   "shared memory or TCP.  Set to 'n' to restore the previous behaviour.",
+    ucs_offsetof(ucp_context_config_t, rma_ppln_enable), UCS_CONFIG_TYPE_BOOL},
+ 
+   {"FLUSH_WORKER_EPS", "y",
+diff --git a/src/ucp/rma/rma_rndv.c b/src/ucp/rma/rma_rndv.c
+index e9bd4d0..e761f98 100644
+--- a/src/ucp/rma/rma_rndv.c
++++ b/src/ucp/rma/rma_rndv.c
+@@ -38,8 +38,7 @@ ucp_proto_rma_rndv_probe_check(const ucp_proto_init_params_t *init_params,
+ 
+     /* TODO: We prefer to use direct zcopy when possible, remove this check when
+      * prioritization of protocols is implemented. */
+-    if (!context->config.ext.rma_ppln_enable &&
+-        (ucs_arch_get_cpu_model() != UCS_CPU_MODEL_NVIDIA_VERA)) {
++    if (!context->config.ext.rma_ppln_enable) {
+         return 0;
+     }
+ 

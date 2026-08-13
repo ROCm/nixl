@@ -126,7 +126,7 @@ COMPONENT ?= all
 DIST := $(REPO_ROOT)/.slurm/run-build.sh
 
 .PHONY: help build build-nixl build-mori wheels shell test test-nogpu \
-        nixlbench bench bench-nvme bench-compare dist-build dist-load \
+        nixlbench bench bench-nvme bench-compare storage-sweep dist-build dist-load \
         dist-build-here dist-bench dist-bench-2node \
         patch-check patch-list print-tag print-config clean clean-images
 
@@ -170,6 +170,8 @@ help:
 	@echo "  make bench ... HSA_SNOOP=1   Also collect GPU/AIS counters via hsa-snoop"
 	@echo "  make bench-nvme [NVME_PATH=/mnt/nixl-nvme-0/... POSIX_API=AIO|URING]"
 	@echo "                       NVMe via NIXL's POSIX backend, O_DIRECT"
+	@echo "  make storage-sweep SWEEP_SET=quick|rw|threads|drives|wide|readscale|direct|full"
+	@echo "                       AIS_MT vs POSIX across the node's NVMe drives -> logs/*.csv"
 	@echo ""
 	@echo "Introspection:"
 	@echo "  make print-tag       Print the derived image tag"
@@ -276,8 +278,16 @@ HSA_SNOOP ?=
 _SNOOP_FLAGS = $(if $(HSA_SNOOP),-e HSA_SNOOP=1 --privileged --pid=host \
 	-v /sys/kernel/tracing:/sys/kernel/tracing $(if $(HSA_SNOOP_PORT),-e HSA_SNOOP_PORT=$(HSA_SNOOP_PORT),),)
 
+# BENCH_ENV passes arbitrary NAME=VALUE pairs into the container, which is how
+# UCX knobs get set for a run: UCX reads its configuration from the environment
+# of the process that opens the context, so setting them outside `docker run`
+# has no effect at all.
+#   make bench BACKEND=UCX BENCH_ENV="UCX_TLS=rocm_ipc,rocm_copy,tcp,sysv,posix,cma"
+BENCH_ENV ?=
+_BENCH_ENV_FLAGS = $(foreach v,$(BENCH_ENV),-e '$(v)')
+
 bench:
-	docker run $(DOCKER_RUN_FLAGS) $(_SNOOP_FLAGS) \
+	docker run $(DOCKER_RUN_FLAGS) $(_SNOOP_FLAGS) $(_BENCH_ENV_FLAGS) \
 		$(if $(FILEPATH),-v $(FILEPATH):$(FILEPATH) -e FILEPATH=$(FILEPATH),) \
 		$(if $(POSIX_API),-e POSIX_API=$(POSIX_API),) \
 		$(if $(DIRECT_IO),-e DIRECT_IO=$(DIRECT_IO),) \
@@ -293,6 +303,20 @@ bench-nvme:
 	@mkdir -p "$(NVME_PATH)"
 	$(MAKE) --no-print-directory bench BACKEND=POSIX SEG_TYPE=DRAM \
 		FILEPATH="$(NVME_PATH)" POSIX_API=$(if $(POSIX_API),$(POSIX_API),AIO)
+
+# Sweep the storage backends across a config matrix (see the script header for
+# what each set answers).  /mnt is bind-mounted whole rather than one drive at a
+# time, because the point of the multi-drive rows is to spread one transfer
+# across sixteen block devices.
+SWEEP_SET ?= quick
+SWEEP_OUT ?= /work/logs/storage-sweep-$(SWEEP_SET).csv
+storage-sweep:                 # AIS_MT vs POSIX across drives/threads/ops
+	@mkdir -p logs
+	docker run $(DOCKER_RUN_FLAGS) -v /mnt:/mnt \
+		-e SWEEP_SET=$(SWEEP_SET) -e SWEEP_OUT=$(SWEEP_OUT) \
+		$(if $(SWEEP_ITER),-e SWEEP_ITER=$(SWEEP_ITER),) \
+		$(if $(TIMEOUT),-e TIMEOUT=$(TIMEOUT),) \
+		"$(IMAGE_REF)" bash /work/docker/scripts/storage-sweep.sh
 
 bench-compare:                 # UCX then MORI_IO, same settings, back to back
 	@$(MAKE) --no-print-directory bench BACKEND=UCX      SEG_TYPE=$(SEG_TYPE) || true

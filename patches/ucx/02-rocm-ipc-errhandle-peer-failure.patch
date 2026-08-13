@@ -1,0 +1,82 @@
+# uct/rocm_ipc: advertise ERRHANDLE_PEER_FAILURE
+#
+# THE PROBLEM
+#
+# With patch 01 applied, ucx_perftest reaches rocm_ipc for GPU-to-GPU RMA and
+# runs at fabric speed.  NIXL, on the same node and the same UCX, still gets
+# 0.4 GB/s.
+#
+# The difference is that NIXL creates its endpoints with
+# UCP_ERR_HANDLING_MODE_PEER, and ucx_perftest does not.  Under peer error
+# handling UCP drops any transport whose iface does not advertise
+# UCT_IFACE_FLAG_ERRHANDLE_PEER_FAILURE, so rocm_ipc is filtered out before
+# protocol selection ever sees it -- `ucx_info -d` reports "error handling:
+# none" for rocm_ipc, where cuda_ipc reports "peer failure".
+#
+# WHAT THIS PATCH DOES
+#
+# Advertises the flag, matching cuda_ipc, which has carried it since it gained
+# error handling support and for the same reason.
+#
+# ON THE HONESTY OF THE CLAIM
+#
+# rocm_ipc cannot genuinely detect that a peer process has died, and neither
+# can cuda_ipc; both are IPC transports over a shared mapping with no liveness
+# channel.  What the flag actually gates is whether UCP is willing to build
+# lanes on the transport at all under peer error handling.  This is worth
+# stating plainly because it is the reason to prefer this one-line change over
+# the larger "bring rocm_ipc to full cuda_ipc capability parity" patch that
+# preceded it: the parity version also advertised UCT_MD_FLAG_INVALIDATE,
+# INVALIDATE_RMA, INVALIDATE_AMO and RKEY_PTR, and measurement showed none of
+# them are needed --
+#
+#   ROCM_IPC_EXP  nixlbench UCX VRAM peak
+#   (none)         0.6 GB/s
+#   ir             0.4 GB/s      MD invalidate flags alone: no effect
+#   k              0.6 GB/s      MD RKEY_PTR alone: no effect
+#   e             47.7 GB/s      this patch
+#   ie/re/ire/irae/irke/irake  47.1-47.9 GB/s   no better than e alone
+#
+# -- and one of them is actively harmful.  Adding UCT_COMPONENT_FLAG_RKEY_PTR
+# (which openucx/ucx#11069 adds for cuda_ipc) makes UCP build an rkey_ptr lane
+# and hand uct_rocm_ipc_ep_zcopy an rkey that is not a uct_rocm_ipc_key_t:
+#
+#   Caught signal 11 (address not mapped to object at address 0x1f)
+#     4  libuct_rocm.so(uct_rocm_ipc_ep_zcopy+0x4e)
+#     5  libuct_rocm.so(uct_rocm_ipc_ep_get_zcopy+0x45)
+#     7  libucp.so(ucp_proto_rndv_receive_start+0x2a1)
+#     8  libucp.so(ucp_rma_rndv_process_rts+0x130)
+#
+# That crash is reported separately; it is not a reason to hold up this patch,
+# but it is a reason not to add the component flag alongside it.
+#
+# CREDIT
+#
+# This flag is what ai-dynamo/nixl#2039 proposed.  It was previously tested on
+# gfx942 and reported as not fixing the problem -- correctly, because on its
+# own it does nothing: it restores rocm_ipc's eligibility for a lane that UCP's
+# RMA protocol selection then declines to use.  It needs patch 01 to matter,
+# and patch 01 needs it to matter to NIXL.  Neither is sufficient alone.
+#
+# MEASURED, MI300X gfx942, GPU 0 to GPU 1, 64 MiB, nixlbench --backend UCX
+#
+#   ground truth (hipMemcpyPeer)        48.8 GB/s
+#   stock UCX                            0.42 GB/s
+#   patch 01 only                        0.6  GB/s
+#   patch 01 + patch 02                 47.3 GB/s   (97% of ground truth)
+#   MORI-IO, same benchmark             46.8 GB/s
+#
+diff --git a/src/uct/rocm/ipc/rocm_ipc_iface.c b/src/uct/rocm/ipc/rocm_ipc_iface.c
+index 89c82d1..4f89324 100644
+--- a/src/uct/rocm/ipc/rocm_ipc_iface.c
++++ b/src/uct/rocm/ipc/rocm_ipc_iface.c
+@@ -124,7 +124,8 @@ static ucs_status_t uct_rocm_ipc_iface_query(uct_iface_h tl_iface,
+     iface_attr->cap.flags               = UCT_IFACE_FLAG_GET_ZCOPY |
+                                           UCT_IFACE_FLAG_PUT_ZCOPY | UCT_IFACE_FLAG_PENDING |
+                                           UCT_IFACE_FLAG_CONNECT_TO_IFACE |
+-                                          UCT_IFACE_FLAG_DEVICE_EP;
++                                          UCT_IFACE_FLAG_DEVICE_EP |
++                                          UCT_IFACE_FLAG_ERRHANDLE_PEER_FAILURE;
+     iface_attr->ctl_device              = UCS_SYS_DEVICE_ID_UNKNOWN;
+ 
+     iface_attr->latency = ucs_linear_func_make(iface->config.latency, 0);

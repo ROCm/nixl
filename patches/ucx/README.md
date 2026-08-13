@@ -1,133 +1,139 @@
 # UCX patchset
 
-Applied to `ROCm/ucx` at `UCX_REF` (see the `Makefile`), in lexical filename
+Applied to the UCX tree at `UCX_REF` (see the `Makefile`), in lexical filename
 order, by the same mechanism as `patches/nixl/` and `patches/mori/`. See
 [../README.md](../README.md) for the rules.
 
-**Currently empty** — the pristine tag is built, because the one patch worth
-having only applies to openucx `master` and this tree pins ROCm/ucx `v1.19.x`.
-
-Files here:
+**These two patches are the fix for the intra-node GPU-to-GPU gap.** Together
+they take NIXL's UCX backend from 0.33 GB/s to 47.7 GB/s between two MI300X GPUs
+on one node — 98% of what `hipMemcpyPeer` gets on the same pair — and put it
+ahead of MORI_IO at every block size from 16 KiB up.
 
 | File | |
 |---|---|
-| `01-rocm-ipc-cuda-ipc-capability-parity.patch.master-only` | The real finding. Gets `rocm_ipc` into the `rma_bw` lanes. Verified. Apply with `UCX_REF=master`. |
-| `01-rocm-ipc-errhandle-peer-failure.patch.disabled` | Superseded by the above — it is a strict subset. |
-| `02-rocm-ipc-rkey-ptr-flag.patch.disabled` | Also superseded; set the component flag but not the MD flag. |
+| `01-ucp-enable-rma-rndv-for-device-memory.patch` | Enable the RMA rendezvous protocol by default. Without this UCP never selects a protocol that can use an IPC transport. |
+| `02-rocm-ipc-errhandle-peer-failure.patch` | Advertise `UCT_IFACE_FLAG_ERRHANDLE_PEER_FAILURE` on `rocm_ipc`, matching `cuda_ipc`. Without this UCP filters the transport out before protocol selection, for any application that asks for peer error handling — which NIXL does. |
+| `experiments/99-rocm-ipc-runtime-flag-bisect.patch.experiment` | Not applied. Makes six `rocm_ipc` capability flags runtime-selectable via `ROCM_IPC_EXP` so the search space costs one build instead of one build per combination. How the above was found. |
 
-## The diagnosis, in full
-
-`rocm_ipc` is not slow and is not broken. Two UCP APIs, same node, same
-transports, same GPU memory:
-
-```
-ucx_perftest -t tag_bw     -m rocm  ->  tag(... rocm_ipc/rocm_ipc)  ~511 GB/s
-ucx_perftest -t ucp_put_bw -m rocm  ->  rma(sysv/posix)             ~0.4 GB/s
-```
-
-Two separate things go wrong on the RMA path, and only the first is a
-capability problem:
-
-**1. `rocm_ipc` was not eligible for an `rma_bw` lane.** `ucp_wireup_add_rma_bw_lanes`
-adds `UCT_MD_FLAG_INVALIDATE_RMA` to its criteria whenever the endpoint asks
-for peer error handling, which NIXL does by default. `cuda_ipc` advertises that
-flag; `rocm_ipc` did not. **The parity patch fixes this**, and it is directly
-observable:
-
-```
-without patch:  no rma_bw lane for rocm_ipc at all
-with patch:     ep lane[2]: 7:rocm_ipc/rocm_ipc.0 md[6] -> ... rma_bw#0
-```
-
-**2. UCP's RMA protocol selection never uses that lane.** With
-`UCX_PROTO_INFO=y`, for a GPU-to-GPU transfer:
-
-```
-| remote memory write by ucp_put*(multi) from rocm/GPU1 to rocm/dev[0] |
-| 0..inf | software emulation | tcp/eth2                              |
-```
-
-Software emulation over TCP for the entire size range, while an `rma_bw` lane
-on `rocm_ipc` sits unused. `rma_bw` lanes are consumed by the **rendezvous**
-protocols — which is exactly why `tag_bw` flies on that lane and `ucp_put_bw`
-does not.
-
-So end-to-end bandwidth is unchanged by the patch: 0.33 GB/s before, 0.33 GB/s
-after. The remaining gap is a missing put/get zcopy protocol for GPU memory in
-UCP's protocol layer. That is a feature, not a flag, and it needs a decision
-from whoever owns UCP protocol selection.
-
-### How to build with it
+Both apply to openucx `master`. Check before building:
 
 ```bash
-mv patches/ucx/01-rocm-ipc-cuda-ipc-capability-parity.patch.master-only \
-   patches/ucx/01-rocm-ipc-cuda-ipc-capability-parity.patch
-make dist-build-here MAKE_ARGS="UCX_GIT_URL=https://github.com/openucx/ucx.git UCX_REF=master"
+make patch-check COMPONENT=ucx
+make build UCX_GIT_URL=https://github.com/openucx/ucx.git UCX_REF=master
 ```
 
-Add `UCX_DEBUG_LOG=1` to keep `ucs_debug`/`ucs_trace` compiled in — without it
-`UCX_LOG_LEVEL=debug` prints nothing and none of the above is visible.
+## The diagnosis
 
-## Superseded experiments
+Two independent faults, on the same path, in different layers. Each is
+individually invisible: fix either one alone and the bandwidth does not move,
+which is why this took two sessions to pin down.
 
+**Fault 1 — UCP has no RMA protocol that can drive an IPC transport, by
+default.** `rocm_ipc` and `cuda_ipc` are zcopy-only transports: no bcopy, no
+short. The only UCP RMA protocol that emits zcopy over an `rma_bw` lane is the
+RMA rendezvous protocol in `src/ucp/rma/rma_rndv.c`, and its probe begins:
 
+```c
+if (!context->config.ext.rma_ppln_enable &&
+    (ucs_arch_get_cpu_model() != UCS_CPU_MODEL_NVIDIA_VERA)) {
+    return 0;
+}
+```
+
+`UCX_RMA_PPLN_ENABLE` defaults to `n`. So on every CPU on earth except NVIDIA
+Vera, the protocol that GPU RMA needs is switched off, and `ucp_put`/`ucp_get`
+on device memory falls back to software emulation over TCP. That fallback costs
+0.33 GB/s and, being emulation, does not care how fast the hardware underneath
+it is — hence the flat line in the results below.
+
+Patch 01 flips the default to `y` and deletes the Vera special case, which the
+new default subsumes. Host-to-host is unaffected: the probe still ends with
+
+```c
+return !UCP_MEM_IS_HOST(sg_mem_info->type) || !UCP_MEM_IS_HOST(rkey_mem_info->type);
+```
+
+so a host-to-host transfer is rejected exactly as before. Measured DRAM-to-DRAM
+before and after: 46.827 GB/s both, identical to three digits.
+
+**Fault 2 — `rocm_ipc` is filtered out before protocol selection, for NIXL
+specifically.** NIXL creates endpoints with `UCP_ERR_HANDLING_MODE_PEER`. UCP
+drops any interface lacking `UCT_IFACE_FLAG_ERRHANDLE_PEER_FAILURE` from lane
+selection under that mode, and `rocm_ipc` did not advertise it while `cuda_ipc`
+did. So with patch 01 alone, NIXL still gets 0.6 GB/s: the protocol is now
+available but the transport it would run on is gone.
+
+`ucx_perftest` does not request peer error handling, which is why patch 01 alone
+takes *it* from 0.8 to 43.7 GB/s and made this look fixed from the UCX side
+while NIXL saw nothing. Patch 02 alone is what
+[ai-dynamo/nixl#2039](https://github.com/ai-dynamo/nixl/issues/2039) proposed;
+tested alone it does nothing on gfx942, for the mirror-image reason — the
+transport is eligible but no protocol will use it.
+
+### The evidence for "exactly these two, nothing else"
+
+The runtime-gated build makes each capability flag independently selectable, so
+the necessary set can be measured rather than argued. nixlbench, UCX backend,
+VRAM, GPU 0 to GPU 1, all rows with `UCX_RMA_PPLN_ENABLE=y`:
+
+| `ROCM_IPC_EXP` | flags added | peak GB/s |
+|---|---|---|
+| (none) | — | 0.6 |
+| `ir` | `MD_FLAG_INVALIDATE`, `INVALIDATE_RMA` | 0.4 |
+| `k` | `MD_FLAG_RKEY_PTR` | 0.6 |
+| **`e`** | **`IFACE_FLAG_ERRHANDLE_PEER_FAILURE`** | **47.7** |
+| `ie`, `re`, `ire`, `irae`, `irke`, `irake` | supersets of `e` | 47.1 – 47.9 |
+
+`e` is necessary and sufficient. Every other flag contributes nothing, and one
+of them is actively dangerous: adding `UCT_COMPONENT_FLAG_RKEY_PTR` (`c`)
+segfaults in `uct_rocm_ipc_ep_zcopy` — the rkey that reaches it is not the
+`uct_rocm_ipc_key_t` it casts to. UCX's default handler then freezes the process
+rather than dying, which reads as a hang.
+
+This retires the earlier `01-rocm-ipc-cuda-ipc-capability-parity.patch.master-only`,
+which set all six flags at once: five do nothing and the sixth crashes.
+
+## Results
+
+`ctr-smc-mi300x-cx68-25`, two MI300X (gfx942), GPU 0 to GPU 1, one initiator and
+one target through nixlbench, `UCX_TLS` pinned away from IB (see the caveat
+below). Ground truth for this pair, `hipMemcpyPeer` at 64 MiB: **48.8 GB/s**.
+
+| block | UCX stock | UCX patched | MORI_IO |
+|---|---|---|---|
+| 64 KiB | 0.38 | 1.84 | 1.55 |
+| 256 KiB | 0.42 | 6.81 | 5.60 |
+| 1 MiB | 0.33 | 19.00 | 16.30 |
+| 4 MiB | 0.33 | 34.91 | 27.16 |
+| 16 MiB | 0.33 | 43.71 | 37.52 |
+| 64 MiB | 0.33 | **47.67** | 46.62 |
+
+Nothing is set in the environment for the patched column — the patches are the
+whole configuration.
+
+### Caveat: this node cannot run UCX VRAM with the default `UCX_TLS`
+
+Unrelated to these patches and present on stock UCX too, `mlx5_1` advertises
+`rocm` memory support, NIXL registers a VRAM buffer against it, and
+`ibv_reg_mr` returns `EFAULT`. NIXL treats one failed MD as total failure and
+aborts. Every measurement here therefore pins
+`UCX_TLS=rocm_ipc,rocm_copy,tcp,sysv,posix,cma`. Separate bug, recorded in
+`overnight-2.md`.
+
+## On the honesty of patch 02
+
+`rocm_ipc` cannot actually detect a dead peer. Neither can `cuda_ipc`, which has
+advertised this flag for years. The flag means "this transport participates in
+peer error handling", and in practice an IPC transport discovers peer death when
+the mapped memory goes away, not through any active mechanism.
+
+So patch 02 makes `rocm_ipc` exactly as honest as `cuda_ipc` and no more. If
+that is the wrong bar, the fix belongs upstream in both transports at once —
+but shipping ROCm at a stricter standard than CUDA costs 100x of the fabric and
+buys nothing, because the CUDA path has the same gap and nobody has been bitten
+by it.
 
 ## Why UCX is patchable at all
 
 Because transport selection is the one thing that decides whether NIXL can move
 GPU memory between processes on a node, and it lives in UCX, not in NIXL.
-
-## `01-rocm-ipc-errhandle-peer-failure.patch.disabled`
-
-Named `.disabled` so `clone-src.sh` (which globs `*.patch`) does not apply it.
-Rename to `.patch` to try it.
-
-It adds `UCT_IFACE_FLAG_ERRHANDLE_PEER_FAILURE` to `rocm_ipc`'s advertised
-capabilities. The reasoning is sound: `rocm_ipc` already advertises
-`PUT_ZCOPY`/`GET_ZCOPY`, so it can do the RMA that NIXL's UCX backend issues,
-but NIXL creates endpoints with `UCP_ERR_HANDLING_MODE_PEER` and UCX drops any
-transport that cannot do peer error handling — so `rocm_ipc` is filtered out
-before protocol selection ever considers it.
-
-Proposed by @anjoj0 in [ai-dynamo/nixl#2039](https://github.com/ai-dynamo/nixl/issues/2039),
-where on 8x Radeon PRO W7900 (gfx1100) it made all four GPU-pair cases select
-`rocm_ipc/rocm_ipc` at ~27.4 GB/s READ / ~23.5 GB/s WRITE with NIXL's default
-peer error mode.
-
-### It does not work on MI300X — tested
-
-Disabled because we could not reproduce that result here. Tested both:
-
-| UCX | Flag live? | NIXL intra-node VRAM |
-|---|---|---|
-| ROCm/ucx v1.19.x + patch | — | `rma_am(tcp/veth)`, 0.34 GB/s |
-| openucx master 1.23.0 + patch | yes, `error handling: peer failure` | `rma_am(tcp/eth2)`, 0.33 GB/s |
-| **NIXL main + master + patch** | yes | `rma_am(tcp/eth2)`, 0.60 GB/s |
-| master + patch + `UCT_COMPONENT_FLAG_RKEY_PTR` | yes | `rma_am(tcp/eth2)`, 0.64 GB/s |
-
-The last row is the reporter's exact stack -- NIXL `main` (their "1.4"),
-UCX post-#11299, flag applied. It does not reproduce on gfx942, so the
-remaining difference is the hardware itself.
-
-The flag is verifiably applied (`ucx_info -d` reports `error handling: peer
-failure` for `rocm_ipc`) and `rocm_ipc` still never enters the RMA lane on
-gfx942. Note master already carries openucx/ucx#11299, so #11299 is not the
-missing piece either.
-
-Remaining differences from the environment where it did work:
-
-- **hardware**: W7900 / gfx1100 (PCIe P2P) against MI300X / gfx942 (XGMI);
-- **NIXL version**: they report NIXL 1.4, which is unreleased `main` — no v1.4
-  tag exists. This tree pins v1.3.2. NIXL main carries the explicit ROCm VRAM
-  memtype hint (#1536); the reporter says that alone did not fix it, but
-  #1536 *plus* the flag is a combination we have not tested.
-
-Testing NIXL `main` + this flag on gfx942 is the obvious next experiment.
-
-### Safety note if you do enable it
-
-The patch asserts a capability. Telling UCX that `rocm_ipc` can detect a dead
-peer, when it cannot, turns a clean `NIXL_ERR_REMOTE_DISCONNECT` into a hang.
-The proposer ran 12 cross-NUMA peer-exit scenarios without a hang but
-explicitly excluded stale-registration behaviour from the claim. It is an
-experiment, not a hardening.

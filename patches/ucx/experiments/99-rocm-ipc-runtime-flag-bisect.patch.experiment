@@ -1,0 +1,115 @@
+diff --git a/src/uct/rocm/ipc/rocm_ipc_iface.c b/src/uct/rocm/ipc/rocm_ipc_iface.c
+index 89c82d1..2438819 100644
+--- a/src/uct/rocm/ipc/rocm_ipc_iface.c
++++ b/src/uct/rocm/ipc/rocm_ipc_iface.c
+@@ -125,6 +125,9 @@ static ucs_status_t uct_rocm_ipc_iface_query(uct_iface_h tl_iface,
+                                           UCT_IFACE_FLAG_PUT_ZCOPY | UCT_IFACE_FLAG_PENDING |
+                                           UCT_IFACE_FLAG_CONNECT_TO_IFACE |
+                                           UCT_IFACE_FLAG_DEVICE_EP;
++    if (uct_rocm_ipc_exp_flag('e')) {
++        iface_attr->cap.flags |= UCT_IFACE_FLAG_ERRHANDLE_PEER_FAILURE;
++    }
+     iface_attr->ctl_device              = UCS_SYS_DEVICE_ID_UNKNOWN;
+ 
+     iface_attr->latency = ucs_linear_func_make(iface->config.latency, 0);
+diff --git a/src/uct/rocm/ipc/rocm_ipc_md.c b/src/uct/rocm/ipc/rocm_ipc_md.c
+index d66dbe0..5e0f9d7 100644
+--- a/src/uct/rocm/ipc/rocm_ipc_md.c
++++ b/src/uct/rocm/ipc/rocm_ipc_md.c
+@@ -15,6 +15,9 @@
+ #include <uct/api/v2/uct_v2.h>
+ #include <uct/api/device/uct_device_types.h>
+ 
++#include <stdlib.h>
++#include <string.h>
++
+ 
+ static ucs_config_field_t uct_rocm_ipc_md_config_table[] = {
+     {"", "", NULL,
+@@ -24,12 +27,45 @@ static ucs_config_field_t uct_rocm_ipc_md_config_table[] = {
+     {NULL}
+ };
+ 
++
++/* EXPERIMENT ONLY -- runtime-selectable capability flags.
++ *
++ * Bisecting which of the cuda_ipc-parity flags is safe to advertise costs one
++ * 13-minute image rebuild per combination if the flags are compiled in.  Gate
++ * them on an env var instead and the whole space is a few minutes.
++ *
++ *   ROCM_IPC_EXP=<letters>   i=INVALIDATE  r=INVALIDATE_RMA  a=INVALIDATE_AMO
++ *                            k=MD RKEY_PTR c=COMPONENT RKEY_PTR
++ *                            e=iface ERRHANDLE_PEER_FAILURE
++ *
++ * Unset or empty means stock upstream behaviour.  Not for shipping.
++ */
++int uct_rocm_ipc_exp_flag(char c)
++{
++    const char *s = getenv("ROCM_IPC_EXP");
++    return (s != NULL) && (strchr(s, c) != NULL);
++}
++
+ static ucs_status_t uct_rocm_ipc_md_query(uct_md_h md, uct_md_attr_v2_t *md_attr)
+ {
+     uct_md_base_md_query(md_attr);
+     md_attr->rkey_packed_size = sizeof(uct_rocm_ipc_key_t);
+     md_attr->flags            = UCT_MD_FLAG_REG | UCT_MD_FLAG_NEED_RKEY |
+                                 UCT_MD_FLAG_MEMTYPE_COPY;
++    if (uct_rocm_ipc_exp_flag('i')) {
++        md_attr->flags |= UCT_MD_FLAG_INVALIDATE;
++    }
++    if (uct_rocm_ipc_exp_flag('r')) {
++        md_attr->flags |= UCT_MD_FLAG_INVALIDATE_RMA;
++    }
++    if (uct_rocm_ipc_exp_flag('a')) {
++        md_attr->flags |= UCT_MD_FLAG_INVALIDATE_AMO;
++    }
++    if (uct_rocm_ipc_exp_flag('k')) {
++        md_attr->flags |= UCT_MD_FLAG_RKEY_PTR;
++    }
++    ucs_debug("rocm_ipc: experimental md flags 0x%lx (ROCM_IPC_EXP=%s)",
++              (unsigned long)md_attr->flags, getenv("ROCM_IPC_EXP") ?: "");
+     md_attr->reg_mem_types    = UCS_BIT(UCS_MEMORY_TYPE_ROCM);
+     md_attr->cache_mem_types  = UCS_BIT(UCS_MEMORY_TYPE_ROCM);
+     md_attr->access_mem_types = UCS_BIT(UCS_MEMORY_TYPE_ROCM);
+@@ -113,7 +149,7 @@ uct_rocm_ipc_mem_dereg(uct_md_h md,
+ {
+     uct_rocm_ipc_key_t *mem_hndl;
+ 
+-    UCT_MD_MEM_DEREG_CHECK_PARAMS(params, 0);
++    UCT_MD_MEM_DEREG_CHECK_PARAMS(params, 1);
+ 
+     mem_hndl = params->memh;
+     ucs_free(mem_hndl);
+@@ -273,7 +309,7 @@ uct_rocm_ipc_component_t uct_rocm_ipc_component = {
+         },
+         .cm_config          = UCS_CONFIG_EMPTY_GLOBAL_LIST_ENTRY,
+         .tl_list            = UCT_COMPONENT_TL_LIST_INITIALIZER(&uct_rocm_ipc_component.super),
+-        .flags              = 0,
++        .flags              = 0, /* see the UCS_STATIC_INIT below for 'c' */
+         .md_vfs_init        =
+                 (uct_component_md_vfs_init_func_t)ucs_empty_function
+     },
+@@ -291,3 +327,10 @@ UCS_STATIC_CLEANUP
+     }
+     pthread_mutex_destroy(&uct_rocm_ipc_component.lock);
+ }
++
++
++UCS_STATIC_INIT {
++    if (uct_rocm_ipc_exp_flag('c')) {
++        uct_rocm_ipc_component.super.flags |= UCT_COMPONENT_FLAG_RKEY_PTR;
++    }
++}
+diff --git a/src/uct/rocm/ipc/rocm_ipc_md.h b/src/uct/rocm/ipc/rocm_ipc_md.h
+index 1c7577d..449476f 100644
+--- a/src/uct/rocm/ipc/rocm_ipc_md.h
++++ b/src/uct/rocm/ipc/rocm_ipc_md.h
+@@ -36,4 +36,7 @@ typedef struct uct_rocm_ipc_key {
+     int dev_num;
+ } uct_rocm_ipc_key_t;
+ 
++/* EXPERIMENT ONLY: see rocm_ipc_md.c */
++int uct_rocm_ipc_exp_flag(char c);
++
+ #endif

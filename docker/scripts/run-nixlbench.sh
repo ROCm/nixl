@@ -140,11 +140,45 @@ echo "    initiator gpu=${INITIATOR_GPU}  target gpu=${TARGET_GPU}"
 	     "loopback measurement, not a real device-to-device number."
 echo
 
+# Physical GPUs this run touches, deduped, and where each lands in the HIP
+# numbering once ROCR has filtered the agent list.  See the comment in run_one.
+declare -A _hip_index
+_rocr_list="${INITIATOR_GPU}"
+_hip_index[${INITIATOR_GPU}]=0
+if [[ "${TARGET_GPU}" != "${INITIATOR_GPU}" ]]; then
+	_rocr_list="${INITIATOR_GPU},${TARGET_GPU}"
+	_hip_index[${TARGET_GPU}]=1
+fi
+
 run_one() {
 	local role="$1" gpu="$2"
 	# The target must be listening before the initiator connects, so `both`
 	# starts the target first and gives it a moment.
-	HIP_VISIBLE_DEVICES="${gpu}" \
+	# Both variables, and they are not interchangeable.  HIP_VISIBLE_DEVICES
+	# masks devices for the HIP runtime, which is what MORI and nixlbench's own
+	# buffer allocation use.  UCX goes straight to ROCr/HSA and never consults
+	# it, so with HIP_VISIBLE_DEVICES alone the UCX ranks both land on physical
+	# GPU 0 and a "GPU 0 -> GPU 1" run is really GPU 0 -> GPU 0.  Ground truth
+	# on this node is 45.7 GB/s peer and 2050 GB/s same-device, so that mistake
+	# does not look like a mistake, it looks like a great result.
+	# Device isolation is fiddlier than it looks, and getting it wrong produces
+	# fast numbers rather than errors -- which is worse.  Three facts:
+	#
+	#   * HIP_VISIBLE_DEVICES masks devices for the HIP runtime only.  UCX talks
+	#     to ROCr/HSA directly, so with HIP masking alone ucx_perftest put both
+	#     ranks on physical GPU 0 and reported 586 GB/s, against a measured peer
+	#     ceiling of 45.7.
+	#   * ROCR_VISIBLE_DEVICES does mask the HSA agent list -- but masking it to
+	#     one device also hides the *peer*, and MORI's IPC path then falls back
+	#     to something slower (46.7 -> 16.9 GB/s).
+	#   * The two compose: ROCR leaves a one-entry list renumbered from 0, so
+	#     ROCR=1 with HIP=1 is "no ROCm-capable device is detected".
+	#
+	# So: show both GPUs to HSA, and let HIP pick which one this rank allocates
+	# on.  IPC still has a peer to map, and the two ranks are genuinely on
+	# different devices.
+	ROCR_VISIBLE_DEVICES="${_rocr_list}" \
+		HIP_VISIBLE_DEVICES="${_hip_index[${gpu}]}" \
 		timeout "${TIMEOUT}" nixlbench "${common_args[@]}" "${_extra[@]}" 2>&1 |
 		sed "s/^/[${role}] /"
 	return "${PIPESTATUS[0]}"
