@@ -456,6 +456,25 @@ cache for another reason. Flagged rather than concluded; it needs an `strace`
 on the `open()` flags to settle, and it does not affect any comparison above
 because every row in them has direct on.
 
+### 2026-08-13 06:40 — the 56 GB/s ceiling is the GPU, and two GPUs double it
+
+The plateau hypothesis was testable in one run: two nixlbench processes, one per
+GPU, eight distinct drives each, at the same time.
+
+| | GPU 0 | GPU 1 | aggregate |
+|---|---|---|---|
+| one GPU, 8 drives | 53.84 | — | 53.8 |
+| two GPUs, 8 drives each | 53.61 | 52.53 | **106.1** |
+
+Adding a second GPU costs the first 0.4% and doubles the total. So the ~56 GB/s
+is **per-GPU**, consistent with a PCIe Gen5 x16 link, and neither the drives nor
+NIXL nor the AIS_MT submit path is the limit at this scale. Sixteen drives at
+7.26 GB/s each is ~116 GB/s of raw array bandwidth and two GPUs get 91% of it.
+
+This also settles the earlier POSIX comparison in AIS_MT's favour more strongly
+than the single-GPU table did: POSIX's ceiling is a software one that gets worse
+with scale, AIS_MT's is a link that you can add more of.
+
 ## Where this leaves things
 
 Done:
@@ -481,13 +500,10 @@ Worth doing next, roughly in order of value:
    for device memory. This is the finding with reach beyond this node.
 2. **Two-node RDMA.** Everything here is intra-node. The inter-node path is
    untouched by these patches and unmeasured this session.
-3. **Confirm AIS_MT's 56 GB/s is the GPU's PCIe link** by running two GPUs
-   against the same 16 drives. If aggregate goes to ~112 GB/s the ceiling is
-   per-GPU and the array has more to give.
-4. **The `ibv_reg_mr` EFAULT on ROCm memory**, which makes UCX VRAM unusable on
+3. **The `ibv_reg_mr` EFAULT on ROCm memory**, which makes UCX VRAM unusable on
    this node with the default `UCX_TLS`. Independent of this work and arguably
    more disruptive, since it fails the run outright rather than making it slow.
-5. **POSIX's thread-count collapse past 8**, if the POSIX backend matters to
+4. **POSIX's thread-count collapse past 8**, if the POSIX backend matters to
    anyone; AIS_MT makes it mostly moot for GPU workloads.
-6. **`--storage_enable_direct` may be a no-op** — buffered and direct give
+5. **`--storage_enable_direct` may be a no-op** — buffered and direct give
    identical numbers.
