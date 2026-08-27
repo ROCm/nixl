@@ -22,8 +22,13 @@ pyproject_toml = configure_file(
   output: 'pyproject.toml',
   configuration: {
     'VERSION': meson.project_version(),
+    # A release meta wheel depends on every variant unconditionally: there is
+    # no PEP 508 environment marker for GPU vendor, so the variant cannot be
+    # selected at install time. nixl/__init__.py picks the right one at import.
+    # Every variant listed here must be published for the release version, or
+    # `pip install nixl` fails to resolve for all users, not just that vendor's.
     'WHEEL_DEPS': get_option('release_wheel') \
-      ? '"nixl-cu12==' + meson.project_version() + '", "nixl-cu13==' + meson.project_version() + '"' \
+      ? '"nixl-cu12==' + meson.project_version() + '", "nixl-cu13==' + meson.project_version() + '", "nixl-rocm==' + meson.project_version() + '"' \
       : '"' + cuda_wheel_dir.replace('_', '-') + '==' + meson.project_version() + '"',
   }
 )
