@@ -69,6 +69,32 @@ def detect_cuda_major() -> int | None:
         return None
 
 
+def detect_rocm() -> bool:
+    """Whether this environment's torch is a ROCm/HIP build.
+
+    ``detect_cuda_major()`` returning None only means "no CUDA"; it cannot tell
+    a ROCm host from a CPU-only one. A release meta wheel depends on every
+    variant, so nixl_cu12/nixl_cu13/nixl_rocm are all importable on any host and
+    the backend has to be chosen by positive detection rather than by which
+    module happens to import first.
+
+    ROCm torch builds set ``torch.version.hip`` and leave ``.cuda`` as None.
+    No on-disk fast path is needed here: callers run detect_cuda_major() first,
+    which on any non-CUDA host already falls through to importing torch, so it
+    is in sys.modules by the time this is called.
+    """
+    torch = sys.modules.get("torch")
+    if torch is not None:
+        return getattr(getattr(torch, "version", None), "hip", None) is not None
+
+    try:
+        from torch.version import hip as torch_hip
+
+        return torch_hip is not None
+    except ImportError:
+        return False
+
+
 def _torch_cuda_version_from_disk() -> str | None:
     """Return torch's build CUDA version (e.g. "12.6") without full torch import.
 

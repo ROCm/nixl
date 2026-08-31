@@ -43,7 +43,7 @@ Install with:
 pip install nixl
 ```
 
-This installs both CUDA 12 and CUDA 13 backends. At runtime, the correct backend is selected automatically based on the CUDA version reported by PyTorch.
+This installs the CUDA 12, CUDA 13 and ROCm backends. At runtime, the correct backend is selected automatically based on the CUDA or HIP version reported by PyTorch. All variants are installed because Python packaging cannot select on GPU vendor at install time.
 
 ## Prerequisites for source build (Linux)
 
@@ -217,7 +217,7 @@ The preferred way to install the Python bindings is through pip from PyPI:
 pip install nixl
 ```
 
-This installs both CUDA 12 and CUDA 13 backends. At runtime, the correct backend is selected automatically based on the CUDA version reported by PyTorch.
+This installs the CUDA 12, CUDA 13 and ROCm backends. At runtime, the correct backend is selected automatically based on the CUDA or HIP version reported by PyTorch. All variants are installed because Python packaging cannot select on GPU vendor at install time.
 
 #### Installation from source
 

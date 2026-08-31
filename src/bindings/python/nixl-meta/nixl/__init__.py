@@ -17,7 +17,7 @@ import importlib
 import sys
 from typing import TYPE_CHECKING
 
-from nixl_meta_utils import detect_cuda_major
+from nixl_meta_utils import detect_cuda_major, detect_rocm
 
 
 def _load_cuda_backend() -> str:
@@ -33,8 +33,19 @@ def _load_cuda_backend() -> str:
             raise ImportError(
                 f"detected CUDA {cuda_major} but {pip_name} is not installed"
             ) from e
+    # ROCm host. Checked before the fallback below because a release meta wheel
+    # depends on every variant, so nixl_cu13/nixl_cu12 are importable here too
+    # and would otherwise win purely by iteration order.
+    if detect_rocm():
+        mod_name = "nixl_rocm"
+        try:
+            return importlib.import_module(mod_name).__name__
+        except ModuleNotFoundError as e:
+            if e.name != mod_name:
+                raise
+            raise ImportError("detected ROCm but nixl-rocm is not installed") from e
     # No CUDA stack detected — use whatever backend is installed.
-    for mod_name in ("nixl_cu13", "nixl_cu12"):
+    for mod_name in ("nixl_cu13", "nixl_cu12", "nixl_rocm"):
         try:
             return importlib.import_module(mod_name).__name__
         except ModuleNotFoundError as e:
@@ -42,7 +53,7 @@ def _load_cuda_backend() -> str:
                 # Re-raise if the error is not about the module we're trying to import
                 raise
             continue
-    raise ImportError("No NIXL CUDA backend found")
+    raise ImportError("No NIXL backend found")
 
 
 _pkg = sys.modules[_load_cuda_backend()]
