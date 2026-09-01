@@ -16,7 +16,7 @@ REPO_ROOT := $(CURDIR)
 # args, and docker/scripts/image-tag.sh reads the Dockerfile when they are not.
 ROCM_VERSION ?= 7.14.0
 NIXL_GIT_URL ?= https://github.com/ai-dynamo/nixl.git
-NIXL_REF     ?= v1.3.2
+NIXL_REF     ?= v1.4.0
 MORI_GIT_URL ?= https://github.com/ROCm/mori.git
 MORI_REF     ?= v1.2.2
 UCX_GIT_URL  ?= https://github.com/openucx/ucx.git

@@ -39,8 +39,8 @@ index 10ba75f..8e0c118 100644
      error('Cannot specify both enable_plugins and disable_plugins options')
  endif
  
--all_plugins = ['UCX', 'LIBFABRIC', 'POSIX', 'OBJ', 'GDS', 'GDS_MT', 'AIS_MT', 'MOONCAKE', 'HF3FS', 'GUSLI', 'GPUNETIO', 'UCCL', 'AZURE_BLOB', 'INFINIA']
-+all_plugins = ['UCX', 'LIBFABRIC', 'POSIX', 'OBJ', 'GDS', 'GDS_MT', 'AIS_MT', 'MOONCAKE', 'HF3FS', 'GUSLI', 'GPUNETIO', 'UCCL', 'AZURE_BLOB', 'INFINIA', 'MORI_IO']
+-all_plugins = ['UCX', 'LIBFABRIC', 'POSIX', 'OBJ', 'GDS', 'GDS_MT', 'AIS_MT', 'MOONCAKE', 'HF3FS', 'GUSLI', 'GPUNETIO', 'UCCL', 'AZURE_BLOB', 'INFINIA', 'TELEMETRY_DOCA']
++all_plugins = ['UCX', 'LIBFABRIC', 'POSIX', 'OBJ', 'GDS', 'GDS_MT', 'AIS_MT', 'MOONCAKE', 'HF3FS', 'GUSLI', 'GPUNETIO', 'UCCL', 'AZURE_BLOB', 'INFINIA', 'TELEMETRY_DOCA', 'MORI_IO']
  
  enabled_plugins = {}
  
