@@ -185,7 +185,7 @@ RUN --mount=type=cache,target=/root/.cache,sharing=locked \
 FROM base AS mori
 
 ARG MORI_GIT_URL=https://github.com/ROCm/mori.git
-ARG MORI_REF=v1.2.2
+ARG MORI_REF=v1.2.3
 # MORI's optional pieces.  UMBP/SPDK is off (the SPDK submodule is huge and
 # needs its own selective checkout); tests/examples/benchmarks need MPI.
 ARG MORI_BUILD_UMBP=OFF
@@ -230,7 +230,7 @@ RUN --mount=type=cache,target=/root/.cache,sharing=locked \
 FROM ucx AS nixl
 
 ARG NIXL_GIT_URL=https://github.com/ai-dynamo/nixl.git
-ARG NIXL_REF=v1.3.2
+ARG NIXL_REF=v1.4.1
 # Plugins excluded from the build: CUDA-only (GDS/GDS_MT/GPUNETIO) or needing
 # vendor SDKs / cloud object stores we do not test here.
 ARG NIXL_DISABLE_PLUGINS=GDS,GDS_MT,GPUNETIO,OBJ,AZURE_BLOB,INFINIA
