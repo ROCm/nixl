@@ -21,6 +21,14 @@ MORI_GIT_URL ?= https://github.com/ROCm/mori.git
 MORI_REF     ?= v1.2.3
 UCX_GIT_URL  ?= https://github.com/openucx/ucx.git
 UCX_REF      ?= v1.22.0
+# hipFile is the odd one out: ROCm/hipFile publishes no releases, its `nightly`
+# git tag has been frozen since 2026-01-22 and the .deb assets on the "Nightly"
+# GitHub release since 2026-06-08 -- all three older than the 0.3.0 the ROCm
+# base image packages.  The live stream is the develop branch, so this is a SHA
+# on it (develop HEAD as of 2026-09-01) rather than a tag.  Set it empty to fall
+# back to the packaged libhipfile; the AIS backend then drops out of the build.
+HIPFILE_GIT_URL ?= https://github.com/ROCm/hipFile.git
+HIPFILE_REF     ?= bd0bc2330a1573223209b9899055d1d6188b9113
 
 override VERSION := $(strip $(file <$(REPO_ROOT)/VERSION))
 
@@ -31,7 +39,7 @@ DOCKERFILE := $(REPO_ROOT)/docker/Dockerfile
 # The tag encodes every component version, so two builds that differ in any pin
 # cannot collide.  Command-line overrides of the pins above are exported into
 # the tag script, which otherwise falls back to the Dockerfile ARG defaults.
-_TAG_ARGS := ROCM_VERSION NIXL_REF MORI_REF
+_TAG_ARGS := ROCM_VERSION NIXL_REF MORI_REF HIPFILE_REF
 _single_quote := '
 _shell_quote = '$(subst $(_single_quote),'"'"',$(1))'
 _TAG_ENV := $(foreach _a,$(_TAG_ARGS),$(if $(filter undefined,$(origin $(_a))),,$(_a)=$(call _shell_quote,$(value $(_a)))))
@@ -77,6 +85,8 @@ _BUILD_ARGS := \
 	--build-arg UCX_GIT_URL=$(UCX_GIT_URL) \
 	--build-arg UCX_REF=$(UCX_REF) \
 	--build-arg UCX_FAST=$(UCX_FAST) \
+	--build-arg HIPFILE_GIT_URL=$(HIPFILE_GIT_URL) \
+	--build-arg HIPFILE_REF=$(HIPFILE_REF) \
 	$(if $(UCX_DEBUG_LOG),--build-arg UCX_DEBUG_LOG=$(UCX_DEBUG_LOG),) \
 	--build-arg VERSION=$(VERSION) \
 	--build-arg INSTALL_TORCH=$(INSTALL_TORCH) \
@@ -184,6 +194,7 @@ help:
 	@echo "  NIXL_REF=$(NIXL_REF)   ($(NIXL_GIT_URL))"
 	@echo "  MORI_REF=$(MORI_REF)   ($(MORI_GIT_URL))"
 	@echo "  UCX_REF=$(UCX_REF)     ($(UCX_GIT_URL))"
+	@echo "  HIPFILE_REF=$(HIPFILE_REF) ($(HIPFILE_GIT_URL))"
 	@echo ""
 	@echo "Build knobs:"
 	@echo "  ROCM_ARCH=$(ROCM_ARCH)   GPU arch baked into MORI (auto-detected)"
@@ -374,6 +385,7 @@ print-config:
 	@echo "NIXL           = $(NIXL_GIT_URL) @ $(NIXL_REF)"
 	@echo "MORI           = $(MORI_GIT_URL) @ $(MORI_REF)"
 	@echo "UCX            = $(UCX_GIT_URL) @ $(UCX_REF)"
+	@echo "hipFile        = $(HIPFILE_GIT_URL) @ $(or $(HIPFILE_REF),<ROCm-packaged>)"
 	@echo "BUILD_JOBS     = $(BUILD_JOBS)"
 	@echo "TLS_CERT       = $(TLS_CERT)"
 

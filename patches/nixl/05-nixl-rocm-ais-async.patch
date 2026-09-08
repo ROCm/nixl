@@ -1,0 +1,1010 @@
+# Add an AIS NIXL backend: hipFile's asynchronous stream API, alongside the
+# existing thread-pool AIS_MT.
+#
+# This mirrors upstream's pairing on the NVIDIA side -- GDS (submission-based)
+# next to GDS_MT (thread pool) -- so the plugin, its files and its classes carry
+# the same names with GDS/gds swapped for AIS/ais, and it reuses the existing
+# rocm_ais_path / disable_rocm_ais_backend meson options rather than adding new
+# ones.  AIS_MT is untouched: it is the baseline this is measured against.
+#
+# What it is NOT is a port of cuda_gds's batch path, which was the obvious
+# structural choice.  hipFile's batch API is a stub as of develop bd0bc233:
+# BatchContext::submit_operations only validates the params and parks them in an
+# outstanding_ops set -- no I/O is ever issued -- and hipFileBatchIOGetStatus,
+# hipFileBatchIOCancel and hipFileBatchIODestroy all throw
+# std::runtime_error("Not Implemented").  A batch port would submit cleanly,
+# move zero bytes, and then fail in checkXfer.  The async path is real:
+# hipFileReadAsync/WriteAsync reach Backend::async_io, implemented by both the
+# fastpath and fallback backends with an AsyncMonitor completion thread.
+#
+# So the engine is structured around HIP streams instead of batch handles:
+#
+#   - a stream is the unit of submission.  Ops on one stream complete in order;
+#     ops on different streams overlap.  batch_limit therefore means "requests
+#     chained onto one stream" and batch_pool_size means "streams held per
+#     device" -- the parameter keys keep cuda_gds's names so that one nixlbench
+#     sweep row (--gds_batch_pool_size / --gds_batch_limit) configures either
+#     backend.
+#   - the pool is keyed by device, not a single free list, because
+#     Fastpath::async_io rejects a buffer whose GPU id differs from the
+#     stream's.  Streams are created on first use: no device is known at
+#     construction time.
+#   - exhausting the pool chains extra requests onto streams already taken
+#     rather than failing the transfer, which is what cuda_gds does on
+#     "batch pool exhausted".
+#   - hipFileReadAsync takes the size and both offsets by pointer and reads them
+#     when the op reaches the head of the stream, not at submission, so those
+#     fields live in the request handle and releaseReqH synchronises before
+#     letting it die.
+#   - completion status is the per-request byte count and nothing else: hipFile
+#     reports a POSIX errno as a negative count and clamps one op to
+#     getMaxRwCount(), neither of which surfaces through the stream.  checkXfer
+#     treats a short transfer as an error, which the cuFile original does not --
+#     nixlGdsIOBatch::checkStatus counts returned events and ignores their
+#     status field entirely.
+#
+# The meson gate tests for hipFileReadAsync with has_header_symbol and calls
+# subdir_done() when it is absent, so an older hipFile drops the plugin instead
+# of breaking the build -- the same shape as the existing hipFile-not-found
+# path that AIS_MT already uses.
+
+diff --git a/meson.build b/meson.build
+index 479a8c3..a4d2873 100644
+--- a/meson.build
++++ b/meson.build
+@@ -29,7 +29,7 @@ if enable_plugins_opt != '' and disable_plugins_opt != ''
+     error('Cannot specify both enable_plugins and disable_plugins options')
+ endif
+ 
+-all_plugins = ['UCX', 'LIBFABRIC', 'POSIX', 'OBJ', 'GDS', 'GDS_MT', 'AIS_MT', 'MOONCAKE', 'HF3FS', 'GUSLI', 'GPUNETIO', 'UCCL', 'AZURE_BLOB', 'INFINIA', 'TELEMETRY_DOCA', 'MORI_IO']
++all_plugins = ['UCX', 'LIBFABRIC', 'POSIX', 'OBJ', 'GDS', 'GDS_MT', 'AIS', 'AIS_MT', 'MOONCAKE', 'HF3FS', 'GUSLI', 'GPUNETIO', 'UCCL', 'AZURE_BLOB', 'INFINIA', 'TELEMETRY_DOCA', 'MORI_IO']
+ 
+ enabled_plugins = {}
+ 
+diff --git a/src/plugins/meson.build b/src/plugins/meson.build
+index ba70651..5ed4835 100644
+--- a/src/plugins/meson.build
++++ b/src/plugins/meson.build
+@@ -69,6 +69,18 @@ if enabled_plugins.get('GDS_MT')
+ endif
+ 
+ disable_rocm_ais_backend = get_option('disable_rocm_ais_backend')
++if enabled_plugins.get('AIS')
++    if (disable_rocm_ais_backend or not hip_dep.found()) and is_explicit_enable
++        if disable_rocm_ais_backend
++            error('AIS plugin requested but AIS hipFile support is disabled (-Ddisable_rocm_ais_backend=true)')
++        else
++            error('AIS plugin requested but HIP/ROCm dependency not found')
++        endif
++    elif not disable_rocm_ais_backend and hip_dep.found()
++        subdir('rocm_ais')
++    endif
++endif
++
+ if enabled_plugins.get('AIS_MT')
+     if (disable_rocm_ais_backend or not hip_dep.found() or not taskflow_proj.found()) and is_explicit_enable
+         if disable_rocm_ais_backend
+diff --git a/src/plugins/rocm_ais/ais_backend.cpp b/src/plugins/rocm_ais/ais_backend.cpp
+new file mode 100644
+index 0000000..5660cf1
+--- /dev/null
++++ b/src/plugins/rocm_ais/ais_backend.cpp
+@@ -0,0 +1,420 @@
++/* Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ */
++#include <cassert>
++#include <cstring>
++#include <algorithm>
++#include <memory>
++#include <stdexcept>
++#include <unordered_map>
++#include <hip/hip_runtime.h>
++#include <hipfile.h>
++#include "ais_backend.h"
++#include "ais_utils.h"
++#include "common/backend.h"
++#include "common/nixl_log.h"
++#include "file/file_path_mode.h"
++#include "file/file_utils.h"
++
++namespace {
++/** Streams held per device.  Ops on one stream serialise, so this is the
++ *  backend's concurrency width. */
++constexpr unsigned DEFAULT_STREAM_POOL_SIZE = 16;
++/** Requests chained onto one stream before moving to the next. */
++constexpr unsigned DEFAULT_OPS_PER_STREAM = 128;
++/** Split anything larger, so one huge descriptor still spreads over streams. */
++constexpr unsigned DEFAULT_MAX_REQUEST_SIZE = 16 * 1024 * 1024;
++} // namespace
++
++nixlAisEngine::nixlAisEngine(const nixlBackendInitParams *init_params)
++    : nixlBackendEngine(init_params),
++      ais_utils(std::make_unique<aisUtil>()) {
++    try {
++        nixl_b_params_t *custom_params = init_params->customParams;
++        // Parameter names are cuda_gds's, not descriptions of a batch handle:
++        // nixlbench drives both backends through --gds_batch_pool_size /
++        // --gds_batch_limit, and keeping the keys identical is what lets an AIS
++        // run and a GDS run be configured from the same sweep row.
++        stream_pool_size = nixl::getBackendParamDefaulted(
++            custom_params, "batch_pool_size", DEFAULT_STREAM_POOL_SIZE);
++        ops_per_stream =
++            nixl::getBackendParamDefaulted(custom_params, "batch_limit", DEFAULT_OPS_PER_STREAM);
++        max_request_size = nixl::getBackendParamDefaulted(
++            custom_params, "max_request_size", DEFAULT_MAX_REQUEST_SIZE);
++    }
++    catch (const std::exception &e) {
++        NIXL_ERROR << e.what();
++        this->initErr = true;
++        return;
++    }
++
++    if (stream_pool_size == 0 || ops_per_stream == 0 || max_request_size == 0) {
++        NIXL_ERROR << "AIS: batch_pool_size, batch_limit and max_request_size must be non-zero";
++        this->initErr = true;
++        return;
++    }
++
++    this->initErr = false;
++    if (ais_utils->openAisDriver() != NIXL_SUCCESS) {
++        this->initErr = true;
++        return;
++    }
++
++    // Unlike cuda_gds there is no pool to prime here: a stream is bound to a
++    // device, and no device is known until the first registerMem/prepXfer.
++}
++
++nixlAisEngine::~nixlAisEngine() {
++    {
++        const std::lock_guard<std::mutex> lock(stream_pool_lock);
++        stream_pool.clear();
++        stream_store.clear();
++    }
++    if (ais_utils) {
++        ais_utils->closeAisDriver();
++    }
++}
++
++nixl_status_t
++nixlAisEngine::registerMem(const nixlBlobDesc &mem, const nixl_mem_t &nixl_mem,
++                           nixlBackendMD *&out) {
++    if (nixl_mem == FILE_SEG) {
++        auto resv = path_mode_devids_.reserve(mem.devId, mem.metaInfo);
++        if (!resv.ok()) {
++            NIXL_ERROR << "AIS path-mode requires a unique devId per file (devId=" << mem.devId
++                       << " already registered)";
++            return NIXL_ERR_INVALID_PARAM;
++        }
++        std::unique_ptr<nixlAisMetadata> md;
++        try {
++            md = std::make_unique<nixlAisMetadata>(mem.devId, mem.metaInfo);
++        }
++        catch (const std::system_error &e) {
++            NIXL_ERROR << "AIS path-mode open failed: " << e.what();
++            return NIXL_ERR_BACKEND;
++        }
++        const int fd = md->file_fd.fd();
++
++        if (auto it = ais_file_map.find(fd); it != ais_file_map.end()) {
++            md->handle = it->second;
++            md->handle.size = mem.len;
++            md->handle.metadata = mem.metaInfo;
++        } else {
++            const nixl_status_t s =
++                ais_utils->registerFileHandle(fd, mem.len, mem.metaInfo, md->handle);
++            if (s != NIXL_SUCCESS) {
++                return s; // ~FileFd via unique_ptr drop closes the owned fd
++            }
++            ais_file_map[fd] = md->handle;
++        }
++        resv.commit();
++        out = md.release();
++        return NIXL_SUCCESS;
++    }
++
++    auto md = std::make_unique<nixlAisMetadata>();
++    md->type = nixl_mem;
++
++    if (nixl_mem == VRAM_SEG) {
++        if (const hipError_t e = hipSetDevice(mem.devId); e != hipSuccess) {
++            NIXL_ERROR << "AIS: hipSetDevice returned " << hipGetErrorString(e)
++                       << " for device ID " << mem.devId;
++            return NIXL_ERR_BACKEND;
++        }
++    } else if (nixl_mem != DRAM_SEG) {
++        return NIXL_ERR_BACKEND;
++    }
++
++    if (const nixl_status_t s = ais_utils->registerBufHandle((void *)mem.addr, mem.len, 0);
++        s != NIXL_SUCCESS) {
++        return s;
++    }
++    md->buf.base = (void *)mem.addr;
++    md->buf.size = mem.len;
++    out = md.release();
++    return NIXL_SUCCESS;
++}
++
++nixl_status_t
++nixlAisEngine::deregisterMem(nixlBackendMD *meta) {
++    std::unique_ptr<nixlAisMetadata> md((nixlAisMetadata *)meta);
++    if (md->type == FILE_SEG) {
++        if (!md->file_fd.path().empty()) {
++            path_mode_devids_.release(md->devId);
++        }
++        ais_utils->deregisterFileHandle(md->handle);
++        ais_file_map.erase(md->handle.fd);
++    } else {
++        ais_utils->deregisterBufHandle(md->buf.base);
++    }
++    return NIXL_SUCCESS;
++}
++
++nixl_status_t
++nixlAisEngine::resolveFileHandle(const nixlMetaDesc &d, aisFileHandle &fh) const {
++    auto *md = static_cast<const nixlAisMetadata *>(d.metadataP);
++    if (!md || md->type != FILE_SEG) {
++        NIXL_ERROR << "AIS: missing FILE_SEG metadata at xfer time";
++        return NIXL_ERR_NOT_FOUND;
++    }
++    fh = md->handle;
++    return NIXL_SUCCESS;
++}
++
++aisStream *
++nixlAisEngine::getStreamFromPool(int dev_id) const {
++    const std::lock_guard<std::mutex> lock(stream_pool_lock);
++
++    auto &free_list = stream_pool[dev_id];
++    if (!free_list.empty()) {
++        aisStream *s = free_list.back();
++        free_list.pop_back();
++        return s;
++    }
++
++    auto &owned = stream_store[dev_id];
++    if (owned.size() >= stream_pool_size) {
++        return nullptr;
++    }
++
++    try {
++        owned.push_back(std::make_unique<aisStream>(dev_id));
++    }
++    catch (const std::exception &e) {
++        NIXL_ERROR << "AIS: " << e.what();
++        return nullptr;
++    }
++    return owned.back().get();
++}
++
++void
++nixlAisEngine::returnStreamsToPool(std::vector<aisStream *> &streams) const {
++    const std::lock_guard<std::mutex> lock(stream_pool_lock);
++    for (aisStream *s : streams) {
++        stream_pool[s->deviceId()].push_back(s);
++    }
++    streams.clear();
++}
++
++nixl_status_t
++nixlAisEngine::prepXfer(const nixl_xfer_op_t &operation,
++                        const nixl_meta_dlist_t &local,
++                        const nixl_meta_dlist_t &remote,
++                        const std::string &remote_agent,
++                        nixlBackendReqH *&handle,
++                        const nixl_opt_b_args_t *opt_args) const {
++    auto ais_handle = std::make_unique<nixlAisBackendReqH>();
++    const size_t buf_cnt = local.descCount();
++    const size_t file_cnt = remote.descCount();
++
++    if ((buf_cnt != file_cnt) || ((operation != NIXL_READ) && (operation != NIXL_WRITE))) {
++        NIXL_ERROR << "AIS: incorrect count or operation selection";
++        return NIXL_ERR_INVALID_PARAM;
++    }
++
++    if ((remote.getType() != FILE_SEG) && (local.getType() != FILE_SEG)) {
++        NIXL_ERROR << "AIS: only supports I/O between memory (DRAM/VRAM) and file type";
++        return NIXL_ERR_INVALID_PARAM;
++    }
++
++    const bool is_local_file = (local.getType() == FILE_SEG);
++
++    for (size_t i = 0; i < buf_cnt; i++) {
++        void *base_addr;
++        size_t total_size;
++        size_t base_offset;
++        int dev_id;
++        aisFileHandle fh;
++
++        if (is_local_file) {
++            base_addr = (void *)remote[i].addr;
++            total_size = remote[i].len;
++            base_offset = (size_t)local[i].addr;
++            dev_id = remote[i].devId;
++            if (resolveFileHandle(local[i], fh) != NIXL_SUCCESS) {
++                return NIXL_ERR_NOT_FOUND;
++            }
++        } else {
++            base_addr = (void *)local[i].addr;
++            total_size = local[i].len;
++            base_offset = (size_t)remote[i].addr;
++            dev_id = local[i].devId;
++            if (resolveFileHandle(remote[i], fh) != NIXL_SUCCESS) {
++                return NIXL_ERR_NOT_FOUND;
++            }
++        }
++
++        if (!base_addr) {
++            return NIXL_ERR_INVALID_PARAM;
++        }
++
++        size_t remaining_size = total_size;
++        size_t current_offset = 0;
++
++        while (remaining_size > 0) {
++            const size_t request_size = std::min(remaining_size, (size_t)max_request_size);
++
++            ais_handle->request_list.emplace_back(
++                (char *)base_addr + current_offset,
++                request_size,
++                (hoff_t)(base_offset + current_offset),
++                fh.hip_fhandle,
++                (operation == NIXL_READ) ? hipFileBatchRead : hipFileBatchWrite,
++                dev_id);
++
++            remaining_size -= request_size;
++            current_offset += request_size;
++        }
++    }
++
++    if (ais_handle->request_list.empty()) {
++        return NIXL_ERR_INVALID_PARAM;
++    }
++
++    ais_handle->needs_prep = false;
++    handle = ais_handle.release();
++    return NIXL_SUCCESS;
++}
++
++nixl_status_t
++nixlAisEngine::submitRequest(AisTransferRequestH &req, hipStream_t stream) const {
++    req.bytes_done = 0;
++
++    const hipFileError_t err = (req.op == hipFileBatchRead) ?
++        hipFileReadAsync(req.fh, req.addr, &req.size, &req.file_offset, &req.buf_offset,
++                         &req.bytes_done, stream) :
++        hipFileWriteAsync(req.fh, req.addr, &req.size, &req.file_offset, &req.buf_offset,
++                          &req.bytes_done, stream);
++
++    if (err.err != hipFileSuccess) {
++        NIXL_ERROR << "AIS: hipFile" << ((req.op == hipFileBatchRead) ? "Read" : "Write")
++                   << "Async failed: err=" << err.err;
++        return NIXL_ERR_BACKEND;
++    }
++    return NIXL_SUCCESS;
++}
++
++nixl_status_t
++nixlAisEngine::postXfer(const nixl_xfer_op_t &operation,
++                        const nixl_meta_dlist_t &local,
++                        const nixl_meta_dlist_t &remote,
++                        const std::string &remote_agent,
++                        nixlBackendReqH *&handle,
++                        const nixl_opt_b_args_t *opt_args) const {
++    auto *ais_handle = (nixlAisBackendReqH *)handle;
++
++    if (ais_handle->request_list.empty()) {
++        NIXL_ERROR << "AIS: empty request list";
++        return NIXL_ERR_INVALID_PARAM;
++    }
++    if (!ais_handle->streams.empty()) {
++        NIXL_ERROR << "AIS: handle already has in-flight work";
++        return NIXL_ERR_INVALID_PARAM;
++    }
++
++    // Acquire one stream per ops_per_stream requests, per device.  A device
++    // whose pool is exhausted keeps reusing the streams already taken -- extra
++    // requests just chain onto them, which costs concurrency but never fails a
++    // transfer the way cuda_gds's "batch pool exhausted" path does.
++    std::unordered_map<int, std::vector<aisStream *>> per_dev;
++    std::unordered_map<int, size_t> issued;
++
++    for (AisTransferRequestH &req : ais_handle->request_list) {
++        auto &streams = per_dev[req.dev_id];
++        const size_t n = issued[req.dev_id]++;
++
++        if (streams.empty() || (n % ops_per_stream == 0)) {
++            if (aisStream *s = getStreamFromPool(req.dev_id)) {
++                streams.push_back(s);
++                ais_handle->streams.push_back(s);
++            } else if (streams.empty()) {
++                NIXL_ERROR << "AIS: no stream available for device " << req.dev_id;
++                returnStreamsToPool(ais_handle->streams);
++                return NIXL_ERR_BACKEND;
++            }
++        }
++
++        aisStream *s = streams[(n / ops_per_stream) % streams.size()];
++        if (const nixl_status_t st = submitRequest(req, s->get()); st != NIXL_SUCCESS) {
++            for (aisStream *used : ais_handle->streams) {
++                (void)hipStreamSynchronize(used->get());
++            }
++            returnStreamsToPool(ais_handle->streams);
++            return st;
++        }
++    }
++
++    return NIXL_IN_PROG;
++}
++
++nixl_status_t
++nixlAisEngine::checkXfer(nixlBackendReqH *handle) const {
++    auto *ais_handle = (nixlAisBackendReqH *)handle;
++
++    if (ais_handle->streams.empty()) {
++        ais_handle->needs_prep = true;
++        return NIXL_SUCCESS;
++    }
++
++    for (aisStream *s : ais_handle->streams) {
++        const hipError_t q = hipStreamQuery(s->get());
++        if (q == hipErrorNotReady) {
++            return NIXL_IN_PROG;
++        }
++        if (q != hipSuccess) {
++            NIXL_ERROR << "AIS: hipStreamQuery failed: " << hipGetErrorString(q);
++            returnStreamsToPool(ais_handle->streams);
++            ais_handle->needs_prep = true;
++            return NIXL_ERR_BACKEND;
++        }
++    }
++
++    // Every op has retired, so its bytes_done is final.  hipFile clamps a
++    // single async op to hipFile::getMaxRwCount() and reports a POSIX errno as
++    // a negative count, neither of which surfaces through the stream: the
++    // per-request byte count is the only completion status there is.
++    nixl_status_t status = NIXL_SUCCESS;
++    for (const AisTransferRequestH &req : ais_handle->request_list) {
++        if (req.bytes_done < 0) {
++            NIXL_ERROR << "AIS: async " << ((req.op == hipFileBatchRead) ? "read" : "write")
++                       << " failed: " << strerror((int)-req.bytes_done)
++                       << " - address=" << req.addr;
++            status = NIXL_ERR_BACKEND;
++        } else if ((size_t)req.bytes_done != req.size) {
++            NIXL_ERROR << "AIS: short " << ((req.op == hipFileBatchRead) ? "read: " : "write: ")
++                       << req.bytes_done << " out of " << req.size
++                       << " bytes - address=" << req.addr;
++            status = NIXL_ERR_BACKEND;
++        }
++    }
++
++    returnStreamsToPool(ais_handle->streams);
++    ais_handle->needs_prep = true;
++    return status;
++}
++
++nixl_status_t
++nixlAisEngine::releaseReqH(nixlBackendReqH *handle) const {
++    std::unique_ptr<nixlAisBackendReqH> ais_handle((nixlAisBackendReqH *)handle);
++
++    // Releasing while ops are still enqueued would let request_list die under
++    // hipFile, which dereferences the size/offset pointers on the stream.
++    for (aisStream *s : ais_handle->streams) {
++        (void)hipStreamSynchronize(s->get());
++    }
++    returnStreamsToPool(ais_handle->streams);
++    return NIXL_SUCCESS;
++}
++
++nixl_status_t
++nixlAisEngine::queryMem(const nixl_reg_dlist_t &descs,
++                        std::vector<nixl_query_resp_t> &resp) const {
++    std::vector<nixl_blob_t> metadata(descs.descCount());
++    for (int i = 0; i < descs.descCount(); ++i) {
++        metadata[i] = descs[i].metaInfo;
++    }
++
++    return nixl::queryFileInfoList(metadata, resp);
++}
+diff --git a/src/plugins/rocm_ais/ais_backend.h b/src/plugins/rocm_ais/ais_backend.h
+new file mode 100644
+index 0000000..5dc0fde
+--- /dev/null
++++ b/src/plugins/rocm_ais/ais_backend.h
+@@ -0,0 +1,145 @@
++/* Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ */
++#ifndef __AIS_BACKEND_H
++#define __AIS_BACKEND_H
++
++#include <nixl.h>
++#include <nixl_types.h>
++#include <hip/hip_runtime.h>
++#include <hipfile.h>
++#include <unistd.h>
++#include <fcntl.h>
++#include <list>
++#include <vector>
++#include <mutex>
++#include <memory>
++#include <unordered_map>
++#include "ais_utils.h"
++#include "backend/backend_engine.h"
++#include "file/file_path_mode.h"
++
++class nixlAisMetadata : public nixlFilePathMD {
++public:
++    aisFileHandle handle;
++    aisMemBuf buf;
++    nixl_mem_t type;
++
++    nixlAisMetadata() = default;
++
++    nixlAisMetadata(uint64_t devid, const std::string &metaInfo)
++        : nixlFilePathMD(devid, metaInfo),
++          type(FILE_SEG) {}
++};
++
++// hipFileReadAsync/WriteAsync take the size and both offsets by pointer and
++// dereference them when the op reaches the head of the stream, not at
++// submission.  So these fields have to outlive the submit call -- they live in
++// the request handle, and the handle owns the stream until checkXfer reaps it.
++class AisTransferRequestH {
++public:
++    void *addr = nullptr;
++    size_t size = 0;
++    hoff_t file_offset = 0;
++    hoff_t buf_offset = 0;
++    ssize_t bytes_done = 0;
++    hipFileHandle_t fh = nullptr;
++    hipFileOpcode_t op = hipFileBatchRead;
++    int dev_id = -1;
++
++    AisTransferRequestH() = default;
++
++    AisTransferRequestH(void *a, size_t s, hoff_t offset, hipFileHandle_t handle,
++                        hipFileOpcode_t operation, int device_id)
++        : addr(a),
++          size(s),
++          file_offset(offset),
++          fh(handle),
++          op(operation),
++          dev_id(device_id) {}
++};
++
++class nixlAisBackendReqH : public nixlBackendReqH {
++public:
++    std::vector<AisTransferRequestH> request_list;
++    std::vector<aisStream *> streams;
++    bool needs_prep = true;
++};
++
++class nixlAisEngine : public nixlBackendEngine {
++private:
++    std::unique_ptr<aisUtil> ais_utils;
++    std::unordered_map<int, aisFileHandle> ais_file_map;
++    nixl::PathModeDevIdRegistry path_mode_devids_;
++
++    // Streams are per-device (Fastpath::async_io rejects a buffer whose GPU id
++    // differs from the stream's), so the pool is keyed by device rather than
++    // being the single free list cuda_gds keeps for batch handles.
++    mutable std::mutex stream_pool_lock;
++    mutable std::unordered_map<int, std::vector<std::unique_ptr<aisStream>>> stream_store;
++    mutable std::unordered_map<int, std::list<aisStream *>> stream_pool;
++
++    unsigned int stream_pool_size;
++    unsigned int ops_per_stream;
++    unsigned int max_request_size;
++
++    aisStream *getStreamFromPool(int dev_id) const;
++    void returnStreamsToPool(std::vector<aisStream *> &streams) const;
++    nixl_status_t resolveFileHandle(const nixlMetaDesc &d, aisFileHandle &fh) const;
++    nixl_status_t submitRequest(AisTransferRequestH &req, hipStream_t stream) const;
++
++public:
++    nixlAisEngine(const nixlBackendInitParams *init_params);
++    ~nixlAisEngine();
++
++    // The target is the filesystem, so there is nothing to connect to.
++    bool supportsNotif() const override { return false; }
++    bool supportsRemote() const override { return false; }
++    bool supportsLocal() const override { return true; }
++
++    nixl_mem_list_t getSupportedMems() const override {
++        nixl_mem_list_t mems;
++        mems.push_back(DRAM_SEG);
++        mems.push_back(VRAM_SEG);
++        mems.push_back(FILE_SEG);
++        return mems;
++    }
++
++    nixl_status_t connect(const std::string &remote_agent) override { return NIXL_SUCCESS; }
++    nixl_status_t disconnect(const std::string &remote_agent) override { return NIXL_SUCCESS; }
++
++    nixl_status_t loadLocalMD(nixlBackendMD *input, nixlBackendMD *&output) override {
++        output = input;
++        return NIXL_SUCCESS;
++    }
++
++    nixl_status_t unloadMD(nixlBackendMD *input) override { return NIXL_SUCCESS; }
++
++    nixl_status_t registerMem(const nixlBlobDesc &mem, const nixl_mem_t &nixl_mem,
++                              nixlBackendMD *&out) override;
++    nixl_status_t deregisterMem(nixlBackendMD *meta) override;
++
++    nixl_status_t prepXfer(const nixl_xfer_op_t &operation,
++                           const nixl_meta_dlist_t &local,
++                           const nixl_meta_dlist_t &remote,
++                           const std::string &remote_agent,
++                           nixlBackendReqH *&handle,
++                           const nixl_opt_b_args_t *opt_args = nullptr) const override;
++
++    nixl_status_t postXfer(const nixl_xfer_op_t &operation,
++                           const nixl_meta_dlist_t &local,
++                           const nixl_meta_dlist_t &remote,
++                           const std::string &remote_agent,
++                           nixlBackendReqH *&handle,
++                           const nixl_opt_b_args_t *opt_args = nullptr) const override;
++
++    nixl_status_t checkXfer(nixlBackendReqH *handle) const override;
++    nixl_status_t releaseReqH(nixlBackendReqH *handle) const override;
++
++    nixl_status_t queryMem(const nixl_reg_dlist_t &descs,
++                           std::vector<nixl_query_resp_t> &resp) const override;
++};
++
++#endif
+diff --git a/src/plugins/rocm_ais/ais_plugin.cpp b/src/plugins/rocm_ais/ais_plugin.cpp
+new file mode 100644
+index 0000000..7c860ff
+--- /dev/null
++++ b/src/plugins/rocm_ais/ais_plugin.cpp
+@@ -0,0 +1,27 @@
++/* Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ */
++
++#include "backend/backend_plugin.h"
++#include "ais_backend.h"
++
++using ais_plugin_t = nixlBackendPluginCreator<nixlAisEngine>;
++
++#ifdef STATIC_PLUGIN_AIS
++nixlBackendPlugin *
++createStaticAISPlugin() {
++    return ais_plugin_t::create(
++        NIXL_PLUGIN_API_VERSION, "AIS", "0.1.0", {}, {DRAM_SEG, VRAM_SEG, FILE_SEG});
++}
++#else
++extern "C" NIXL_PLUGIN_EXPORT nixlBackendPlugin *
++nixl_plugin_init() {
++    return ais_plugin_t::create(
++        NIXL_PLUGIN_API_VERSION, "AIS", "0.1.0", {}, {DRAM_SEG, VRAM_SEG, FILE_SEG});
++}
++
++extern "C" NIXL_PLUGIN_EXPORT void
++nixl_plugin_fini() {}
++#endif
+diff --git a/src/plugins/rocm_ais/ais_utils.cpp b/src/plugins/rocm_ais/ais_utils.cpp
+new file mode 100644
+index 0000000..66e6283
+--- /dev/null
++++ b/src/plugins/rocm_ais/ais_utils.cpp
+@@ -0,0 +1,136 @@
++/* Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ */
++#include <cstdlib>
++#include <cstring>
++#include <stdexcept>
++#include <strings.h>
++#include "ais_utils.h"
++#include "common/nixl_log.h"
++
++namespace {
++// hipFileBufRegister rejects host memory and can also fail on a GPU whose
++// P2PDMA path is unavailable.  Upstream cuda_gds downgrades that to a warning
++// and silently proceeds in compat mode; AIS_MT made it fatal unless opted out.
++// Keep AIS_MT's behaviour so both ROCm backends report the same thing -- a
++// silent compat-mode fallback produces numbers that look like a regression.
++bool
++aisCompatModeAllowed() {
++    const char *v = std::getenv("HIPFILE_ALLOW_COMPAT_MODE");
++    if (v == nullptr || v[0] == '\0') {
++        return false;
++    }
++    return std::strcmp(v, "1") == 0 || strcasecmp(v, "true") == 0 || strcasecmp(v, "yes") == 0;
++}
++} // namespace
++
++nixl_status_t
++aisUtil::registerFileHandle(int fd, size_t size, std::string metaInfo, aisFileHandle &ais_handle) {
++    hipFileDescr_t descr = {};
++    hipFileHandle_t handle;
++
++    descr.handle.fd = fd;
++    descr.type = hipFileHandleTypeOpaqueFD;
++
++    const hipFileError_t status = hipFileHandleRegister(&handle, &descr);
++    if (status.err != hipFileSuccess) {
++        NIXL_ERROR << "AIS: file register error: err=" << status.err << " fd=" << fd;
++        return NIXL_ERR_BACKEND;
++    }
++
++    ais_handle.hip_fhandle = handle;
++    ais_handle.fd = fd;
++    ais_handle.size = size;
++    ais_handle.metadata = std::move(metaInfo);
++
++    return NIXL_SUCCESS;
++}
++
++nixl_status_t
++aisUtil::registerBufHandle(void *ptr, size_t size, int flags) {
++    const hipFileError_t status = hipFileBufRegister(ptr, size, flags);
++    if (status.err != hipFileSuccess) {
++        if (aisCompatModeAllowed()) {
++            NIXL_WARN << "AIS: buffer registration failed - compat mode: err=" << status.err;
++            return NIXL_SUCCESS;
++        }
++        NIXL_ERROR << "AIS: hipFileBufRegister failed (err=" << status.err
++                   << "); set HIPFILE_ALLOW_COMPAT_MODE=true to allow fallback";
++        return NIXL_ERR_BACKEND;
++    }
++    return NIXL_SUCCESS;
++}
++
++nixl_status_t
++aisUtil::openAisDriver() {
++    const hipFileError_t err = hipFileDriverOpen();
++    if (err.err != hipFileSuccess) {
++        NIXL_ERROR << "AIS: error initializing AMD Infinity Storage driver: err=" << err.err;
++        return NIXL_ERR_BACKEND;
++    }
++    return NIXL_SUCCESS;
++}
++
++void
++aisUtil::closeAisDriver() {
++    (void)hipFileDriverClose();
++}
++
++void
++aisUtil::deregisterFileHandle(aisFileHandle &handle) {
++    if (handle.hip_fhandle) {
++        hipFileHandleDeregister(handle.hip_fhandle);
++        handle.hip_fhandle = nullptr;
++    }
++}
++
++nixl_status_t
++aisUtil::deregisterBufHandle(void *ptr) {
++    const hipFileError_t status = hipFileBufDeregister(ptr);
++    if (status.err != hipFileSuccess) {
++        NIXL_ERROR << "AIS: error de-registering buffer: err=" << status.err;
++        return NIXL_ERR_BACKEND;
++    }
++    return NIXL_SUCCESS;
++}
++
++aisStream::aisStream(int device_id) : dev_id_(device_id) {
++    if (dev_id_ >= 0) {
++        const hipError_t dev_err = hipSetDevice(dev_id_);
++        if (dev_err != hipSuccess) {
++            throw std::runtime_error("AIS: hipSetDevice failed: " +
++                                     std::string(hipGetErrorString(dev_err)));
++        }
++    }
++
++    const hipError_t err = hipStreamCreateWithFlags(&stream_, hipStreamNonBlocking);
++    if (err != hipSuccess) {
++        throw std::runtime_error("AIS: hipStreamCreate failed: " +
++                                 std::string(hipGetErrorString(err)));
++    }
++
++    // Flags stay 0: the HIPFILE_STREAM_FIXED_* hints promise that the size and
++    // offset pointers hold their submission-time values, which is exactly what
++    // this backend cannot promise -- a request handle is reusable across
++    // postXfer calls, so prepXfer may rewrite them.
++    const hipFileError_t reg = hipFileStreamRegister(stream_, 0);
++    if (reg.err != hipFileSuccess) {
++        (void)hipStreamDestroy(stream_);
++        stream_ = nullptr;
++        throw std::runtime_error("AIS: hipFileStreamRegister failed: err=" +
++                                 std::to_string(reg.err));
++    }
++    registered_ = true;
++}
++
++aisStream::~aisStream() {
++    if (stream_) {
++        (void)hipStreamSynchronize(stream_);
++        if (registered_) {
++            (void)hipFileStreamDeregister(stream_);
++        }
++        (void)hipStreamDestroy(stream_);
++    }
++}
+diff --git a/src/plugins/rocm_ais/ais_utils.h b/src/plugins/rocm_ais/ais_utils.h
+new file mode 100644
+index 0000000..57e7f5d
+--- /dev/null
++++ b/src/plugins/rocm_ais/ais_utils.h
+@@ -0,0 +1,65 @@
++/* Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ */
++#ifndef __AIS_UTILS_H
++#define __AIS_UTILS_H
++
++#include <fcntl.h>
++#include <unistd.h>
++#include <string>
++#include <nixl.h>
++#include <hip/hip_runtime.h>
++#include <hipfile.h>
++
++class aisFileHandle {
++    public:
++        int fd = -1;
++        size_t size = 0;
++        std::string metadata;
++        hipFileHandle_t hip_fhandle = nullptr;
++};
++
++class aisMemBuf {
++    public:
++        void *base = nullptr;
++        size_t size = 0;
++};
++
++// A HIP stream registered with hipFile, which is the unit of asynchronous
++// submission for this backend: ops enqueued on one stream complete in order,
++// ops on different streams overlap.  Fastpath::async_io rejects a buffer whose
++// GPU does not match the stream's, so a stream is bound to one device for life.
++class aisStream {
++    public:
++        explicit aisStream(int device_id);
++        ~aisStream();
++
++        aisStream(const aisStream &) = delete;
++        aisStream &operator=(const aisStream &) = delete;
++
++        hipStream_t get() const { return stream_; }
++        int deviceId() const { return dev_id_; }
++
++    private:
++        hipStream_t stream_ = nullptr;
++        int dev_id_ = -1;
++        bool registered_ = false;
++};
++
++class aisUtil {
++    public:
++        aisUtil() {}
++        ~aisUtil() {}
++        nixl_status_t registerFileHandle(int fd, size_t size,
++                                         std::string metaInfo,
++                                         aisFileHandle &handle);
++        nixl_status_t registerBufHandle(void *ptr, size_t size, int flags);
++        void deregisterFileHandle(aisFileHandle &handle);
++        nixl_status_t deregisterBufHandle(void *ptr);
++        nixl_status_t openAisDriver();
++        void closeAisDriver();
++};
++
++#endif
+diff --git a/src/plugins/rocm_ais/meson.build b/src/plugins/rocm_ais/meson.build
+new file mode 100644
+index 0000000..4494d27
+--- /dev/null
++++ b/src/plugins/rocm_ais/meson.build
+@@ -0,0 +1,95 @@
++# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
++#
++# SPDX-License-Identifier: Apache-2.0
++
++# Same discovery as src/plugins/mt/ais: one rocm_ais_path option feeds both
++# hipFile backends, so AIS and AIS_MT always link the same library and a
++# benchmark comparison between them is a comparison of the plugins only.
++rocm_ais_path_opt = get_option('rocm_ais_path')
++if rocm_ais_path_opt == ''
++    rocm_path = run_command('bash', '-c', 'echo ${ROCM_PATH:-$ROCM_HOME}').stdout().strip()
++    if rocm_path == ''
++        rocm_path = '/opt/rocm'
++    endif
++    hipfile_search_dirs = [rocm_path, '/opt/rocs-ais', '/usr/local']
++    hipfile_lib_found = false
++    cc_local = meson.get_compiler('cpp')
++    foreach search_dir : hipfile_search_dirs
++        hipfile_lib_candidate = search_dir + '/lib'
++        hipfile_inc_candidate = search_dir + '/include'
++        if fs.exists(hipfile_lib_candidate) and fs.exists(hipfile_inc_candidate)
++            hipfile_lib_check = cc_local.find_library('hipfile',
++                dirs: [hipfile_lib_candidate], required: false)
++            if hipfile_lib_check.found()
++                ais_hipfile_inc = hipfile_inc_candidate
++                hipfile_dep = declare_dependency(
++                    link_args: ['-L' + hipfile_lib_candidate, '-lhipfile',
++                                '-Wl,-rpath,' + hipfile_lib_candidate],
++                    include_directories: include_directories(hipfile_inc_candidate))
++                hipfile_lib_found = true
++                message('Found hipFile at: ' + search_dir)
++                break
++            endif
++        endif
++    endforeach
++    if not hipfile_lib_found
++        hipfile_dep = declare_dependency()
++        subdir_done()
++    endif
++else
++    hipfile_lib_path = rocm_ais_path_opt + '/lib'
++    hipfile_inc_path = rocm_ais_path_opt + '/include'
++    ais_hipfile_inc = hipfile_inc_path
++    hipfile_dep = declare_dependency(
++        link_args: ['-L' + hipfile_lib_path, '-lhipfile',
++                    '-Wl,-rpath,' + hipfile_lib_path],
++        include_directories: include_directories(hipfile_inc_path))
++endif
++
++if not hip_dep.found()
++    subdir_done()
++endif
++
++# AIS_MT only needs hipFileRead/Write, which every hipFile has.  This backend
++# needs the stream API, which older ones do not export -- skip rather than fail
++# the whole build, the same way an absent hipFile does above.
++cc_ais = meson.get_compiler('cpp')
++if not cc_ais.has_header_symbol('hipfile.h', 'hipFileReadAsync',
++                                args: ['-I' + ais_hipfile_inc])
++    message('hipFile at ' + ais_hipfile_inc + ' has no async API - skipping the AIS plugin')
++    subdir_done()
++endif
++
++if 'AIS' in static_plugins
++    ais_backend_lib = static_library('AIS',
++        'ais_utils.cpp', 'ais_utils.h',
++        'ais_backend.cpp', 'ais_backend.h',
++        'ais_plugin.cpp',
++        dependencies: [nixl_infra, nixl_common_dep, hip_dep, hipfile_dep,
++                       file_utils_interface],
++        include_directories: [nixl_inc_dirs, utils_inc_dirs],
++        install: false,
++        cpp_args: compile_flags,
++        name_prefix: 'libplugin_')
++else
++    ais_backend_lib = shared_library('AIS',
++        'ais_utils.cpp', 'ais_utils.h',
++        'ais_backend.cpp', 'ais_backend.h',
++        'ais_plugin.cpp',
++        dependencies: [nixl_infra, nixl_common_dep, hip_dep, hipfile_dep,
++                       file_utils_interface],
++        include_directories: [nixl_inc_dirs, utils_inc_dirs],
++        install: true,
++        cpp_args: ['-fPIC'],
++        name_prefix: 'libplugin_',
++        install_dir: plugin_install_dir,
++        install_rpath: '$ORIGIN/..')
++    if get_option('buildtype') == 'debug'
++        run_command('sh', '-c',
++            'echo "AIS=' + ais_backend_lib.full_path() + '" >> ' + plugin_build_dir + '/pluginlist',
++            check: true
++        )
++    endif
++endif
++
++ais_backend_interface = declare_dependency(link_with: ais_backend_lib)

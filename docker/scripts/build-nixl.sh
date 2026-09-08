@@ -55,8 +55,24 @@ MESON_ARGS=(
 # patches/nixl/ may add ROCm-specific meson options (e.g. a hipFile-backed
 # storage backend).  Pass them only when the patched tree actually declares
 # them, so an unpatched pristine tag still configures.
+#
+# Prefer the source-built hipFile staged at HIPFILE_PREFIX by the hipfile stage
+# over the one the ROCm base image packages: the AIS plugin needs the AMD batch
+# backend, which the packaged copy predates.  The directory is always present
+# but is empty when HIPFILE_REF was unset, hence the test on the library rather
+# than on the directory.
+HIPFILE_PREFIX="${HIPFILE_PREFIX:-/opt/hipfile}"
 if grep -q "option('rocm_ais_path'" "${NIXL_SRC}/meson_options.txt"; then
-	MESON_ARGS+=("-Drocm_ais_path=${AIS_PATH:-${ROCM_PATH}}")
+	if [[ -z "${AIS_PATH:-}" ]]; then
+		if [[ -e "${HIPFILE_PREFIX}/lib/libhipfile.so" ]]; then
+			AIS_PATH="${HIPFILE_PREFIX}"
+		else
+			AIS_PATH="${ROCM_PATH}"
+		fi
+	fi
+	MESON_ARGS+=("-Drocm_ais_path=${AIS_PATH}")
+	export LD_LIBRARY_PATH="${AIS_PATH}/lib:${LD_LIBRARY_PATH}"
+	echo "[nixl] hipFile for the AIS backends: ${AIS_PATH}"
 fi
 
 # Likewise for a MORI backend plugin: the patch that adds src/plugins/mori also

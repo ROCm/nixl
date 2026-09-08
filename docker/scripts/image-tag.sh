@@ -53,4 +53,13 @@ for _v in version rocm nixl mori; do
 	}
 done
 
-printf '%s-rocm%s-nixl%s-mori%s\n' "${version}" "${rocm}" "${nixl}" "${mori}"
+# hipFile is deliberately not in the required list: an empty HIPFILE_REF is a
+# supported configuration meaning "use the libhipfile the ROCm base image
+# packages", and that case keeps the historical four-component tag.  When it is
+# pinned it is a 40-char SHA (hipFile has no usable tags), so only the first
+# seven go in the tag -- enough to keep two hipFile pins from colliding without
+# making the tag unreadable.
+hipfile="$(_arg HIPFILE_REF | sed -e 's#[^A-Za-z0-9._-]#-#g' | cut -c1-7)"
+
+printf '%s-rocm%s-nixl%s-mori%s%s\n' "${version}" "${rocm}" "${nixl}" "${mori}" \
+	"${hipfile:+-hipfile${hipfile}}"

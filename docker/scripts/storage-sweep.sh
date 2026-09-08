@@ -135,6 +135,8 @@ run_point() {
 #
 # SEGMENT TYPE IS NOT A FREE VARIABLE.  Each backend supports exactly one:
 #
+#   AIS     VRAM only, for the same reason as AIS_MT below -- both go through
+#           hipFileBufRegister.
 #   AIS_MT  VRAM only.  It registers the buffer with hipFileBufRegister, which
 #           rejects host memory: "hipFileBufRegister failed (err=5013); set
 #           HIPFILE_ALLOW_COMPAT_MODE=true to allow fallback".
@@ -145,9 +147,17 @@ run_point() {
 # DRAM", and the POSIX column is the optimistic one: a real KV-cache offload
 # whose data lives in VRAM would need a device-to-host copy that these POSIX
 # numbers do not include.  Comparisons below are written with that in mind.
+#
+# AIS vs AIS_MT is the one clean comparison in here: same library, same buffer
+# registration, same VRAM segment, differing only in how work is submitted --
+# hipFile's async stream API against a Taskflow pool driving synchronous
+# hipFileRead/Write.  --num_threads does not drive AIS's concurrency (streams
+# do, via --gds_batch_pool_size), but it is left tracking the AIS_MT rows so
+# both see the same buffer and file counts.
 
 case "${SWEEP_SET}" in
 	quick) # smoke test: does each path still work at all
+		run_point base AIS "" VRAM WRITE 1 1 1
 		run_point base AIS_MT "" VRAM WRITE 1 1 1
 		run_point base POSIX AIO DRAM WRITE 1 1 1
 		;;
@@ -156,6 +166,7 @@ case "${SWEEP_SET}" in
 		# default), and NVMe reads are typically ~2x writes, so the read
 		# direction -- the one a KV-cache load actually uses -- is unmeasured.
 		for op in WRITE READ; do
+			run_point "rw" AIS "" VRAM "${op}" 1 1 1
 			run_point "rw" AIS_MT "" VRAM "${op}" 1 1 1
 			run_point "rw" POSIX AIO DRAM "${op}" 1 1 1
 			run_point "rw" POSIX URING DRAM "${op}" 1 1 1
@@ -167,6 +178,7 @@ case "${SWEEP_SET}" in
 		# so anything above ~7 GB/s is impossible and the question is
 		# purely how few threads it takes to get there.
 		for thr in 1 2 4 8 16; do
+			run_point "threads" AIS "" VRAM WRITE "${thr}" 1 1
 			run_point "threads" AIS_MT "" VRAM WRITE "${thr}" 1 1
 			run_point "threads" POSIX AIO DRAM WRITE "${thr}" 1 1
 			run_point "threads" POSIX URING DRAM WRITE "${thr}" 1 1
@@ -183,6 +195,7 @@ case "${SWEEP_SET}" in
 		# the number of files (16)").  So threads tracks files upward.
 		for f in 1 2 4 8 16; do
 			thr=$((f > 8 ? f : 8))
+			run_point "drives" AIS "" VRAM WRITE "${thr}" "${f}" 1
 			run_point "drives" AIS_MT "" VRAM WRITE "${thr}" "${f}" 1
 			run_point "drives" POSIX AIO DRAM WRITE "${thr}" "${f}" 1
 			run_point "drives" POSIX URING DRAM WRITE "${thr}" "${f}" 1
@@ -199,6 +212,8 @@ case "${SWEEP_SET}" in
 		run_point "wide" POSIX AIO DRAM WRITE 32 16 1  # more threads than drives
 		run_point "wide" AIS_MT "" VRAM WRITE 16 8 1
 		run_point "wide" AIS_MT "" VRAM WRITE 32 16 1
+		run_point "wide" AIS "" VRAM WRITE 16 8 1
+		run_point "wide" AIS "" VRAM WRITE 32 16 1
 		;;
 
 	readscale) # READ is the direction a KV-cache load uses, and it is ~2x
@@ -208,6 +223,7 @@ case "${SWEEP_SET}" in
 		# files to already exist.
 		for f in 1 4 8 16; do
 			thr=$((f > 8 ? f : 8))
+			run_point "readscale" AIS "" VRAM READ "${thr}" "${f}" 1
 			run_point "readscale" AIS_MT "" VRAM READ "${thr}" "${f}" 1
 			run_point "readscale" POSIX AIO DRAM READ "${thr}" "${f}" 1
 		done
@@ -217,6 +233,7 @@ case "${SWEEP_SET}" in
 		# and reports numbers that are about DRAM, not about the drive;
 		# worth quantifying once so the size of the lie is on record.
 		for d in 1 0; do
+			run_point "direct" AIS "" VRAM WRITE 8 4 "${d}"
 			run_point "direct" AIS_MT "" VRAM WRITE 8 4 "${d}"
 			run_point "direct" POSIX AIO DRAM WRITE 8 4 "${d}"
 		done
@@ -225,6 +242,7 @@ case "${SWEEP_SET}" in
 	full)
 		for op in WRITE READ; do
 			for f in 1 4 16; do
+				run_point "full" AIS "" VRAM "${op}" 8 "${f}" 1
 				run_point "full" AIS_MT "" VRAM "${op}" 8 "${f}" 1
 				run_point "full" POSIX AIO DRAM "${op}" 8 "${f}" 1
 			done

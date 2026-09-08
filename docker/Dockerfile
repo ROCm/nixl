@@ -105,6 +105,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libgflags-dev \
         libibverbs-dev \
         libltdl-dev \
+        libmount-dev \
         libnuma-dev \
         libopenmpi3t64 \
         libpci-dev \
@@ -117,6 +118,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         python3-pip \
         rdma-core \
     && update-ca-certificates
+# libmount-dev is hipFile's one non-ROCm build dep (src/amd_detail/mountinfo.cpp
+# resolves which filesystem a target file lives on, since the fast path only
+# accepts xfs/ext4 with ordered journaling).
 # libopenmpi3t64 is the openmpi RUNTIME lib only (not openmpi-bin/-dev): ROCm
 # torch wheels have a hard NEEDED on libmpi_cxx.so.40 via torch._load_global_deps(),
 # so `import torch` fails without it.  libgflags-dev/libasio-dev are nixlbench's
@@ -177,6 +181,41 @@ RUN --mount=type=cache,target=/root/.cache,sharing=locked \
     UCX_SRC=/tmp/ucx-src UCX_FAST="${UCX_FAST}" UCX_DEBUG_LOG="${UCX_DEBUG_LOG}" \
     bash /tmp/scripts/build-ucx.sh && \
     rm -rf /tmp/ucx-src
+
+# ----- 1b. hipFile (source-built, overlays the ROCm-packaged copy) -----------
+# FROM base, not FROM ucx: hipFile depends on neither, so this runs concurrently
+# with the UCX and MORI stages.
+#
+# HIPFILE_REF empty means "use whatever libhipfile the ROCm base image packages"
+# -- the escape hatch if a develop commit regresses.  The stage still runs and
+# still produces /opt/hipfile, just empty, so the COPY lines below do not have
+# to be conditional.  See build-hipfile.sh for why a SHA on develop is the only
+# way to track hipFile's live stream.
+FROM base AS hipfile
+
+ARG HIPFILE_GIT_URL=https://github.com/ROCm/hipFile.git
+ARG HIPFILE_REF=bd0bc2330a1573223209b9899055d1d6188b9113
+
+ENV HIPFILE_PREFIX=/opt/hipfile
+
+COPY docker/scripts/clone-src.sh docker/scripts/build-hipfile.sh /tmp/scripts/
+
+RUN mkdir -p /opt/hipfile && \
+    if [ -z "${HIPFILE_REF}" ]; then \
+        echo "HIPFILE_REF empty -- using the ROCm-packaged hipFile"; \
+    else \
+        SRC_NAME=hipfile \
+        SRC_GIT_URL="${HIPFILE_GIT_URL}" \
+        SRC_REF="${HIPFILE_REF}" \
+        SRC_DEST=/tmp/hipfile-src \
+        bash /tmp/scripts/clone-src.sh; \
+    fi
+
+RUN --mount=type=cache,target=/root/.cache,sharing=locked \
+    if [ -n "${HIPFILE_REF}" ]; then \
+        HIPFILE_SRC=/tmp/hipfile-src HIPFILE_REF="${HIPFILE_REF}" \
+        bash /tmp/scripts/build-hipfile.sh && rm -rf /tmp/hipfile-src; \
+    fi
 
 # ----- 2. MORI (ROCm/mori tag + patches/mori/) -------------------------------
 # FROM base, not FROM ucx: MORI needs neither UCX nor NIXL, so this stage runs
@@ -250,6 +289,11 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 # the patched tree actually declares that option.
 COPY --from=mori /opt/mori /opt/mori
 
+# The source-built hipFile the AIS and AIS_MT plugins link against.  Empty when
+# HIPFILE_REF is unset, in which case build-nixl.sh falls back to $ROCM_PATH and
+# both plugins link the packaged libhipfile instead.
+COPY --from=hipfile /opt/hipfile /opt/hipfile
+
 COPY docker/scripts/clone-src.sh docker/scripts/build-nixl.sh \
      docker/scripts/build-nixlbench.sh /tmp/scripts/
 
@@ -303,6 +347,7 @@ ARG ROCM_VERSION
 ARG NIXL_REF
 ARG MORI_REF
 ARG UCX_REF
+ARG HIPFILE_REF
 ARG VERSION=
 # NIXL's Python API (nixl._api) does `import torch` at module scope, and MORI's
 # Python-side benchmarks want it too, so a ROCm torch is installed by default.
@@ -322,9 +367,11 @@ LABEL org.opencontainers.image.title="nixl-mori-test" \
       com.amd.rocm.version="${ROCM_VERSION}" \
       com.amd.nixl.ref="${NIXL_REF}" \
       com.amd.mori.ref="${MORI_REF}" \
-      com.amd.ucx.ref="${UCX_REF}"
+      com.amd.ucx.ref="${UCX_REF}" \
+      com.amd.hipfile.ref="${HIPFILE_REF}"
 
-COPY --from=ucx  /opt/rocnixl-ucx /opt/rocnixl-ucx
+COPY --from=ucx     /opt/rocnixl-ucx /opt/rocnixl-ucx
+COPY --from=hipfile /opt/hipfile     /opt/hipfile
 COPY --from=mori /opt/mori        /opt/mori
 COPY --from=nixl /opt/nixl        /opt/nixl
 COPY --from=nixl /opt/nixlbench   /opt/nixlbench
@@ -359,7 +406,15 @@ ENV NIXL_PREFIX=/opt/nixl \
 # process loads only one of them -- the C++ path (nixlbench + a NIXL MORI
 # plugin) uses /opt/mori, the Python path uses the wheel's copy.  Mixing them in
 # a single process would load MORI twice.
+#
+# /opt/hipfile/lib goes first, and this file sorts before rocm.conf, so the
+# source-built libhipfile wins over the one /opt/rocm packages.  The AIS plugins
+# also carry an rpath to it from meson's rocm_ais_path, so this is belt and
+# braces -- but anything else in the image that dlopens libhipfile should get
+# the same copy the plugins were linked against.  The directory is absent when
+# HIPFILE_REF was unset; ldconfig skips missing entries.
 RUN printf '%s\n' \
+        /opt/hipfile/lib \
         /opt/nixl/lib/x86_64-linux-gnu \
         /opt/nixl/lib \
         /opt/mori/lib \
@@ -382,13 +437,23 @@ RUN set -eu; \
     python3 -c "import mori; print('mori OK', mori.__version__)"; \
     nixlbench --help 2>&1 | grep -q -- "-backend" && echo "nixlbench OK"; \
     hsa-snoop --help 2>&1 | grep -q -- "--prometheus" && echo "hsa-snoop OK"; \
-    for p in UCX MORI_IO AIS_MT POSIX; do \
+    for p in UCX MORI_IO AIS AIS_MT POSIX; do \
         test -e "${NIXL_PLUGIN_DIR}/libplugin_$p.so" || \
             { echo "ERROR: missing NIXL plugin: $p" >&2; exit 1; }; \
         ldd "${NIXL_PLUGIN_DIR}/libplugin_$p.so" | grep "not found" && \
             { echo "ERROR: libplugin_$p.so has unresolved libs" >&2; exit 1; }; \
         echo "nixl plugin OK: $p"; \
     done; \
+    if [ -e /opt/hipfile/lib/libhipfile.so ]; then \
+        for p in AIS AIS_MT; do \
+            ldd "${NIXL_PLUGIN_DIR}/libplugin_$p.so" | grep -q "libhipfile.*=> */opt/hipfile/lib/" || \
+                { echo "ERROR: libplugin_$p.so resolves libhipfile outside /opt/hipfile:" >&2; \
+                  ldd "${NIXL_PLUGIN_DIR}/libplugin_$p.so" | grep libhipfile >&2; exit 1; }; \
+        done; \
+        echo "hipFile OK: AIS/AIS_MT link the source-built /opt/hipfile"; \
+    else \
+        echo "HIPFILE_REF unset -- AIS/AIS_MT link the ROCm-packaged libhipfile"; \
+    fi; \
     if [ "${INSTALL_TORCH}" = "1" ]; then \
         python3 -c "import nixl; print('nixl._api OK', nixl.__file__)"; \
     else \
