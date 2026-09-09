@@ -119,7 +119,13 @@ DOCKER_BUILD := DOCKER_BUILDKIT=1 docker build --progress=$(PROGRESS) -f $(DOCKE
 # GPUDirect registration of a multi-GiB buffer fails with a bare
 # "failed to register address ... Input/output error" from UCX and the run
 # quietly falls back to a slow transport.
-_GROUP_ADDS := $(shell for g in video render; do getent group $$g >/dev/null && echo --group-add $$g; done)
+# Numeric GIDs, not names: docker resolves a --group-add name against the
+# *container's* /etc/group, and the two do not have to agree.  On
+# ctr-smc-mi300x-cx68-25 the host's render group is 109 while the image's is
+# 994, so --group-add render granted a group that owns nothing, /dev/kfd stayed
+# unopenable, and every ROCm tool reported "no ROCm-capable device is detected"
+# on a node with eight MI300X in it.
+_GROUP_ADDS := $(shell for g in video render; do getent group $$g | cut -d: -f3 | sed 's/^/--group-add /'; done)
 DOCKER_RUN_FLAGS ?= \
 	--rm \
 	--device=/dev/kfd \

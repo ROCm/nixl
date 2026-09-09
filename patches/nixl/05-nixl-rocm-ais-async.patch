@@ -1,5 +1,5 @@
-# Add an AIS NIXL backend: hipFile's asynchronous stream API, alongside the
-# existing thread-pool AIS_MT.
+# Add an AIS NIXL backend: hipFile's batch and asynchronous-stream submission
+# APIs, alongside the existing thread-pool AIS_MT.
 #
 # This mirrors upstream's pairing on the NVIDIA side -- GDS (submission-based)
 # next to GDS_MT (thread pool) -- so the plugin, its files and its classes carry
@@ -7,46 +7,76 @@
 # rocm_ais_path / disable_rocm_ais_backend meson options rather than adding new
 # ones.  AIS_MT is untouched: it is the baseline this is measured against.
 #
-# What it is NOT is a port of cuda_gds's batch path, which was the obvious
-# structural choice.  hipFile's batch API is a stub as of develop bd0bc233:
-# BatchContext::submit_operations only validates the params and parks them in an
-# outstanding_ops set -- no I/O is ever issued -- and hipFileBatchIOGetStatus,
-# hipFileBatchIOCancel and hipFileBatchIODestroy all throw
-# std::runtime_error("Not Implemented").  A batch port would submit cleanly,
-# move zero bytes, and then fail in checkXfer.  The async path is real:
-# hipFileReadAsync/WriteAsync reach Backend::async_io, implemented by both the
-# fastpath and fallback backends with an AsyncMonitor completion thread.
+# One plugin, two submission paths, selected at runtime with the backend
+# parameter ais_mode=batch|stream (default batch).  They are not close.  Measured
+# with fio's libhipfile engine over seven NVMe on one MI300X node, 8 jobs x
+# iodepth 16 x 1 MiB, same library and same process (GB/s):
 #
-# So the engine is structured around HIP streams instead of batch handles:
+#     mode      write    read
+#     sync       28.3    19.1     <- what AIS_MT drives
+#     stream      4.9     2.1
+#     batch      29.2    47.2
+#
+# The stream ceiling is structural, not a tuning problem.  hipFile's
+# Fastpath::async_io puts the whole transfer inside a hipLaunchHostFunc callback
+# so that it can honour the stream-ordering promise, and HIP services host
+# functions from exactly one thread per process across all streams -- so every
+# asynchronous op in the process, on every stream and every device, is executed
+# by that single thread.  Adding streams cannot help.  A batch submission
+# promises no ordering between its operations, so it needs no host function and
+# is dispatched to a real worker pool instead.
+#
+# The stream path is nevertheless kept rather than deleted: it is the only way to
+# reproduce that ceiling from inside NIXL, next to the batch path, on the same
+# descriptors.
+#
+# Batch mode (the default) is the structural port of cuda_gds:
+#
+#   - aisIOBatch wraps one hipFileBatchIO* context plus its params/events arrays,
+#     the way nixlGdsIOBatch wraps a CUfileBatchHandle_t.  batch_pool_size and
+#     batch_limit keep cuda_gds's parameter names so one nixlbench sweep row
+#     (--gds_batch_pool_size / --gds_batch_limit) configures either backend.
+#   - the pool is a single free list, not keyed by device: a batch handle has no
+#     device affinity because hipFile resolves each operation's GPU from its
+#     buffer.  It is primed at construction for that reason.
+#   - checkStatus passes min_nr=0.  cuda_gds passes its full batch size against a
+#     NULL timeout, which makes checkStatus block; NIXL polls checkXfer and
+#     expects it to return promptly.
+#   - hipFileIOEvents_t::ret is declared size_t but carries a negative POSIX
+#     errno, so it is read as ssize_t before being compared.
+#   - a short transfer is an error here, which the cuFile original does not check
+#     -- nixlGdsIOBatch::checkStatus counts returned events and ignores their
+#     status field entirely.
+#
+# This depends on patches/hipfile: stock hipFile declares the whole
+# hipFileBatchIO* family and then throws "Not Implemented" from the AMD backend,
+# so ais_mode=batch against an unpatched library fails at the first
+# hipFileBatchIOGetStatus.  docker/scripts/build-hipfile.sh is what asserts the
+# patch reached the library that gets linked here.
+#
+# Stream mode keeps its original shape:
 #
 #   - a stream is the unit of submission.  Ops on one stream complete in order;
-#     ops on different streams overlap.  batch_limit therefore means "requests
-#     chained onto one stream" and batch_pool_size means "streams held per
-#     device" -- the parameter keys keep cuda_gds's names so that one nixlbench
-#     sweep row (--gds_batch_pool_size / --gds_batch_limit) configures either
-#     backend.
-#   - the pool is keyed by device, not a single free list, because
-#     Fastpath::async_io rejects a buffer whose GPU id differs from the
-#     stream's.  Streams are created on first use: no device is known at
-#     construction time.
-#   - exhausting the pool chains extra requests onto streams already taken
-#     rather than failing the transfer, which is what cuda_gds does on
-#     "batch pool exhausted".
+#     ops on different streams overlap, so batch_limit means "requests chained
+#     onto one stream" and batch_pool_size means "streams held per device".
+#   - the pool is keyed by device, because Fastpath::async_io rejects a buffer
+#     whose GPU id differs from the stream's.  Streams are created on first use:
+#     no device is known at construction time.
+#   - exhausting the pool chains extra requests onto streams already taken rather
+#     than failing the transfer, which is what cuda_gds does on "batch pool
+#     exhausted".
 #   - hipFileReadAsync takes the size and both offsets by pointer and reads them
 #     when the op reaches the head of the stream, not at submission, so those
 #     fields live in the request handle and releaseReqH synchronises before
 #     letting it die.
 #   - completion status is the per-request byte count and nothing else: hipFile
 #     reports a POSIX errno as a negative count and clamps one op to
-#     getMaxRwCount(), neither of which surfaces through the stream.  checkXfer
-#     treats a short transfer as an error, which the cuFile original does not --
-#     nixlGdsIOBatch::checkStatus counts returned events and ignores their
-#     status field entirely.
+#     getMaxRwCount(), neither of which surfaces through the stream.
 #
-# The meson gate tests for hipFileReadAsync with has_header_symbol and calls
-# subdir_done() when it is absent, so an older hipFile drops the plugin instead
-# of breaking the build -- the same shape as the existing hipFile-not-found
-# path that AIS_MT already uses.
+# The meson gate tests for hipFileReadAsync and hipFileBatchIOSubmit with
+# has_header_symbol and calls subdir_done() when either is absent, so an older
+# hipFile drops the plugin instead of breaking the build -- the same shape as the
+# existing hipFile-not-found path that AIS_MT already uses.
 
 diff --git a/meson.build b/meson.build
 index 479a8c3..a4d2873 100644
@@ -86,16 +116,17 @@ index ba70651..5ed4835 100644
          if disable_rocm_ais_backend
 diff --git a/src/plugins/rocm_ais/ais_backend.cpp b/src/plugins/rocm_ais/ais_backend.cpp
 new file mode 100644
-index 0000000..5660cf1
+index 0000000..5bb59a5
 --- /dev/null
 +++ b/src/plugins/rocm_ais/ais_backend.cpp
-@@ -0,0 +1,420 @@
+@@ -0,0 +1,614 @@
 +/* Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 + *
 + * SPDX-License-Identifier: Apache-2.0
 + *
 + */
 +#include <cassert>
++#include <cstdlib>
 +#include <cstring>
 +#include <algorithm>
 +#include <memory>
@@ -111,12 +142,16 @@ index 0000000..5660cf1
 +#include "file/file_utils.h"
 +
 +namespace {
-+/** Streams held per device.  Ops on one stream serialise, so this is the
-+ *  backend's concurrency width. */
-+constexpr unsigned DEFAULT_STREAM_POOL_SIZE = 16;
-+/** Requests chained onto one stream before moving to the next. */
-+constexpr unsigned DEFAULT_OPS_PER_STREAM = 128;
-+/** Split anything larger, so one huge descriptor still spreads over streams. */
++/** Submission handles held: batch contexts in batch mode, streams per device in
++ *  stream mode.  Ops on one stream serialise, so in stream mode this is the
++ *  backend's concurrency width; in batch mode the width is hipFile's worker
++ *  pool (HIPFILE_BATCH_THREADS) and this only bounds how many transfers can be
++ *  in flight at once. */
++constexpr unsigned DEFAULT_POOL_SIZE = 16;
++/** Requests per submission handle: the capacity of a batch context, or the
++ *  number chained onto one stream before moving to the next. */
++constexpr unsigned DEFAULT_OPS_PER_HANDLE = 128;
++/** Split anything larger, so one huge descriptor still spreads over handles. */
 +constexpr unsigned DEFAULT_MAX_REQUEST_SIZE = 16 * 1024 * 1024;
 +} // namespace
 +
@@ -129,12 +164,31 @@ index 0000000..5660cf1
 +        // nixlbench drives both backends through --gds_batch_pool_size /
 +        // --gds_batch_limit, and keeping the keys identical is what lets an AIS
 +        // run and a GDS run be configured from the same sweep row.
-+        stream_pool_size = nixl::getBackendParamDefaulted(
-+            custom_params, "batch_pool_size", DEFAULT_STREAM_POOL_SIZE);
-+        ops_per_stream =
-+            nixl::getBackendParamDefaulted(custom_params, "batch_limit", DEFAULT_OPS_PER_STREAM);
++        pool_size = nixl::getBackendParamDefaulted(
++            custom_params, "batch_pool_size", DEFAULT_POOL_SIZE);
++        ops_per_handle =
++            nixl::getBackendParamDefaulted(custom_params, "batch_limit", DEFAULT_OPS_PER_HANDLE);
 +        max_request_size = nixl::getBackendParamDefaulted(
 +            custom_params, "max_request_size", DEFAULT_MAX_REQUEST_SIZE);
++
++        // AIS_MODE is the fallback rather than the only knob because nixlbench
++        // has no flag for a backend-specific parameter and the stream path is
++        // otherwise unreachable from a sweep -- which would make keeping it
++        // pointless, since reproducing the host-function ceiling next to batch
++        // is the only reason it is still here.
++        const char *mode_env = std::getenv("AIS_MODE");
++        const std::string mode = nixl::getBackendParamDefaulted(
++            custom_params, "ais_mode",
++            std::string((mode_env && mode_env[0]) ? mode_env : "batch"));
++        if (mode == "batch") {
++            submit_mode = aisSubmitMode::Batch;
++        } else if (mode == "stream") {
++            submit_mode = aisSubmitMode::Stream;
++        } else {
++            NIXL_ERROR << "AIS: ais_mode must be 'batch' or 'stream', got '" << mode << "'";
++            this->initErr = true;
++            return;
++        }
 +    }
 +    catch (const std::exception &e) {
 +        NIXL_ERROR << e.what();
@@ -142,7 +196,7 @@ index 0000000..5660cf1
 +        return;
 +    }
 +
-+    if (stream_pool_size == 0 || ops_per_stream == 0 || max_request_size == 0) {
++    if (pool_size == 0 || ops_per_handle == 0 || max_request_size == 0) {
 +        NIXL_ERROR << "AIS: batch_pool_size, batch_limit and max_request_size must be non-zero";
 +        this->initErr = true;
 +        return;
@@ -154,8 +208,23 @@ index 0000000..5660cf1
 +        return;
 +    }
 +
-+    // Unlike cuda_gds there is no pool to prime here: a stream is bound to a
-+    // device, and no device is known until the first registerMem/prepXfer.
++    if (submit_mode == aisSubmitMode::Batch) {
++        // Primed up front, the way cuda_gds does: a batch handle has no device
++        // affinity, so unlike a stream it can be created before any transfer is
++        // seen, and hipFileBatchIOSetUp on the critical path would otherwise be
++        // charged to the first postXfer.
++        const std::lock_guard<std::mutex> lock(batch_pool_lock);
++        for (unsigned int i = 0; i < pool_size; i++) {
++            auto batch = std::make_unique<aisIOBatch>(ops_per_handle);
++            if (!batch->ok()) {
++                this->initErr = true;
++                return;
++            }
++            batch_pool.push_back(batch.release());
++        }
++    }
++    // Nothing to prime in stream mode: a stream is bound to a device, and no
++    // device is known until the first registerMem/prepXfer.
 +}
 +
 +nixlAisEngine::~nixlAisEngine() {
@@ -163,6 +232,13 @@ index 0000000..5660cf1
 +        const std::lock_guard<std::mutex> lock(stream_pool_lock);
 +        stream_pool.clear();
 +        stream_store.clear();
++    }
++    {
++        const std::lock_guard<std::mutex> lock(batch_pool_lock);
++        for (aisIOBatch *b : batch_pool) {
++            delete b;
++        }
++        batch_pool.clear();
 +    }
 +    if (ais_utils) {
 +        ais_utils->closeAisDriver();
@@ -267,7 +343,7 @@ index 0000000..5660cf1
 +    }
 +
 +    auto &owned = stream_store[dev_id];
-+    if (owned.size() >= stream_pool_size) {
++    if (owned.size() >= pool_size) {
 +        return nullptr;
 +    }
 +
@@ -288,6 +364,48 @@ index 0000000..5660cf1
 +        stream_pool[s->deviceId()].push_back(s);
 +    }
 +    streams.clear();
++}
++
++aisIOBatch *
++nixlAisEngine::getBatchFromPool(unsigned int size) const {
++    {
++        const std::lock_guard<std::mutex> lock(batch_pool_lock);
++        for (auto it = batch_pool.begin(); it != batch_pool.end(); ++it) {
++            if ((*it)->capacity() >= size) {
++                aisIOBatch *batch = *it;
++                batch_pool.erase(it);
++                batch->reset();
++                return batch;
++            }
++        }
++    }
++
++    // Nothing in the pool is big enough (or the pool is empty).  Allocating
++    // outside the lock keeps hipFileBatchIOSetUp off it; the extra handle is
++    // returned to the pool on completion like any other.
++    auto batch = std::make_unique<aisIOBatch>(size);
++    if (!batch->ok()) {
++        return nullptr;
++    }
++    return batch.release();
++}
++
++void
++nixlAisEngine::returnBatchToPool(aisIOBatch *batch) const {
++    if (!batch) {
++        return;
++    }
++    batch->reset();
++
++    const std::lock_guard<std::mutex> lock(batch_pool_lock);
++    if (batch_pool.size() >= pool_size) {
++        // Pool full: this is one of the oversized handles getBatchFromPool
++        // allocated on demand, so drop it rather than letting the pool grow
++        // without bound across transfers.
++        delete batch;
++        return;
++    }
++    batch_pool.push_back(batch);
 +}
 +
 +nixl_status_t
@@ -389,14 +507,7 @@ index 0000000..5660cf1
 +}
 +
 +nixl_status_t
-+nixlAisEngine::postXfer(const nixl_xfer_op_t &operation,
-+                        const nixl_meta_dlist_t &local,
-+                        const nixl_meta_dlist_t &remote,
-+                        const std::string &remote_agent,
-+                        nixlBackendReqH *&handle,
-+                        const nixl_opt_b_args_t *opt_args) const {
-+    auto *ais_handle = (nixlAisBackendReqH *)handle;
-+
++nixlAisEngine::postXferStream(nixlAisBackendReqH *ais_handle) const {
 +    if (ais_handle->request_list.empty()) {
 +        NIXL_ERROR << "AIS: empty request list";
 +        return NIXL_ERR_INVALID_PARAM;
@@ -406,7 +517,7 @@ index 0000000..5660cf1
 +        return NIXL_ERR_INVALID_PARAM;
 +    }
 +
-+    // Acquire one stream per ops_per_stream requests, per device.  A device
++    // Acquire one stream per ops_per_handle requests, per device.  A device
 +    // whose pool is exhausted keeps reusing the streams already taken -- extra
 +    // requests just chain onto them, which costs concurrency but never fails a
 +    // transfer the way cuda_gds's "batch pool exhausted" path does.
@@ -417,7 +528,7 @@ index 0000000..5660cf1
 +        auto &streams = per_dev[req.dev_id];
 +        const size_t n = issued[req.dev_id]++;
 +
-+        if (streams.empty() || (n % ops_per_stream == 0)) {
++        if (streams.empty() || (n % ops_per_handle == 0)) {
 +            if (aisStream *s = getStreamFromPool(req.dev_id)) {
 +                streams.push_back(s);
 +                ais_handle->streams.push_back(s);
@@ -428,7 +539,7 @@ index 0000000..5660cf1
 +            }
 +        }
 +
-+        aisStream *s = streams[(n / ops_per_stream) % streams.size()];
++        aisStream *s = streams[(n / ops_per_handle) % streams.size()];
 +        if (const nixl_status_t st = submitRequest(req, s->get()); st != NIXL_SUCCESS) {
 +            for (aisStream *used : ais_handle->streams) {
 +                (void)hipStreamSynchronize(used->get());
@@ -442,9 +553,7 @@ index 0000000..5660cf1
 +}
 +
 +nixl_status_t
-+nixlAisEngine::checkXfer(nixlBackendReqH *handle) const {
-+    auto *ais_handle = (nixlAisBackendReqH *)handle;
-+
++nixlAisEngine::checkXferStream(nixlAisBackendReqH *ais_handle) const {
 +    if (ais_handle->streams.empty()) {
 +        ais_handle->needs_prep = true;
 +        return NIXL_SUCCESS;
@@ -497,7 +606,122 @@ index 0000000..5660cf1
 +        (void)hipStreamSynchronize(s->get());
 +    }
 +    returnStreamsToPool(ais_handle->streams);
++
++    // Batch contexts are not returned to the pool here: a release can arrive
++    // with operations still outstanding, and ~aisIOBatch is the only path that
++    // cancels and then blocks until the worker pool has let go of the parameter
++    // array.  The handle's destructor deletes whatever is still on the list.
 +    return NIXL_SUCCESS;
++}
++
++nixl_status_t
++nixlAisEngine::postXferBatch(nixlAisBackendReqH *ais_handle) const {
++    if (ais_handle->request_list.empty()) {
++        NIXL_ERROR << "AIS: empty request list";
++        return NIXL_ERR_INVALID_PARAM;
++    }
++    if (!ais_handle->batch_io_list.empty()) {
++        NIXL_ERROR << "AIS: handle already has in-flight work";
++        return NIXL_ERR_INVALID_PARAM;
++    }
++
++    const size_t total = ais_handle->request_list.size();
++    size_t issued = 0;
++
++    while (issued < total) {
++        const unsigned int n =
++            (unsigned int)std::min<size_t>(total - issued, ops_per_handle);
++
++        aisIOBatch *batch = getBatchFromPool(n);
++        if (!batch) {
++            NIXL_ERROR << "AIS: could not obtain a batch context for " << n << " operation(s)";
++            // The batches already submitted are still running against
++            // request_list, so they are left on the handle for checkXfer to
++            // drain rather than being torn down under the worker pool.
++            return NIXL_ERR_BACKEND;
++        }
++
++        for (unsigned int i = 0; i < n; i++) {
++            AisTransferRequestH &req = ais_handle->request_list[issued + i];
++            // buf_offset stays 0: prepXfer has already folded the split offset
++            // into addr, so the base pointer is the operation's own base.
++            if (const nixl_status_t st = batch->addToBatch(req.fh, req.addr, req.size,
++                                                           req.file_offset, req.buf_offset,
++                                                           req.op);
++                st != NIXL_SUCCESS) {
++                returnBatchToPool(batch);
++                return st;
++            }
++        }
++
++        if (const nixl_status_t st = batch->submitBatch(0); st != NIXL_SUCCESS) {
++            returnBatchToPool(batch);
++            return st;
++        }
++
++        ais_handle->batch_io_list.push_back(batch);
++        issued += n;
++    }
++
++    return NIXL_IN_PROG;
++}
++
++nixl_status_t
++nixlAisEngine::checkXferBatch(nixlAisBackendReqH *ais_handle) const {
++    if (ais_handle->batch_io_list.empty()) {
++        ais_handle->needs_prep = true;
++        return NIXL_SUCCESS;
++    }
++
++    nixl_status_t status = NIXL_SUCCESS;
++    bool in_prog = false;
++
++    // Every batch is polled on every call, not just the first unfinished one:
++    // they run concurrently in hipFile's worker pool, and GetStatus is what
++    // retires their events, so skipping the tail would stall completions that
++    // have already happened.
++    for (aisIOBatch *batch : ais_handle->batch_io_list) {
++        const nixl_status_t st = batch->checkStatus();
++        if (st == NIXL_IN_PROG) {
++            in_prog = true;
++        } else if (st != NIXL_SUCCESS) {
++            status = st;
++        }
++    }
++
++    if (in_prog) {
++        return NIXL_IN_PROG;
++    }
++
++    // Only now, with nothing outstanding, is it safe to hand the contexts back:
++    // reset() rewinds the parameter array that hipFile has been reading from.
++    for (aisIOBatch *batch : ais_handle->batch_io_list) {
++        returnBatchToPool(batch);
++    }
++    ais_handle->batch_io_list.clear();
++    ais_handle->needs_prep = true;
++    return status;
++}
++
++nixl_status_t
++nixlAisEngine::postXfer(const nixl_xfer_op_t &operation,
++                        const nixl_meta_dlist_t &local,
++                        const nixl_meta_dlist_t &remote,
++                        const std::string &remote_agent,
++                        nixlBackendReqH *&handle,
++                        const nixl_opt_b_args_t *opt_args) const {
++    auto *ais_handle = (nixlAisBackendReqH *)handle;
++
++    return (submit_mode == aisSubmitMode::Batch) ? postXferBatch(ais_handle) :
++                                                   postXferStream(ais_handle);
++}
++
++nixl_status_t
++nixlAisEngine::checkXfer(nixlBackendReqH *handle) const {
++    auto *ais_handle = (nixlAisBackendReqH *)handle;
++
++    return (submit_mode == aisSubmitMode::Batch) ? checkXferBatch(ais_handle) :
++                                                   checkXferStream(ais_handle);
 +}
 +
 +nixl_status_t
@@ -512,10 +736,10 @@ index 0000000..5660cf1
 +}
 diff --git a/src/plugins/rocm_ais/ais_backend.h b/src/plugins/rocm_ais/ais_backend.h
 new file mode 100644
-index 0000000..5dc0fde
+index 0000000..360bb07
 --- /dev/null
 +++ b/src/plugins/rocm_ais/ais_backend.h
-@@ -0,0 +1,145 @@
+@@ -0,0 +1,177 @@
 +/* Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 + *
 + * SPDX-License-Identifier: Apache-2.0
@@ -582,8 +806,28 @@ index 0000000..5dc0fde
 +class nixlAisBackendReqH : public nixlBackendReqH {
 +public:
 +    std::vector<AisTransferRequestH> request_list;
++    // Exactly one of these is populated, according to the engine's submit mode.
 +    std::vector<aisStream *> streams;
++    std::vector<aisIOBatch *> batch_io_list;
 +    bool needs_prep = true;
++
++    ~nixlAisBackendReqH() {
++        for (aisIOBatch *b : batch_io_list) {
++            delete b;
++        }
++        batch_io_list.clear();
++    }
++};
++
++// How the engine hands work to hipFile.  These are the same two submission
++// APIs fio's libhipfile engine selects between with hipfile_mode, and they are
++// not close: measured with fio over seven NVMe on one MI300X node, batch does
++// 29.2 GB/s writing and 47.2 reading where stream does 4.9 and 2.1.  The stream
++// path is kept because it is the only way to reproduce that ceiling from inside
++// NIXL, not because it is ever the right choice for throughput.
++enum class aisSubmitMode {
++    Batch,
++    Stream,
 +};
 +
 +class nixlAisEngine : public nixlBackendEngine {
@@ -599,14 +843,26 @@ index 0000000..5dc0fde
 +    mutable std::unordered_map<int, std::vector<std::unique_ptr<aisStream>>> stream_store;
 +    mutable std::unordered_map<int, std::list<aisStream *>> stream_pool;
 +
-+    unsigned int stream_pool_size;
-+    unsigned int ops_per_stream;
++    // Batch handles carry no device affinity -- hipFile resolves the buffer's
++    // GPU per operation -- so unlike the stream pool this is one free list.
++    mutable std::mutex batch_pool_lock;
++    mutable std::list<aisIOBatch *> batch_pool;
++
++    aisSubmitMode submit_mode = aisSubmitMode::Batch;
++    unsigned int pool_size;
++    unsigned int ops_per_handle;
 +    unsigned int max_request_size;
 +
 +    aisStream *getStreamFromPool(int dev_id) const;
 +    void returnStreamsToPool(std::vector<aisStream *> &streams) const;
++    aisIOBatch *getBatchFromPool(unsigned int size) const;
++    void returnBatchToPool(aisIOBatch *batch) const;
 +    nixl_status_t resolveFileHandle(const nixlMetaDesc &d, aisFileHandle &fh) const;
 +    nixl_status_t submitRequest(AisTransferRequestH &req, hipStream_t stream) const;
++    nixl_status_t postXferStream(nixlAisBackendReqH *handle) const;
++    nixl_status_t postXferBatch(nixlAisBackendReqH *handle) const;
++    nixl_status_t checkXferStream(nixlAisBackendReqH *handle) const;
++    nixl_status_t checkXferBatch(nixlAisBackendReqH *handle) const;
 +
 +public:
 +    nixlAisEngine(const nixlBackendInitParams *init_params);
@@ -696,10 +952,10 @@ index 0000000..7c860ff
 +#endif
 diff --git a/src/plugins/rocm_ais/ais_utils.cpp b/src/plugins/rocm_ais/ais_utils.cpp
 new file mode 100644
-index 0000000..66e6283
+index 0000000..04f3335
 --- /dev/null
 +++ b/src/plugins/rocm_ais/ais_utils.cpp
-@@ -0,0 +1,136 @@
+@@ -0,0 +1,275 @@
 +/* Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 + *
 + * SPDX-License-Identifier: Apache-2.0
@@ -798,6 +1054,145 @@ index 0000000..66e6283
 +    return NIXL_SUCCESS;
 +}
 +
++aisIOBatch::aisIOBatch(unsigned int size)
++    : io_batch_events(size), io_batch_params(size), max_reqs(size) {
++    const hipFileError_t err = hipFileBatchIOSetUp(&batch_handle, size);
++    if (err.err != hipFileSuccess) {
++        NIXL_ERROR << "AIS: hipFileBatchIOSetUp failed: err=" << err.err;
++        return;
++    }
++    init_ok = true;
++}
++
++aisIOBatch::~aisIOBatch() {
++    if (!init_ok) {
++        return;
++    }
++    // Unlike cuFile, hipFileBatchIODestroy blocks until the worker pool has
++    // released every operation this context owns, so tearing down a batch that
++    // is still in flight is safe rather than a use-after-free.  Cancel first so
++    // the wait is bounded by what has already started, not by the whole queue.
++    if (current_status == NIXL_IN_PROG) {
++        NIXL_WARN << "AIS: destroying a batch with " << (batch_size - entries_completed)
++                  << " operation(s) still outstanding";
++        (void)hipFileBatchIOCancel(batch_handle);
++    }
++    hipFileBatchIODestroy(batch_handle);
++}
++
++nixl_status_t
++aisIOBatch::addToBatch(hipFileHandle_t fh, void *buffer, size_t size, hoff_t file_offset,
++                       hoff_t ptr_offset, hipFileOpcode_t type) {
++    if (batch_size >= max_reqs) {
++        return NIXL_ERR_BACKEND;
++    }
++
++    hipFileIOParams_t *params = &io_batch_params[batch_size];
++    params->mode = hipFileBatch;
++    params->fh = fh;
++    params->u.batch.devPtr_base = buffer;
++    params->u.batch.file_offset = file_offset;
++    params->u.batch.devPtr_offset = ptr_offset;
++    params->u.batch.size = size;
++    params->opcode = type;
++    params->cookie = params;
++    batch_size++;
++
++    return NIXL_SUCCESS;
++}
++
++nixl_status_t
++aisIOBatch::submitBatch(int flags) {
++    const hipFileError_t err = hipFileBatchIOSubmit(batch_handle, batch_size,
++                                                   io_batch_params.data(), flags);
++    if (err.err != hipFileSuccess) {
++        NIXL_ERROR << "AIS: hipFileBatchIOSubmit failed: err=" << err.err
++                   << " nr=" << batch_size;
++        return NIXL_ERR_BACKEND;
++    }
++    current_status = NIXL_IN_PROG;
++    return NIXL_SUCCESS;
++}
++
++nixl_status_t
++aisIOBatch::cancelBatch() {
++    const hipFileError_t err = hipFileBatchIOCancel(batch_handle);
++    if (err.err != hipFileSuccess) {
++        NIXL_ERROR << "AIS: hipFileBatchIOCancel failed: err=" << err.err;
++        return NIXL_ERR_BACKEND;
++    }
++    return NIXL_SUCCESS;
++}
++
++nixl_status_t
++aisIOBatch::checkStatus() {
++    unsigned int nr = batch_size - entries_completed;
++    if (nr == 0) {
++        current_status = NIXL_SUCCESS;
++        return current_status;
++    }
++
++    // min_nr=0, not nr.  cuda_gds passes its full batch size as min_nr against
++    // a NULL timeout, which turns checkStatus into a blocking wait; NIXL polls
++    // checkXfer and expects it to return promptly.  hipFile returns immediately
++    // for min_nr=0 with whatever has completed so far, which is the semantics
++    // this loop actually wants.
++    const hipFileError_t err = hipFileBatchIOGetStatus(batch_handle, 0, &nr,
++                                                      io_batch_events.data(), nullptr);
++    if (err.err != hipFileSuccess) {
++        NIXL_ERROR << "AIS: hipFileBatchIOGetStatus failed: err=" << err.err;
++        current_status = NIXL_ERR_BACKEND;
++        return current_status;
++    }
++
++    for (unsigned int i = 0; i < nr; i++) {
++        const hipFileIOEvents_t &ev = io_batch_events[i];
++        const auto *params = static_cast<const hipFileIOParams_t *>(ev.cookie);
++        // ret is declared size_t but documented as carrying a negative POSIX
++        // errno, so it has to be read as signed before it is compared.
++        const ssize_t ret = static_cast<ssize_t>(ev.ret);
++
++        if (ev.status == hipFileComplete && params && ret >= 0 &&
++            static_cast<size_t>(ret) == params->u.batch.size) {
++            continue;
++        }
++
++        if (ret < 0) {
++            NIXL_ERROR << "AIS: batch operation failed: " << strerror(static_cast<int>(-ret));
++        } else if (ev.status != hipFileComplete) {
++            NIXL_ERROR << "AIS: batch operation ended in status " << ev.status;
++        } else {
++            NIXL_ERROR << "AIS: short batch transfer: " << ret << " of "
++                       << (params ? params->u.batch.size : 0) << " bytes";
++        }
++        current_status = NIXL_ERR_BACKEND;
++    }
++
++    entries_completed += nr;
++    if (current_status == NIXL_ERR_BACKEND) {
++        // Keep reporting the failure, but only once everything has drained --
++        // returning early would leave operations writing into buffers the
++        // caller is entitled to reuse.
++        return (entries_completed < batch_size) ? NIXL_IN_PROG : NIXL_ERR_BACKEND;
++    }
++    if (entries_completed < batch_size) {
++        current_status = NIXL_IN_PROG;
++    } else if (entries_completed > batch_size) {
++        current_status = NIXL_ERR_UNKNOWN;
++    } else {
++        current_status = NIXL_SUCCESS;
++    }
++
++    return current_status;
++}
++
++void
++aisIOBatch::reset() {
++    entries_completed = 0;
++    batch_size = 0;
++    current_status = NIXL_ERR_NOT_POSTED;
++}
++
 +aisStream::aisStream(int device_id) : dev_id_(device_id) {
 +    if (dev_id_ >= 0) {
 +        const hipError_t dev_err = hipSetDevice(dev_id_);
@@ -838,10 +1233,10 @@ index 0000000..66e6283
 +}
 diff --git a/src/plugins/rocm_ais/ais_utils.h b/src/plugins/rocm_ais/ais_utils.h
 new file mode 100644
-index 0000000..57e7f5d
+index 0000000..81afbe8
 --- /dev/null
 +++ b/src/plugins/rocm_ais/ais_utils.h
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,106 @@
 +/* Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 + *
 + * SPDX-License-Identifier: Apache-2.0
@@ -853,6 +1248,7 @@ index 0000000..57e7f5d
 +#include <fcntl.h>
 +#include <unistd.h>
 +#include <string>
++#include <vector>
 +#include <nixl.h>
 +#include <hip/hip_runtime.h>
 +#include <hipfile.h>
@@ -892,6 +1288,46 @@ index 0000000..57e7f5d
 +        bool registered_ = false;
 +};
 +
++// One hipFile batch context and the parameter/event arrays that go with it.
++//
++// This is the structural equivalent of cuda_gds's nixlGdsIOBatch, and the
++// reason the AIS backend has a batch mode at all: hipFile's asynchronous
++// stream API cannot exceed the throughput of a single CPU thread, because
++// Fastpath::async_io runs the transfer inside a hipLaunchHostFunc callback and
++// HIP services host functions from exactly one thread per process.  A batch
++// submission promises no ordering between its operations, needs no host
++// function, and is dispatched to a worker pool instead.
++class aisIOBatch {
++    public:
++        explicit aisIOBatch(unsigned int size);
++        ~aisIOBatch();
++
++        aisIOBatch(const aisIOBatch &) = delete;
++        aisIOBatch &operator=(const aisIOBatch &) = delete;
++
++        bool ok() const { return init_ok; }
++        unsigned int capacity() const { return max_reqs; }
++        unsigned int size() const { return batch_size; }
++
++        nixl_status_t addToBatch(hipFileHandle_t fh, void *buffer, size_t size,
++                                 hoff_t file_offset, hoff_t ptr_offset,
++                                 hipFileOpcode_t type);
++        nixl_status_t submitBatch(int flags);
++        nixl_status_t checkStatus();
++        nixl_status_t cancelBatch();
++        void reset();
++
++    private:
++        hipFileBatchHandle_t batch_handle = nullptr;
++        std::vector<hipFileIOEvents_t> io_batch_events;
++        std::vector<hipFileIOParams_t> io_batch_params;
++        bool init_ok = false;
++        unsigned int max_reqs = 0;
++        unsigned int batch_size = 0;
++        unsigned int entries_completed = 0;
++        nixl_status_t current_status = NIXL_ERR_NOT_POSTED;
++};
++
 +class aisUtil {
 +    public:
 +        aisUtil() {}
@@ -909,10 +1345,10 @@ index 0000000..57e7f5d
 +#endif
 diff --git a/src/plugins/rocm_ais/meson.build b/src/plugins/rocm_ais/meson.build
 new file mode 100644
-index 0000000..716d467
+index 0000000..6ba8e5e
 --- /dev/null
 +++ b/src/plugins/rocm_ais/meson.build
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,117 @@
 +# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 +#
 +# SPDX-License-Identifier: Apache-2.0
@@ -966,8 +1402,14 @@ index 0000000..716d467
 +endif
 +
 +# AIS_MT only needs hipFileRead/Write, which every hipFile has.  This backend
-+# needs the stream API, which older ones do not export -- skip rather than fail
-+# the whole build, the same way an absent hipFile does above.
++# needs the batch and stream APIs, which older ones do not export -- skip rather
++# than fail the whole build, the same way an absent hipFile does above.
++#
++# Only the declarations are checked.  Stock hipFile declares hipFileBatchIO* and
++# then throws "Not Implemented" from the AMD backend, so a build that passes this
++# gate can still fail at runtime in ais_mode=batch; patches/hipfile is what makes
++# it actually move bytes, and docker/scripts/build-hipfile.sh is what asserts the
++# patch reached the library.
 +#
 +# -D__HIP_PLATFORM_AMD__ has to be repeated here even though the root
 +# meson.build already adds it: add_project_arguments does not reach compiler
@@ -976,10 +1418,18 @@ index 0000000..716d467
 +# the check then fails against every hipFile, new or old, and quietly drops the
 +# plugin from a build that was asked for it.
 +cc_ais = meson.get_compiler('cpp')
-+if not cc_ais.has_header_symbol('hipfile.h', 'hipFileReadAsync',
-+                                args: ['-D__HIP_PLATFORM_AMD__'],
-+                                dependencies: [hip_dep, hipfile_dep])
-+    message('hipFile at ' + ais_hipfile_inc + ' has no async API - skipping the AIS plugin')
++ais_required_syms = ['hipFileReadAsync', 'hipFileBatchIOSubmit']
++ais_syms_found = true
++foreach sym : ais_required_syms
++    if not cc_ais.has_header_symbol('hipfile.h', sym,
++                                    args: ['-D__HIP_PLATFORM_AMD__'],
++                                    dependencies: [hip_dep, hipfile_dep])
++        message('hipFile at ' + ais_hipfile_inc + ' does not declare ' + sym +
++                ' - skipping the AIS plugin')
++        ais_syms_found = false
++    endif
++endforeach
++if not ais_syms_found
 +    subdir_done()
 +endif
 +
