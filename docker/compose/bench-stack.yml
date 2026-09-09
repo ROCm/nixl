@@ -1,0 +1,115 @@
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+#
+# Benchmark container + hsa-snoop collector, as a two-service stack.
+#
+# The image already knows how to run hsa-snoop inside the benchmark container
+# (HSA_SNOOP=1 in run-nixlbench.sh), and for a single paired run that is the
+# simpler thing.  It does not work for a sweep: storage-sweep.sh is forty-odd
+# short nixlbench invocations, so an in-container collector would be started
+# and killed forty-odd times and every counter would reset underneath the
+# measurement.  Splitting the collector out as a long-lived sidecar gives one
+# continuous trace across the whole sweep, which is what makes it possible to
+# attribute a throughput plateau to a specific sweep point.
+#
+# The sidecar works by kprobe/bpftrace against the *host* kernel, not by
+# talking to the benchmark process, so it needs no shared namespace with the
+# sweep service beyond pid: host -- it sees every process on the node whether
+# or not it is in this stack.  That also means the two services are only
+# loosely coupled: the sweep can be started, killed and restarted freely while
+# the collector keeps running.
+#
+#   docker compose -f docker/compose/bench-stack.yml up -d hsa-snoop
+#   docker compose -f docker/compose/bench-stack.yml run --rm sweep
+#   docker compose -f docker/compose/bench-stack.yml down
+#
+# IMAGE_REF must be set (or in .env); there is no default, because silently
+# falling back to :latest is how you benchmark yesterday's build.
+
+services:
+  hsa-snoop:
+    build:
+      context: ../..
+      dockerfile: docker/hsa-snoop.Dockerfile
+      args:
+        HSA_SNOOP_VERSION: ${HSA_SNOOP_VERSION:-1.1.0}
+    image: hsa-snoop:${HSA_SNOOP_VERSION:-1.1.0}
+    # privileged rather than a narrow cap set: bpftrace needs BPF, PERFMON and
+    # SYS_ADMIN, plus the ability to read the host's kallsyms and attach
+    # kprobes.  Every published bpftrace-in-docker recipe ends up here.
+    privileged: true
+    pid: host
+    # host networking, not a published port: the metrics scraper runs on the
+    # node (see snoop-sample.sh), and this keeps the sidecar reachable at
+    # 127.0.0.1 without depending on a compose bridge that the sweep container
+    # -- which also uses host networking -- would not be on anyway.
+    network_mode: host
+    volumes:
+      - /sys/kernel/debug:/sys/kernel/debug:rw
+      - /sys/kernel/tracing:/sys/kernel/tracing:rw
+      - /sys/fs/bpf:/sys/fs/bpf:rw
+      - /lib/modules:/lib/modules:ro
+      # bpftrace falls back to parsing kernel headers when BTF is missing; on
+      # this node BTF is present, but mounting /usr/src costs nothing and is
+      # the difference between "works" and "cannot resolve struct" elsewhere.
+      - /usr/src:/usr/src:ro
+    command:
+      - --all
+      - --ais-snoop
+      - --prometheus
+      - --prometheus-port
+      - "${HSA_SNOOP_PORT:-9488}"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:${HSA_SNOOP_PORT:-9488}/metrics >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  sweep:
+    image: ${IMAGE_REF:?set IMAGE_REF, e.g. via make print-tag}
+    # Mirrors DOCKER_RUN_FLAGS in the Makefile.  IPC_LOCK plus an unlimited
+    # memlock ulimit are both required: docker defaults memlock to 64 KiB, and
+    # a GPUDirect registration of a multi-GiB buffer then fails with a bare
+    # I/O error and the run quietly falls back to a slow transport.
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - video
+      - render
+    cap_add:
+      - IPC_LOCK
+      - SYS_PTRACE
+    security_opt:
+      - seccomp=unconfined
+    ipc: host
+    network_mode: host
+    shm_size: 16gb
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - ../..:/work
+      - /mnt:/mnt
+    working_dir: /work
+    environment:
+      SWEEP_SET: ${SWEEP_SET:-quick}
+      SWEEP_OUT: ${SWEEP_OUT:-/work/logs/storage-sweep.csv}
+      SWEEP_MOUNTS: ${SWEEP_MOUNTS:-/mnt/nixl-nvme-*}
+      # Deliberately NOT set: HSA_SNOOP.  The sidecar is already collecting;
+      # a second collector inside the sweep container would attach duplicate
+      # kprobes to the same functions and double-count every event.
+    # The sidecar has to be up and answering /metrics before the first sweep
+    # point runs, or the first few rows have no trace behind them.
+    depends_on:
+      hsa-snoop:
+        condition: service_healthy
+    # The path, not a bare name: unlike run-nixlbench and the smoke test,
+    # storage-sweep.sh is not installed into /usr/local/bin by the Dockerfile.
+    # It is run out of the bind-mounted checkout, which is also what makes it
+    # editable between sweep sets without rebuilding a 34 GB image.
+    command: ["bash", "/work/docker/scripts/storage-sweep.sh"]

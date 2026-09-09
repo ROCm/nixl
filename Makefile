@@ -136,7 +136,8 @@ COMPONENT ?= all
 DIST := $(REPO_ROOT)/.slurm/run-build.sh
 
 .PHONY: help build build-nixl build-mori wheels shell test test-nogpu \
-        nixlbench bench bench-nvme bench-compare storage-sweep dist-build dist-load \
+        nixlbench bench bench-nvme bench-compare storage-sweep \
+        snoop-sweep snoop-up snoop-down dist-build dist-load \
         dist-build-here dist-bench dist-bench-2node \
         patch-check patch-list print-tag print-config clean clean-images
 
@@ -328,6 +329,24 @@ storage-sweep:                 # AIS vs AIS_MT vs POSIX across drives/threads/op
 		$(if $(SWEEP_ITER),-e SWEEP_ITER=$(SWEEP_ITER),) \
 		$(if $(TIMEOUT),-e TIMEOUT=$(TIMEOUT),) \
 		"$(IMAGE_REF)" bash /work/docker/scripts/storage-sweep.sh
+
+# The same sweeps, but with an hsa-snoop sidecar tracing underneath all of them
+# for the whole session.  HSA_SNOOP=1 on `make bench` cannot do this: it starts
+# a collector inside the benchmark container, and a sweep is forty-odd
+# containers, so every counter would reset at every sweep point.  See
+# docker/compose/bench-stack.yml.
+SWEEP_SETS ?= quick
+snoop-sweep:                   # storage-sweep sets with a persistent hsa-snoop sidecar
+	@mkdir -p logs
+	IMAGE_REF="$(IMAGE_REF)" SWEEP_SETS="$(SWEEP_SETS)" \
+		$(if $(RUN_TAG),RUN_TAG=$(RUN_TAG),) \
+		bash $(REPO_ROOT)/.slurm/snoop-sweep.sh
+
+snoop-up:                      # bring up just the collector, leave it running
+	IMAGE_REF="$(IMAGE_REF)" docker compose -f docker/compose/bench-stack.yml up -d hsa-snoop
+
+snoop-down:
+	IMAGE_REF="$(IMAGE_REF)" docker compose -f docker/compose/bench-stack.yml down --remove-orphans
 
 bench-compare:                 # UCX then MORI_IO, same settings, back to back
 	@$(MAKE) --no-print-directory bench BACKEND=UCX      SEG_TYPE=$(SEG_TYPE) || true

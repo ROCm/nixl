@@ -57,7 +57,12 @@ build_filenames() {
 }
 
 if [[ ! -f "${SWEEP_OUT}" ]]; then
-	echo "label,backend,api,seg_type,op_type,threads,files,direct,block_bytes,batch,bw_gbps,lat_us,prep_us,post_us,tx_us,p99_tx_us" \
+	# t_start/t_end are appended, not prepended, so that anything already
+	# parsing this CSV by column index keeps working.  They exist so a row can
+	# be joined against an external trace -- the hsa-snoop sidecar samples the
+	# node on its own clock and has no idea which sweep point is running, so
+	# wallclock is the only key the two files share.
+	echo "label,backend,api,seg_type,op_type,threads,files,direct,block_bytes,batch,bw_gbps,lat_us,prep_us,post_us,tx_us,p99_tx_us,t_start,t_end" \
 		> "${SWEEP_OUT}"
 fi
 
@@ -94,19 +99,27 @@ run_point() {
 	)
 	[[ "${backend}" == "POSIX" ]] && args+=(--posix_api_type "${api}")
 
-	echo "--- ${label}: ${backend}${api:+/${api}} seg=${seg} op=${op} thr=${threads} files=${files} direct=${direct}"
+	echo "--- $(date -Is) ${label}: ${backend}${api:+/${api}} seg=${seg} op=${op} thr=${threads} files=${files} direct=${direct}"
 
 	local out_t
 	out_t="$(mktemp)"
+	# The whole point is bracketing: every block size inside one nixlbench
+	# invocation gets the same t_start/t_end, so a join against the sidecar
+	# trace resolves to a point, not to a block size.  Finer attribution would
+	# need nixlbench itself to emit per-block timestamps.
+	local t0 t1
+	t0="$(date +%s)"
 	HIP_VISIBLE_DEVICES=0 timeout "${TIMEOUT}" nixlbench "${args[@]}" > "${out_t}" 2>&1
 	local rc_t=$?
+	t1="$(date +%s)"
 
 	local rows
 	rows="$(cat "${out_t}" | awk -v L="${label}" -v B="${backend}" -v A="${api}" \
-		-v S="${seg}" -v O="${op}" -v T="${threads}" -v F="${files}" -v D="${direct}" '
+		-v S="${seg}" -v O="${op}" -v T="${threads}" -v F="${files}" -v D="${direct}" \
+		-v T0="${t0}" -v T1="${t1}" '
 		/^[0-9]+[ \t]+[0-9]+[ \t]+[0-9.]+/ {
-			printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n",
-				L,B,A,S,O,T,F,D,$1,$2,$3,$4,$5,$7,$9,$10
+			printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n",
+				L,B,A,S,O,T,F,D,$1,$2,$3,$4,$5,$7,$9,$10,T0,T1
 		}')"
 
 	if [[ -z "${rows}" ]]; then
