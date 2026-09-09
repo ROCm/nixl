@@ -60,6 +60,11 @@ done
 # seven go in the tag -- enough to keep two hipFile pins from colliding without
 # making the tag unreadable.
 hipfile="$(_arg HIPFILE_REF | sed -e 's#[^A-Za-z0-9._-]#-#g' | cut -c1-7)"
+# Same treatment for fio, and for the same reason: it is pinned to a SHA on a
+# ROCm topic branch with no tags, an empty value is the supported "no fio in
+# this image" configuration, and an image with fio is not interchangeable with
+# one without it.
+fio="$(_arg FIO_REF | sed -e 's#[^A-Za-z0-9._-]#-#g' | cut -c1-7)"
 
-printf '%s-rocm%s-nixl%s-mori%s%s\n' "${version}" "${rocm}" "${nixl}" "${mori}" \
-	"${hipfile:+-hipfile${hipfile}}"
+printf '%s-rocm%s-nixl%s-mori%s%s%s\n' "${version}" "${rocm}" "${nixl}" "${mori}" \
+	"${hipfile:+-hipfile${hipfile}}" "${fio:+-fio${fio}}"

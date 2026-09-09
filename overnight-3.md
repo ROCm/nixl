@@ -13,6 +13,14 @@ both.
    docker compose container, rather than inside the benchmark container.
 4. Write this report.
 
+Extended part-way through the night:
+
+5. Copy the Prometheus + Grafana compose pattern from `Projects/rocm-aic` so
+   results can be dumped from a running stack rather than only scraped to TSV.
+6. Put fio in the container, in the version that has hipFile support —
+   `sbates130272`'s Docker Hub images have a working recipe.
+7. Find out what metrics NIXL itself exposes and capture those too.
+
 ## Result, up front
 
 **The new AIS plugin works, and it does not scale.** It is capped at
@@ -22,7 +30,32 @@ reading** on the same seven drives, the same buffers and the same library. On
 16-file reads that is a **6× gap in AIS_MT's favour**.
 
 **The cap is in hipFile's async submission path, not in the plugin and not in
-the hardware.** Three experiments, each of which could have exonerated it:
+the hardware — and this is now proven from outside NIXL.** fio's `libhipfile`
+engine, added to the container later in the session, drives the identical
+hipFile calls with none of NIXL above them. Across the same seven drives:
+
+| submission mode | write GB/s | read GB/s |
+|---|---|---|
+| `hipfile_mode=sync` (= `AIS_MT`) | 28.59 | 18.87 |
+| `hipfile_mode=stream` (= `AIS`) | **5.05** | **2.00** |
+
+5.05 GB/s from fio against ~5.5 GB/s from the AIS plugin: two independently
+written submitters landing within 10% of each other on a ceiling the
+synchronous path clears by nearly 6×. The plugin is extracting essentially all
+of what `hipFileWriteAsync` will give.
+
+**The async path behaves as a single server with two constants.** Fitting the
+fio block-size curve gives `service time ≈ 24 µs + size / 5.7 GB/s`, and that
+one line accounts for everything observed all night: queue depth changes
+nothing (throughput flat to 2% from `iodepth` 1 to 64 while latency rises
+exactly linearly, 1.65 ms → 107.6 ms); drives change nothing past two
+(3.76 → 5.45 → 4.66 → 5.05 GB/s over 1/2/4/7 drives, against `sync`'s near-linear
+3.73 → 28.61); and a second *process* gets its own full ~5 GB/s because it gets
+its own context. The model also predicts the AIS plugin's number without being
+told about it — 5.52 GB/s at the 4 MiB the sweeps use, against ~5.5 measured.
+
+Before fio was available, the same conclusion rested on elimination — three
+experiments, each of which could have exonerated hipFile:
 
 - Stream pool depth 16 / 32 / 128 — no change (5.30 / 5.60 / 5.54 GB/s).
 - Ops-chained-per-stream 1 / 2 / 4 / 8 / 128 — no change (5.51 / 5.48 / 5.50 /
@@ -484,10 +517,465 @@ problem, and neither do the single-process sweep numbers, where AIS_MT's
 20.15 GB/s sits just above the `dd` floor exactly as it should. Multi-process
 totals from this session should not be quoted.
 
+### 2026-09-09 01:40 — what NIXL actually exposes, and what it does not
+
+The ask was to capture NIXL's own metrics. The good news first: the exporter is
+already in this tree's image and nobody had noticed. `libtelemetry_exporter_prometheus.so`
+is built and installed, and its prometheus-cpp dependencies (`libcore.so.1.3`,
+`libpull.so.1.3`) resolve out of `/opt/nixl/lib/x86_64-linux-gnu`. Three
+environment variables turn it on:
+
+```
+NIXL_TELEMETRY_ENABLE=y
+NIXL_TELEMETRY_EXPORTER=prometheus
+NIXL_TELEMETRY_PROMETHEUS_PORT=19090
+```
+
+and nixlbench then serves 34 series across 19 metric families for the lifetime
+of the process. Other knobs, none of which needed changing: `NIXL_TELEMETRY_ENABLED_METRICS`
+(a glob allowlist, all-true when unset), `NIXL_TELEMETRY_BUFFER_SIZE` (4096),
+`NIXL_TELEMETRY_RUN_INTERVAL` (100 ms), and `NIXL_TELEMETRY_DIR` /
+`NIXL_TELEMETRY_CSV_FILE` for the CSV exporter.
+
+The bad news is what is in those series. For the storage backends, **only the
+registration counters populate**. Measured on four files, four threads, 4 MiB,
+v1.4.1:
+
+| backend | seg | `agent_tx_bytes_total` | `agent_tx_requests_num_total` | `agent_xfer_time_total` | `agent_memory_registered_total` | bw GB/s |
+|---|---|---|---|---|---|---|
+| POSIX | DRAM | 0 | 0 | 0 | 15032385536 | 9.76 |
+| AIS_MT | VRAM | 0 | 0 | 0 | 8589934592 | 9.51 |
+| AIS | VRAM | 0 | 0 | 0 | 6442450944 | 4.25 |
+
+Every one of those runs moved gigabytes. The registration counter proves the
+telemetry object exists and is being written to; the transfer counters are
+simply never reached.
+
+Three explanations were ruled out rather than assumed:
+
+- **Not buffer pressure.** `agent_telemetry_events_dropped_total` is also 0. If
+  the staging queue were overflowing, that is where it would show.
+- **Not the allowlist.** `NIXL_TELEMETRY_ENABLED_METRICS` is unset, and unset
+  means all-true, not none-true.
+- **Not a null telemetry pointer.** The debug line `nixl_agent.cpp:1241 DescList
+  of mem type 1` appears during the runs, which is inside `postXferReq`'s
+  telemetry block — the code path is entered.
+
+What it actually is remains open. Two candidates, both from reading v1.4.1's
+`nixl_agent.cpp` (fetched from GitHub — note the local `Projects/nixl` checkout
+is `v1.3.1-151-gdf663171`, a different tree, and reasoning from it wasted twenty
+minutes before `git describe` caught it): the `remoteSections_.count(remoteAgent) == 0`
+early return in `getXferStatus`, which a storage backend always trips because
+there is no remote peer, and `telemetry.totalBytes` never being set on the
+`makeXferReq` path. Neither is confirmed, so neither is claimed.
+
+The cheap experiment that would halve the search space, not yet run: use
+`NIXL_TELEMETRY_EXPORTER=csv` with `NIXL_TELEMETRY_DIR`. If the CSV also has no
+transfer events the fault is on the producer side; if it has them, the
+prometheus exporter is dropping them.
+
+The practical consequence is that NIXL's exporter is scraped and dashboarded,
+but for storage work hsa-snoop remains the source of truth. Rather than leave
+that as folklore, the gap is written into the scrape config comment and into
+the Grafana panel description, so a flat zero line reads as a known defect and
+not as a broken target.
+
+**Corrected at 03:55 — see below. The counters do populate; the table above is
+a sampling artefact of reading the endpoint two or three times per run.**
+
+### 2026-09-09 02:10 — the monitoring stack, borrowed from rocm-aic
+
+`Projects/rocm-aic/monitoring/` has the pattern already worked out: host
+networking throughout, Grafana with anonymous Viewer and the login form off,
+file-provisioned datasource and dashboards, and everything behind compose
+profiles so the expensive parts stay off by default. Its `prometheus.yml`
+already carries a `nixl` job pointed at `:19090` with a comment marking the
+exporter as beta — so the NIXL-telemetry question above had been asked there
+first, and the answer this session found is the concrete version of that
+warning.
+
+Adopted with two deliberate departures:
+
+- **A named docker volume for the TSDB, not a bind mount into the checkout.**
+  The checkout is on NFS. A Prometheus TSDB on NFS is single-writer at best and
+  corrupt at worst, and the thing anyone wants out of a run is a CSV, not a
+  TSDB directory.
+- **A 2 s scrape interval instead of 15 s.** A sweep point lasts tens of
+  seconds. At 15 s a point is one or two samples, which is not a measurement.
+
+One compose behaviour is worth recording because it wasted a build: **compose
+interpolates the entire file before it filters by profile**, so a `${VAR:?}` in
+a profiled service aborts runs that never asked for that service. Every
+variable in `bench-stack.yml` therefore uses `:-` — except `IMAGE_REF`, which
+keeps its `:?` as a considered trade. Silently benchmarking whichever image
+happened to be loaded is the most expensive mistake available here, and the
+price of catching it is that `--profile monitoring up` also wants `IMAGE_REF`
+set for a service it is not starting. `IMAGE_REF=$(make -s print-tag) docker compose ...`
+satisfies it.
+
+What landed: `--profile monitoring` (Prometheus 3.13.2 + Grafana 11.5.2),
+`--profile exporters` (node-exporter with diskstats/nvme/infiniband, and the
+AMD device-metrics-exporter), a seven-panel `nixl-storage` dashboard, and
+`make monitor-up` / `make monitor-down`.
+
+The dashboard is built around one question, because that is the question these
+sweeps keep asking: **is a plateau one drive or all of them?** So AIS
+throughput is broken out per PCIe endpoint rather than summed, and NVMe
+block-layer throughput from node-exporter sits underneath it as the independent
+witness — a GPU-direct path that has quietly fallen back to buffered I/O keeps
+showing bytes in the second panel and stops showing them in the first.
+
+And `make snoop-dump`, which is the part that matters for an unattended run:
+the TSDB is scratch on a node Slurm will take back, so `docker/scripts/prom-dump.sh`
+range-queries fourteen series into one CSV each under `logs/`, in long format
+that joins against `storage-sweep.csv` on wallclock. It also saves the raw
+`/metrics` text of every target, because metric names drift between releases
+and in six months that file is the only record of what the names meant.
+
+### 2026-09-09 03:20 — fio with the hipFile engine, and why it is the important addition
+
+Everything this session has concluded about AIS is a NIXL measurement, and NIXL
+is a thick stack: agent, backend engine, descriptor lists, stream pool, then
+hipFile. The ~5.5 GB/s cap was attributed to hipFile by elimination — pool
+depth, ops-per-stream, and the two-process experiment each failed to move it —
+but elimination inside one tool is weaker than a second tool that skips the
+tool entirely. That is what fio's `libhipfile` engine is for.
+
+The engine to use is **not** upstream `axboe/fio`. Upstream master has
+`libhipfile` (landed `67256d4e`, 2026-05-08, no release tag carries it) but it
+is synchronous only. The ROCm fork's `zbyrne/async_hipfile_engine` branch, at
+`c3226175` (2026-09-02), adds a `hipfile_mode` option whose three values map
+one-for-one onto what this tree already has:
+
+| `hipfile_mode` | hipFile call | NIXL equivalent |
+|---|---|---|
+| `sync` | `hipFileRead`/`hipFileWrite` | `AIS_MT` |
+| `stream` | `hipFileReadAsync`/`hipFileWriteAsync` | `AIS` |
+| `batch` | `hipFileBatchIOSubmit`/`GetStatus` | none — the plugin was never written |
+
+So `stream` drives the exact API the AIS plugin drives, with nothing above it.
+If `stream` also caps near 5.5 GB/s, hipFile is convicted. If it does not, the
+plugin is.
+
+`batch` is expected to fail — hipFile's batch backend accepts submissions,
+performs no I/O, and returns "Not Implemented" from `GetStatus`. It is in the
+sweep anyway as a regression detector: the day it starts passing is the day the
+batch plugin from the original plan becomes worth writing, and nobody is going
+to notice that by re-reading a CHANGELOG.
+
+The build had one real problem, and it is the kind that fails silently. **There
+are two different `libhipfile.so` on this system with the same SONAME**: ROCm
+ships `0.3.0` in `/opt/rocm/lib`, and this tree's `hipfile` stage installs
+`0.2.0` into `/opt/hipfile` — the source build is the *newer* library despite
+the lower version, and it is the one exporting `hipFileReadAsync`,
+`hipFileWriteAsync` and `hipFileBatchIOSubmit`. fio must link that one, or the
+comparison is against a different library than the plugins use and is worthless.
+
+fio's `configure` makes that awkward. Its hipFile probe derives both the
+include path and the library path from `ROCM_PATH`, then *prepends* its cflags
+and *appends* its libs, so whether `--extra-cflags`/`--extra-ldflags` win
+depends on where the generated Makefile happens to place each variable. Setting
+`ROCM_PATH=/opt/hipfile` instead breaks `-lamdhip64`. Both approaches are coin
+flips with a silent failure mode.
+
+The fix is a merged ROCm-shaped prefix at `/opt/fio-hipfile`: symlink ROCm's
+`include/hip` and `libamdhip64.so*` into it, then symlink `/opt/hipfile`'s
+header and library in **last**, so hipFile wins any name it shares. Point
+`ROCM_PATH` at that. And then — because the whole point is not to trust it —
+assert it, at build time, as a hard failure:
+
+```
+[fio] libhipfile: /opt/fio-hipfile/lib/libhipfile.so.0 -> /opt/hipfile/lib/libhipfile.so.0.2.0
+[fio] fio-3.42, async=yes
+```
+
+`ldd` must find `libhipfile` at all, and `readlink -f` of it must land under
+`/opt/hipfile`. The image build now prints `fio OK: fio-3.42, hipfile_mode=yes`
+alongside the existing `nixl plugin OK` lines, and fails if either is untrue.
+
+Pinned as `FIO_REF` in the `Makefile` next to the other components, folded into
+the image tag (`...-fioc322617`), and `FIO_REF=` empty means no fio in the
+image — the same escape hatch shape `HIPFILE_REF` has.
+
+### 2026-09-09 03:33 — first fio numbers, and the batch stub confirmed
+
+`make fio-sweep FIO_SET=quick`, one job on one drive:
+
+| mode | bw GB/s | mean lat | p99 |
+|---|---|---|---|
+| `sync` | 3.77 | 278 µs | — |
+| `stream` | 3.72 | 4514 µs | 6128 µs |
+| `batch` | — | — | fails, as predicted |
+
+Two things confirmed immediately. `batch` fails exactly the way hipFile's
+stub was documented to fail, so the regression detector is armed and working.
+And at one drive the two working modes are indistinguishable at 3.7 GB/s —
+which is the same result NIXL gives at one drive (AIS 3.99, AIS_MT 3.96, POSIX
+3.80) and for the same reason: a single Gen4 x4 NVMe is the bottleneck long
+before any submission path is. The interesting comparison needs all seven
+drives, which is the `modes` set now running.
+
+One bug in the harness, caught by the numbers being absurd rather than by the
+code being wrong: the first version read p99 out of `clat_ns` unconditionally
+and reported a 0.3 µs p99 against a 278 µs mean for `sync`. For a synchronous
+engine the whole call is submission, so `clat` is ~0 and only `lat_ns` means
+anything; for `stream` it is the other way round. The parser now picks
+whichever latency object actually has time in it.
+
+### 2026-09-09 03:34 — hipFile convicted: the cap reproduces with no NIXL in the picture
+
+`FIO_SET=modes`, eight jobs spread across all seven drives, 1 MiB blocks, same
+library the AIS plugins link, **no NIXL anywhere in the stack**:
+
+| mode | op | bw GB/s | mean lat |
+|---|---|---|---|
+| `sync` | write | **28.59** | 293 µs |
+| `stream` | write | **5.05** | 26.6 ms |
+| `sync` | read | **18.87** | 444 µs |
+| `stream` | read | **2.00** | 67.0 ms |
+
+That settles the question this session has been circling since 21:05. The async
+submission path is **5.7× slower than the synchronous one for writes and 9.4×
+slower for reads**, on the same drives, in the same process, through the same
+`libhipfile.so`, with fio doing the submitting instead of NIXL.
+
+And the number matches. fio's `stream` write gets 5.05 GB/s; the AIS plugin
+gets ~5.5 GB/s. Two independently written submitters, one in C inside fio and
+one in C++ inside a NIXL backend, land within 10% of each other on a figure
+that the synchronous path exceeds by nearly 6×. The AIS plugin is not leaving
+performance on the table — it is extracting essentially all of what
+`hipFileWriteAsync` will give.
+
+The latency column says what kind of limit it is. 26.6 ms mean write latency at
+queue depth 16 is not a device that is busy; a Gen4 x4 NVMe serves a 1 MiB
+write in a few hundred microseconds, which is exactly what the `sync` row
+shows. Requests are sitting in a queue. Combined with the earlier finding that
+a *second process* gets its own ~5 GB/s, the picture is a single per-context
+dispatcher that serializes async submissions regardless of how many streams,
+files, threads or drives are aimed at it.
+
+This is the evidence to put in the upstream report, and it is much stronger
+than what was available at 21:05. The previous case was elimination — pool
+depth did not matter, ops-per-stream did not matter, a second process helped —
+all of which is consistent with a hipFile bottleneck but also, less plausibly,
+with three separate plugin bugs. A second, unrelated tool reproducing the same
+ceiling to within 10%, and a first-party ROCm tool at that, removes the plugin
+from suspicion entirely.
+
+Two secondary observations worth recording:
+
+- **Reads are worse than writes in async mode**, 2.00 vs 5.05 GB/s, which
+  inverts the normal NVMe relationship — the `sync` rows show reads at
+  18.87 GB/s and these are drives where reads should beat writes. Whatever
+  serializes async submission hurts the read path roughly twice as badly.
+- **`sync` at 28.59 GB/s beats the `dd` ground truth of 17.81 GB/s**, so the
+  write-cache caveat recorded at 22:50 applies here too: 8 jobs × 4 GiB over a
+  20 s window is partly cache absorption. The `sync`-vs-`stream` *ratio* is
+  unaffected, since both ran the identical shape back to back, and the ratio is
+  the finding. The absolute `sync` figure should not be quoted as sustained.
+
+The p99 column for `sync` rows is still not trustworthy and is left out of the
+table above. fio classes almost all of a synchronous call as submission
+latency, so `clat` p99 (0.3 µs) and `lat` mean (293 µs) describe different
+things, and the parser's fallback pairs them anyway. Fixing it properly means
+reporting mean and p99 from the same object or reporting neither; deferred so
+the `depth`, `drives` and `bs` sets now running keep one consistent schema.
+
+### 2026-09-09 03:40 — the async path serves one operation at a time
+
+The `depth` and `drives` sets turn "hipFile is slow" into a specific mechanism.
+
+**Queue depth buys nothing but waiting.** `hipfile_mode=stream`, eight jobs,
+seven drives, 1 MiB, sweeping `iodepth`:
+
+| iodepth | bw GB/s | mean lat |
+|---|---|---|
+| 1 | 5.086 | 1.65 ms |
+| 2 | 5.072 | 3.31 ms |
+| 4 | 5.050 | 6.6 ms |
+| 8 | 5.050 | 13.3 ms |
+| 16 | 5.064 | 26.5 ms |
+| 32 | 5.029 | 53.3 ms |
+| 64 | 4.980 | 107.6 ms |
+
+Throughput is flat to within 2% across a 64× change in queue depth, while
+latency scales *exactly* linearly with it — 1.65 ms × 64 = 105 ms against a
+measured 107.6 ms. That is Little's law with the service rate pinned: every
+request added to the queue waits behind all the others and none of them go any
+faster. A device or a link that was genuinely saturated would show throughput
+rising with depth until it flattened; this never rises at all.
+
+The arithmetic identifies the server. 5.05 GB/s at 1 MiB is 4815 ops/s, or
+**208 µs per operation** — and a single 1 MiB write to one of these drives
+takes 278 µs (the `sync` single-drive figure from the quick set). The async
+path is completing operations at roughly the rate one drive completes them,
+one after another, no matter how many are in flight. It behaves as though
+there is exactly one operation in service at any instant.
+
+**Adding drives confirms it.** Same shape, sweeping the number of drives:
+
+| drives | `sync` GB/s | `stream` GB/s |
+|---|---|---|
+| 1 | 3.73 | 3.76 |
+| 2 | 7.46 | 5.45 |
+| 4 | 15.67 | 4.66 |
+| 7 | 28.61 | 5.05 |
+
+`sync` scales almost perfectly linearly — 3.73 → 28.61 over 7 drives is 7.7×,
+the extra coming from write-cache absorption. `stream` matches it exactly at
+one drive, where the drive is the bottleneck and the submission path is not,
+then saturates by two drives and stays there. Between four and seven drives it
+does not move at all.
+
+So the ceiling is not per-drive, not per-queue and not per-request: it is one
+fixed-rate serializer per hipFile context, sitting between the caller and the
+hardware. That is consistent with every earlier observation — pool depth not
+mattering, ops-per-stream not mattering, and a second *process* getting its own
+full ~5 GB/s because it gets its own context.
+
+For the upstream report this is the pair of tables to lead with. The flat
+throughput against linearly rising latency is the diagnostic; the drive-scaling
+table shows the same thing from the other direction and rules out the hardware.
+Both come from ROCm's own fio, so neither involves a line of this project's
+code.
+
+### 2026-09-09 03:44 — the block-size curve gives the serializer two numbers
+
+The `bs` set finishes the characterisation. Same eight jobs on seven drives,
+`stream` at `iodepth=16` against `sync` at 1:
+
+| bs | `sync` GB/s | `stream` GB/s | `stream` ops/s | µs per op |
+|---|---|---|---|---|
+| 4 KiB | 1.59 | 0.165 | 40316 | 24.8 |
+| 64 KiB | 16.88 | 1.755 | 26782 | 37.3 |
+| 256 KiB | 25.08 | 3.635 | 13868 | 72.1 |
+| 1 MiB | 28.48 | 5.008 | 4776 | 209.4 |
+| 4 MiB | 28.97 | 5.550 | 1323 | 755.9 |
+| 16 MiB | 28.55 | 4.473 | 267 | 3745 |
+
+Treating the last column as the service time of a single server and fitting a
+straight line to it gives an almost embarrassingly good fit:
+
+```
+service time ≈ 24 µs + size / 5.7 GB/s
+```
+
+The marginal rate between consecutive rows is 5.65, 5.73 and 5.76 GB/s for the
+64 KiB → 4 MiB steps — three independent estimates agreeing to 2%. Predicted
+throughput at 1 MiB is 5.04 GB/s against 5.008 measured; at 4 MiB, 5.52 against
+5.550.
+
+So the serializer has exactly two parameters: **a fixed ~24 µs per operation,
+and a streaming rate of ~5.7 GB/s**. That is what a single dispatch queue with
+a per-request setup cost looks like, and it explains every result of the night
+at once. It explains why 4 KiB is catastrophic (24 µs of overhead to move 4 KiB
+is 0.17 GB/s and nothing can be done about it). It explains the plateau (large
+blocks amortise the 24 µs away and expose the 5.7 GB/s rate). It explains why
+queue depth is irrelevant (one server). It explains why a second process
+doubles aggregate throughput (a second context is a second server).
+
+And it predicts the AIS plugin. The sweeps run at 4 MiB, where the model says
+5.52 GB/s; the plugin measures ~5.5 GB/s. A model fitted entirely to fio data,
+with no NIXL involved, reproduces the NIXL backend's ceiling to two significant
+figures. There is nothing left to fix in the plugin.
+
+One anomaly not explained: 16 MiB drops back to 4.47 GB/s and off the fitted
+line, with a 477 ms mean latency. Something additional degrades at that size —
+possibly a chunking limit inside hipFile, possibly the 128 outstanding 16 MiB
+requests simply exceeding a buffer. Not chased; it is well outside the sizes
+this project uses and it does not affect the conclusion.
+
+For completeness, `sync` peaks at 28.97 GB/s at 4 MiB and holds flat from 1 MiB
+up, which is the expected shape for a path that is limited by the drives rather
+than by submission.
+
+### 2026-09-09 03:55 — correction: NIXL's transfer counters are not zero, they reset
+
+Bringing the monitoring stack up end to end contradicted the 01:40 finding, and
+the monitoring stack is right.
+
+The verification run was meant to be routine: start Prometheus and Grafana,
+run `SWEEP_SET=quick` through the compose stack, dump the window with
+`make snoop-dump`, confirm files appear. They did — eleven series, three
+correctly empty because the quick set is write-only. But `nixl_tx_bps` was
+**not** empty, and not zero: it carried values up to 886 MB/s. That should have
+been impossible given the 01:40 table.
+
+Querying the raw counter settles it:
+
+```
+max_over_time(agent_tx_bytes_total[2h])  =  10170593280
+```
+
+Ten gigabytes. The counter is populated. Stepping through the range query shows
+why it looked dead:
+
+```
+23:47:00  0
+23:47:08  7173529600
+23:47:12  0
+23:47:16  1776558080
+23:47:20  0
+23:48:44  5917466624
+23:48:48  0
+```
+
+It is not a cumulative counter. It rises to a large value and **falls back to
+zero**, repeatedly, within a single run. A metric named `_total` that returns to
+zero is not a counter in the Prometheus sense at all.
+
+So the 01:40 measurement was a sampling artefact, and a predictable one in
+hindsight: it read the endpoint two or three times per nixlbench invocation, and
+most reads land on a zero. Three backends × a couple of samples each is six
+coin flips, and getting six zeros while concluding "the counters never populate"
+is exactly the kind of error that a continuous 2 s scrape catches and a manual
+`curl` does not. That is an argument for the monitoring stack that had not
+occurred to me when building it.
+
+What is *not* established is the mechanism. A follow-up probe polling at 0.5 s
+during a longer AIS_MT run read zero for its whole sampling window and then lost
+the endpoint entirely part-way through the run, so "resets when read" and
+"resets on the 100 ms telemetry interval" are both still live, and the exporter's
+own availability during a run is less reliable than assumed. The magnitudes are
+at least self-consistent with a per-interval delta: 7.17 GB against a 2 s scrape
+is 3.6 GB/s, which is the right order for what these runs actually move.
+
+Two consequences, one corrected here and one already applied:
+
+- **The 01:40 table should not be quoted.** `agent_tx_bytes_total`,
+  `agent_tx_requests_num_total` and `agent_xfer_time_total` do carry data for the
+  storage backends. `agent_memory_registered_total` behaves normally.
+- **`rate()` is the wrong function for these series** and the dashboard and
+  `prom-dump.sh` were both written using it. `rate()` over a value that returns
+  to zero treats every drop as a counter reset and silently discards it, which
+  is how a 10 GB counter renders as a near-flat line. Both now record the raw
+  value instead, so the sawtooth is visible as a sawtooth and nobody has to
+  re-derive this.
+
+The practical recommendation is unchanged — hsa-snoop remains the source of
+truth for storage throughput, because a metric with these semantics cannot be
+aggregated safely — but for the opposite reason from the one recorded at 01:40.
+
 ## Open items
 
+- **NIXL's transfer metrics reset to zero mid-run** (see 03:55). Mechanism not
+  pinned — "resets when read" and "resets on the 100 ms telemetry interval" are
+  both consistent with what was measured, and a 0.5 s poll lost the endpoint
+  part-way through a run, so the exporter's own availability is also suspect.
+  The cheap next experiment is still `NIXL_TELEMETRY_EXPORTER=csv` with
+  `NIXL_TELEMETRY_DIR`: if the CSV shows the same sawtooth the producer is at
+  fault, if it shows a monotonic total the prometheus exporter is. Worth an
+  upstream report once the mechanism is known, because a `_total` metric that
+  is not cumulative is a defect regardless of which side it is on.
+- **`hipfile_mode=stream` at 16 MiB drops off the fitted line** (4.47 GB/s
+  against a predicted ~5.7, with 477 ms mean latency). Not chased; outside the
+  sizes this project uses.
 - **File an upstream observation against ROCm/hipFile**: async submission does
-  not scale past ~5 GB/s per context at `bd0bc233`. The evidence to quote is the
+  not scale past ~5 GB/s per context at `bd0bc233`. The headline evidence is now
+  the fio result — ROCm's own fio fork, `hipfile_mode=sync` 28.59 GB/s against
+  `hipfile_mode=stream` 5.05 GB/s on identical drives in one process, with 26 ms
+  mean latency at queue depth 16 — because it involves none of this project's
+  code. Supporting evidence: the
   same-GPU-vs-different-GPU pair (9.86 vs 10.53 GB/s, so it is not the device),
   the constant ~3.4× deficit across all block sizes (so it is concurrency, not
   per-op overhead or bandwidth), and `dd` at queue depth 1 beating it by 3×

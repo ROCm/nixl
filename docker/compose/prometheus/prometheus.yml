@@ -1,0 +1,77 @@
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+#
+# Scrape config for the benchmark monitoring sidecars.
+#
+# Everything in this stack runs on the host network, so every target is
+# 127.0.0.1 -- no compose DNS, no host-gateway.  That is deliberate: the sweep
+# container also uses host networking (it needs the GPU and the NVMe mounts,
+# and gains nothing from a bridge), so a bridge network here would leave
+# Prometheus unable to reach the one process whose metrics matter most.
+#
+# A 2s interval is far tighter than the 15s a production Prometheus would use.
+# It has to be: a sweep point is one nixlbench invocation lasting tens of
+# seconds, and at 15s a point would land in one or two samples, which is not
+# enough to see a plateau develop inside it.  The cost is a large TSDB for the
+# wallclock covered, which is fine for a run measured in hours and stored in a
+# local volume.
+#
+# Targets that are absent for a given run show as `down`, which is harmless --
+# and informative, since `up{job="nixl"} == 0` for a whole sweep is exactly how
+# you notice NIXL_TELEMETRY_ENABLE was not set on the benchmark process.
+
+global:
+  scrape_interval: 2s
+  scrape_timeout: 1s
+  evaluation_interval: 10s
+  external_labels:
+    stack: nixl-mori-test
+
+scrape_configs:
+  - job_name: prometheus
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["127.0.0.1:9090"]
+
+  # hsa-snoop: kprobe-derived AIS (AMD Infinity Storage) counters, labelled per
+  # PCIe endpoint and per GPU -- ais_tx_bytes_total, ais_tx_ops_total,
+  # ais_tx_latency_seconds, ais_tx_io_size_bytes, plus the hsa_* AQL dispatch
+  # family.  This is the only source in the stack that can say a transfer
+  # really went GPU-direct to a specific drive rather than falling back.
+  - job_name: hsa_snoop
+    static_configs:
+      - targets: ["127.0.0.1:9488"]
+
+  # NIXL's own telemetry exporter (libtelemetry_exporter_prometheus.so, already
+  # built into this tree's image).  It only listens while a process holding a
+  # NIXL agent is running with NIXL_TELEMETRY_ENABLE=y, so this target is up
+  # only for the duration of each nixlbench invocation and down in between.
+  #
+  # Measured caveat, worth knowing before reading a dashboard: as of NIXL
+  # v1.4.1 the transfer metrics are not cumulative counters despite the _total
+  # suffix.  agent_tx_bytes_total climbs to a large value and falls back to
+  # zero repeatedly inside one run -- measured 0 -> 7.17e9 -> 0 -> 1.78e9 -> 0
+  # over twenty seconds.  Consequences: rate() and increase() are both wrong
+  # (each fall reads as a counter reset and is discarded, so a 10 GB counter
+  # renders flat), and a single manual curl of /metrics will usually catch a
+  # zero and suggest the metric is dead.  It is not; it needs a continuous
+  # scrape and raw values.  The 2s interval above is what makes it legible.
+  # agent_memory_registered_total behaves normally.
+  - job_name: nixl
+    static_configs:
+      - targets: ["127.0.0.1:19090"]
+
+  # node-exporter, under the `exporters` profile.  Its diskstats and nvme
+  # collectors are the independent check on every storage number here: a
+  # backend that claims 20 GB/s while node_disk_written_bytes_total across the
+  # NVMe says 5 GB/s is not writing what it thinks it is.
+  - job_name: node_exporter
+    static_configs:
+      - targets: ["127.0.0.1:9100"]
+
+  # AMD device-metrics-exporter, under the `exporters` profile: gpu_* series
+  # for occupancy, power and PCIe bandwidth on the initiator GPU.
+  - job_name: amd_metrics_exporter
+    static_configs:
+      - targets: ["127.0.0.1:5000"]

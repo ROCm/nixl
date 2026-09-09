@@ -217,6 +217,48 @@ RUN --mount=type=cache,target=/root/.cache,sharing=locked \
         bash /tmp/scripts/build-hipfile.sh && rm -rf /tmp/hipfile-src; \
     fi
 
+# ----- 1c. fio with the hipFile ioengine --------------------------------------
+# FROM hipfile, not FROM base: the engine must link the same libhipfile the AIS
+# plugins do, or a "fio says X, NIXL says Y" comparison is comparing two
+# libraries rather than two submission paths.  build-fio.sh explains how the
+# two hipFile installs are disambiguated.
+#
+# The ROCm fork is pinned to a SHA on a topic branch that publishes no tags;
+# it carries the async engine (hipfile_mode=sync|stream|batch) that upstream
+# fio does not have.  FIO_REF empty skips the whole stage -- /opt/fio is then
+# absent and the image simply has no fio, so the escape hatch costs nothing.
+FROM hipfile AS fio
+
+ARG FIO_GIT_URL=https://github.com/ROCm/fio.git
+ARG FIO_REF=c32261752c88b3f7aadfde4d011a028ae954f869
+
+ENV FIO_PREFIX=/opt/fio
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    if [ -n "${FIO_REF}" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends \
+            libaio-dev libnuma-dev zlib1g-dev pkg-config; \
+    fi
+
+COPY docker/scripts/clone-src.sh docker/scripts/build-fio.sh /tmp/scripts/
+
+RUN mkdir -p /opt/fio /opt/fio-hipfile && \
+    if [ -z "${FIO_REF}" ]; then \
+        echo "FIO_REF empty -- no fio in this image"; \
+    else \
+        SRC_NAME=fio \
+        SRC_GIT_URL="${FIO_GIT_URL}" \
+        SRC_REF="${FIO_REF}" \
+        SRC_DEST=/tmp/fio-src \
+        bash /tmp/scripts/clone-src.sh; \
+    fi
+
+RUN --mount=type=cache,target=/root/.cache,sharing=locked \
+    if [ -n "${FIO_REF}" ]; then \
+        FIO_SRC=/tmp/fio-src bash /tmp/scripts/build-fio.sh && rm -rf /tmp/fio-src; \
+    fi
+
 # ----- 2. MORI (ROCm/mori tag + patches/mori/) -------------------------------
 # FROM base, not FROM ucx: MORI needs neither UCX nor NIXL, so this stage runs
 # concurrently with the UCX build.  It is placed before the nixl stage because
@@ -348,6 +390,7 @@ ARG NIXL_REF
 ARG MORI_REF
 ARG UCX_REF
 ARG HIPFILE_REF
+ARG FIO_REF
 ARG VERSION=
 # NIXL's Python API (nixl._api) does `import torch` at module scope, and MORI's
 # Python-side benchmarks want it too, so a ROCm torch is installed by default.
@@ -368,10 +411,15 @@ LABEL org.opencontainers.image.title="nixl-mori-test" \
       com.amd.nixl.ref="${NIXL_REF}" \
       com.amd.mori.ref="${MORI_REF}" \
       com.amd.ucx.ref="${UCX_REF}" \
-      com.amd.hipfile.ref="${HIPFILE_REF}"
+      com.amd.hipfile.ref="${HIPFILE_REF}" \
+      com.amd.fio.ref="${FIO_REF}"
 
 COPY --from=ucx     /opt/rocnixl-ucx /opt/rocnixl-ucx
 COPY --from=hipfile /opt/hipfile     /opt/hipfile
+# Both are symlink trees or empty when FIO_REF is unset; /opt/fio-hipfile is
+# the prefix fio's rpath points at, so it has to come along with the binary.
+COPY --from=fio     /opt/fio         /opt/fio
+COPY --from=fio     /opt/fio-hipfile /opt/fio-hipfile
 COPY --from=mori /opt/mori        /opt/mori
 COPY --from=nixl /opt/nixl        /opt/nixl
 COPY --from=nixl /opt/nixlbench   /opt/nixlbench
@@ -399,7 +447,8 @@ ENV NIXL_PREFIX=/opt/nixl \
     UCX_PREFIX=/opt/rocnixl-ucx \
     NIXL_PLUGIN_DIR=/opt/nixl/lib/x86_64-linux-gnu/plugins \
     PYTHONPATH=/opt/nixl/lib/python3/dist-packages \
-    PATH=/opt/nixlbench/bin:/opt/hsa-snoop/bin:/opt/rocnixl-ucx/bin:${PATH}
+    FIO_PREFIX=/opt/fio \
+    PATH=/opt/nixlbench/bin:/opt/hsa-snoop/bin:/opt/fio/bin:/opt/rocnixl-ucx/bin:${PATH}
 
 # /opt/mori/lib holds the same libmori_*.so the amd_mori wheel bundles under its
 # package dir.  Both are on the search path, which is fine as long as one
@@ -453,6 +502,22 @@ RUN set -eu; \
         echo "hipFile OK: AIS/AIS_MT link the source-built /opt/hipfile"; \
     else \
         echo "HIPFILE_REF unset -- AIS/AIS_MT link the ROCm-packaged libhipfile"; \
+    fi; \
+    if [ -x /opt/fio/bin/fio ]; then \
+        fio --enghelp 2>&1 | grep -qE "^[[:space:]]*libhipfile[[:space:]]*$" || \
+            { echo "ERROR: fio has no libhipfile ioengine" >&2; exit 1; }; \
+        _fh="$(ldd /opt/fio/bin/fio | awk '/libhipfile/ {print $3}')"; \
+        [ -n "${_fh}" ] || { echo "ERROR: fio does not link libhipfile" >&2; exit 1; }; \
+        if [ -e /opt/hipfile/lib/libhipfile.so ]; then \
+            case "$(readlink -f "${_fh}")" in \
+                /opt/hipfile/*) ;; \
+                *) echo "ERROR: fio resolves libhipfile to $(readlink -f "${_fh}")," \
+                        "not the source-built /opt/hipfile" >&2; exit 1;; \
+            esac; \
+        fi; \
+        echo "fio OK: $(fio --version), hipfile_mode=$(cat /opt/fio/share/fio-hipfile-async.txt)"; \
+    else \
+        echo "FIO_REF unset -- no fio in this image"; \
     fi; \
     if [ "${INSTALL_TORCH}" = "1" ]; then \
         python3 -c "import nixl; print('nixl._api OK', nixl.__file__)"; \

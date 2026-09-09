@@ -29,6 +29,14 @@ UCX_REF      ?= v1.22.0
 # back to the packaged libhipfile; the AIS backend then drops out of the build.
 HIPFILE_GIT_URL ?= https://github.com/ROCm/hipFile.git
 HIPFILE_REF     ?= bd0bc2330a1573223209b9899055d1d6188b9113
+# fio, for a hipFile number with no NIXL in it.  The ROCm fork rather than
+# axboe/fio: its libhipfile engine takes hipfile_mode=sync|stream|batch, which
+# is the same three submission paths AIS_MT, AIS and hipFile's stubbed batch
+# API use, so it can say whether a plateau is NIXL's or the library's.  The
+# branch publishes no tags, hence a SHA (head of zbyrne/async_hipfile_engine as
+# of 2026-09-02).  Empty leaves fio out of the image entirely.
+FIO_GIT_URL ?= https://github.com/ROCm/fio.git
+FIO_REF     ?= c32261752c88b3f7aadfde4d011a028ae954f869
 
 override VERSION := $(strip $(file <$(REPO_ROOT)/VERSION))
 
@@ -39,7 +47,7 @@ DOCKERFILE := $(REPO_ROOT)/docker/Dockerfile
 # The tag encodes every component version, so two builds that differ in any pin
 # cannot collide.  Command-line overrides of the pins above are exported into
 # the tag script, which otherwise falls back to the Dockerfile ARG defaults.
-_TAG_ARGS := ROCM_VERSION NIXL_REF MORI_REF HIPFILE_REF
+_TAG_ARGS := ROCM_VERSION NIXL_REF MORI_REF HIPFILE_REF FIO_REF
 _single_quote := '
 _shell_quote = '$(subst $(_single_quote),'"'"',$(1))'
 _TAG_ENV := $(foreach _a,$(_TAG_ARGS),$(if $(filter undefined,$(origin $(_a))),,$(_a)=$(call _shell_quote,$(value $(_a)))))
@@ -87,6 +95,8 @@ _BUILD_ARGS := \
 	--build-arg UCX_FAST=$(UCX_FAST) \
 	--build-arg HIPFILE_GIT_URL=$(HIPFILE_GIT_URL) \
 	--build-arg HIPFILE_REF=$(HIPFILE_REF) \
+	--build-arg FIO_GIT_URL=$(FIO_GIT_URL) \
+	--build-arg FIO_REF=$(FIO_REF) \
 	$(if $(UCX_DEBUG_LOG),--build-arg UCX_DEBUG_LOG=$(UCX_DEBUG_LOG),) \
 	--build-arg VERSION=$(VERSION) \
 	--build-arg INSTALL_TORCH=$(INSTALL_TORCH) \
@@ -137,7 +147,8 @@ DIST := $(REPO_ROOT)/.slurm/run-build.sh
 
 .PHONY: help build build-nixl build-mori wheels shell test test-nogpu \
         nixlbench bench bench-nvme bench-compare storage-sweep \
-        snoop-sweep snoop-up snoop-down dist-build dist-load \
+        snoop-sweep snoop-up snoop-down monitor-up monitor-down snoop-dump \
+        fio-sweep dist-build dist-load \
         dist-build-here dist-bench dist-bench-2node \
         patch-check patch-list print-tag print-config clean clean-images
 
@@ -183,6 +194,16 @@ help:
 	@echo "                       NVMe via NIXL's POSIX backend, O_DIRECT"
 	@echo "  make storage-sweep SWEEP_SET=quick|rw|threads|drives|wide|readscale|direct|full"
 	@echo "                       AIS vs AIS_MT vs POSIX across the node's NVMe drives -> logs/*.csv"
+	@echo "  make fio-sweep FIO_SET=quick|modes|bs|depth|drives|full"
+	@echo "                       Same drives via fio's libhipfile engine — NIXL-free"
+	@echo "                       ground truth for the AIS numbers -> logs/*.csv"
+	@echo ""
+	@echo "Monitoring (docker/compose/bench-stack.yml):"
+	@echo "  make snoop-up        hsa-snoop collector only, left running"
+	@echo "  make monitor-up      + Prometheus, Grafana and the host exporters"
+	@echo "  make snoop-dump [RUN_TAG=... PROM_START=<epoch> PROM_END=<epoch>]"
+	@echo "                       Prometheus -> CSV under logs/ (the TSDB is scratch)"
+	@echo "  make monitor-down / make snoop-down"
 	@echo ""
 	@echo "Introspection:"
 	@echo "  make print-tag       Print the derived image tag"
@@ -196,6 +217,7 @@ help:
 	@echo "  MORI_REF=$(MORI_REF)   ($(MORI_GIT_URL))"
 	@echo "  UCX_REF=$(UCX_REF)     ($(UCX_GIT_URL))"
 	@echo "  HIPFILE_REF=$(HIPFILE_REF) ($(HIPFILE_GIT_URL))"
+	@echo "  FIO_REF=$(FIO_REF) ($(FIO_GIT_URL))"
 	@echo ""
 	@echo "Build knobs:"
 	@echo "  ROCM_ARCH=$(ROCM_ARCH)   GPU arch baked into MORI (auto-detected)"
@@ -330,6 +352,19 @@ storage-sweep:                 # AIS vs AIS_MT vs POSIX across drives/threads/op
 		$(if $(TIMEOUT),-e TIMEOUT=$(TIMEOUT),) \
 		"$(IMAGE_REF)" bash /work/docker/scripts/storage-sweep.sh
 
+# The same drives, through fio's libhipfile engine instead of NIXL -- the
+# control for every AIS number storage-sweep produces.  See fio-sweep.sh.
+FIO_SET ?= quick
+FIO_OUT ?= /work/logs/fio-sweep.csv
+fio-sweep:                     # hipFile via fio: NIXL-free ground truth
+	@mkdir -p logs
+	docker run $(DOCKER_RUN_FLAGS) -v /mnt:/mnt \
+		-e FIO_SET=$(FIO_SET) -e FIO_OUT=$(FIO_OUT) \
+		$(if $(FIO_SIZE),-e FIO_SIZE=$(FIO_SIZE),) \
+		$(if $(FIO_RUNTIME),-e FIO_RUNTIME=$(FIO_RUNTIME),) \
+		$(if $(TIMEOUT),-e TIMEOUT=$(TIMEOUT),) \
+		"$(IMAGE_REF)" bash /work/docker/scripts/fio-sweep.sh
+
 # The same sweeps, but with an hsa-snoop sidecar tracing underneath all of them
 # for the whole session.  HSA_SNOOP=1 on `make bench` cannot do this: it starts
 # a collector inside the benchmark container, and a sweep is forty-odd
@@ -347,6 +382,31 @@ snoop-up:                      # bring up just the collector, leave it running
 
 snoop-down:
 	IMAGE_REF="$(IMAGE_REF)" docker compose -f docker/compose/bench-stack.yml down --remove-orphans
+
+# Prometheus + Grafana over the collector, NIXL's own exporter and (with
+# MONITOR_PROFILES including `exporters`) node-exporter.  Separate from
+# snoop-up because the collector is what a sweep needs and this is what a human
+# watching one needs.
+MONITOR_PROFILES ?= monitoring exporters
+monitor-up:                    # prometheus + grafana + exporters (http://localhost:3000)
+	IMAGE_REF="$(IMAGE_REF)" docker compose -f docker/compose/bench-stack.yml \
+		$(foreach p,$(MONITOR_PROFILES),--profile $(p)) up -d
+	@echo "grafana:    http://localhost:$${GRAFANA_PORT:-3000}  (anonymous viewer)"
+	@echo "prometheus: http://localhost:$${PROM_PORT:-9090}"
+
+monitor-down:
+	IMAGE_REF="$(IMAGE_REF)" docker compose -f docker/compose/bench-stack.yml \
+		$(foreach p,$(MONITOR_PROFILES),--profile $(p)) down --remove-orphans
+
+# The TSDB lives in a docker volume on a node Slurm is going to take back, so
+# this is the step that turns a monitored run into something that still exists
+# tomorrow.  RUN_TAG picks the output directory; PROM_START/PROM_END narrow the
+# window (epoch seconds) and default to the last hour.
+snoop-dump:                    # prometheus TSDB -> CSV under logs/
+	@mkdir -p logs
+	PROM_START="$(PROM_START)" PROM_END="$(PROM_END)" PROM_STEP="$(PROM_STEP)" \
+		bash $(REPO_ROOT)/docker/scripts/prom-dump.sh \
+		logs/$(or $(RUN_TAG),prom-$(shell date +%Y%m%d-%H%M%S))
 
 bench-compare:                 # UCX then MORI_IO, same settings, back to back
 	@$(MAKE) --no-print-directory bench BACKEND=UCX      SEG_TYPE=$(SEG_TYPE) || true
@@ -405,6 +465,7 @@ print-config:
 	@echo "MORI           = $(MORI_GIT_URL) @ $(MORI_REF)"
 	@echo "UCX            = $(UCX_GIT_URL) @ $(UCX_REF)"
 	@echo "hipFile        = $(HIPFILE_GIT_URL) @ $(or $(HIPFILE_REF),<ROCm-packaged>)"
+	@echo "fio            = $(FIO_GIT_URL) @ $(or $(FIO_REF),<not built>)"
 	@echo "BUILD_JOBS     = $(BUILD_JOBS)"
 	@echo "TLS_CERT       = $(TLS_CERT)"
 

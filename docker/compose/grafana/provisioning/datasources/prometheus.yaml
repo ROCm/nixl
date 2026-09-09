@@ -1,0 +1,17 @@
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+#
+# localhost, not a container name: the whole stack is on the host network.
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://localhost:9090
+    isDefault: true
+    jsonData:
+      # Matches the 2s scrape interval, so rate() windows in the dashboard are
+      # not silently widened to Grafana's 15s default.
+      timeInterval: 2s

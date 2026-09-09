@@ -1,0 +1,187 @@
+{
+  "uid": "nixl-storage",
+  "title": "NIXL storage backends",
+  "description": "AIS/AIS_MT/POSIX sweeps: kernel-side AIS traffic from hsa-snoop, NVMe from node-exporter, and NIXL's own exporter. Panels are per-PCIe-endpoint because the question these sweeps keep asking is whether a plateau is one drive or all of them.",
+  "tags": ["nixl", "ais", "hipfile"],
+  "timezone": "browser",
+  "editable": true,
+  "schemaVersion": 39,
+  "refresh": "5s",
+  "time": { "from": "now-30m", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "rate_window",
+        "label": "Rate window",
+        "type": "custom",
+        "query": "10s,30s,1m,5m",
+        "current": { "text": "10s", "value": "10s" },
+        "options": [
+          { "text": "10s", "value": "10s", "selected": true },
+          { "text": "30s", "value": "30s", "selected": false },
+          { "text": "1m", "value": "1m", "selected": false },
+          { "text": "5m", "value": "5m", "selected": false }
+        ]
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Which target is up",
+      "description": "nixlbench owns :19090 only while it runs, so the nixl row is a free record of when each sweep point started and ended -- the join key between this dashboard and a row of storage-sweep.csv.",
+      "gridPos": { "h": 5, "w": 24, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0, "max": 1,
+          "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "fillOpacity": 25, "lineWidth": 1 }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "refId": "A", "expr": "up", "legendFormat": "{{job}}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "AIS write throughput by PCIe endpoint (GB/s)",
+      "description": "hsa-snoop's kprobe on the AIS ioctl path, so this is what the kernel saw, not what the benchmark claims. A single busy pcie_id against seven idle ones means the sweep is not spreading; all seven busy and still slow means the limit is upstream of the drives.",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 5 },
+      "fieldConfig": {
+        "defaults": { "unit": "GBs", "min": 0, "custom": { "fillOpacity": 10, "lineWidth": 1 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (pcie_id) (rate(ais_tx_bytes_total[$rate_window])) / 1e9",
+          "legendFormat": "{{pcie_id}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(ais_tx_bytes_total[$rate_window])) / 1e9",
+          "legendFormat": "total"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "AIS read throughput by PCIe endpoint (GB/s)",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 5 },
+      "fieldConfig": {
+        "defaults": { "unit": "GBs", "min": 0, "custom": { "fillOpacity": 10, "lineWidth": 1 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (pcie_id) (rate(ais_rx_bytes_total[$rate_window])) / 1e9",
+          "legendFormat": "{{pcie_id}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(ais_rx_bytes_total[$rate_window])) / 1e9",
+          "legendFormat": "total"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "AIS ops/s and mean I/O size",
+      "description": "Throughput divided two ways. A backend that is slow at constant I/O size is submitting too few operations; one that is slow at constant ops/s is being handed smaller I/Os than it asked for.",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 14 },
+      "fieldConfig": { "defaults": { "min": 0, "custom": { "fillOpacity": 0, "lineWidth": 1 } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(ais_tx_ops_total[$rate_window]))",
+          "legendFormat": "write ops/s"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(ais_rx_ops_total[$rate_window]))",
+          "legendFormat": "read ops/s"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(ais_tx_io_size_bytes_sum[$rate_window])) / clamp_min(sum(rate(ais_tx_io_size_bytes_count[$rate_window])), 1)",
+          "legendFormat": "mean write I/O (B)"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "AIS latency p50/p99 (s)",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 14 },
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0, "custom": { "fillOpacity": 0, "lineWidth": 1 } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(ais_tx_latency_seconds_bucket[$rate_window])))",
+          "legendFormat": "write p50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(ais_tx_latency_seconds_bucket[$rate_window])))",
+          "legendFormat": "write p99"
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(ais_rx_latency_seconds_bucket[$rate_window])))",
+          "legendFormat": "read p99"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "NVMe block-layer throughput by device (GB/s)",
+      "description": "node-exporter's diskstats, i.e. the independent witness. Requires --profile exporters. When this disagrees with the AIS panel above, believe this one: a GPU-direct path that has quietly fallen back to buffered I/O still shows bytes here but stops showing them there.",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 23 },
+      "fieldConfig": {
+        "defaults": { "unit": "GBs", "min": 0, "custom": { "fillOpacity": 10, "lineWidth": 1 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (device) (rate(node_disk_written_bytes_total{device=~\"nvme.*\"}[$rate_window])) / 1e9",
+          "legendFormat": "{{device}} write"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (device) (rate(node_disk_read_bytes_total{device=~\"nvme.*\"}[$rate_window])) / 1e9",
+          "legendFormat": "{{device}} read"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "NIXL agent telemetry",
+      "description": "From NIXL's own prometheus exporter. Measured on v1.4.1, and NOT what the _total suffix implies: agent_tx_bytes_total is not cumulative. It climbs to a large value and falls back to zero repeatedly within a single run (0 -> 7.17e9 -> 0 -> 1.78e9 -> 0 over twenty seconds), so it is plotted raw rather than through rate() -- rate() treats every fall as a counter reset and discards it, which renders a 10 GB counter as a flat line. Expect a sawtooth. The magnitudes are consistent with a per-scrape-interval delta but the mechanism is not confirmed, so do not sum these to get a total; use the AIS panels above for throughput. agent_memory_registered_total behaves normally.",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 32 },
+      "fieldConfig": { "defaults": { "min": 0, "custom": { "fillOpacity": 0, "lineWidth": 1 } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "agent_memory_registered_total",
+          "legendFormat": "registered total (B) {{agent_name}}"
+        },
+        {
+          "refId": "B",
+          "expr": "agent_tx_bytes_total",
+          "legendFormat": "tx bytes (raw, resets) {{agent_name}}"
+        },
+        {
+          "refId": "C",
+          "expr": "agent_tx_requests_num_total",
+          "legendFormat": "tx requests (raw, resets) {{agent_name}}"
+        },
+        {
+          "refId": "D",
+          "expr": "sum(agent_errors_total) by (status) > 0",
+          "legendFormat": "errors {{status}}"
+        }
+      ]
+    }
+  ]
+}

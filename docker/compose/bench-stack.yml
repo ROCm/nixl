@@ -24,8 +24,32 @@
 #   docker compose -f docker/compose/bench-stack.yml run --rm sweep
 #   docker compose -f docker/compose/bench-stack.yml down
 #
+# Add --profile monitoring for a Prometheus + Grafana pair that scrapes the
+# collector and NIXL's own exporter, and --profile exporters for node-exporter
+# and the AMD GPU exporter alongside them:
+#
+#   docker compose -f docker/compose/bench-stack.yml \
+#       --profile monitoring --profile exporters up -d
+#   xdg-open http://localhost:3000        # anonymous viewer, no login
+#   make snoop-dump RUN_TAG=...           # TSDB -> CSV under logs/
+#
+# The default (no profile) is still just the collector and the sweep, because
+# the TSV scraper is enough for an unattended run and Prometheus is another
+# thing that can fail at 3am.
+#
 # IMAGE_REF must be set (or in .env); there is no default, because silently
 # falling back to :latest is how you benchmark yesterday's build.
+#
+# Note every variable below uses `:-` and never `:?`.  Compose interpolates the
+# whole file before it filters by profile, so a mandatory variable inside a
+# profiled service aborts runs that never wanted that service.
+#
+# IMAGE_REF is the one `:?`, and it is a considered trade rather than an
+# oversight: an unset IMAGE_REF is the single most expensive mistake available
+# here (a whole night spent benchmarking whichever image happened to be
+# loaded), so it is worth an error even though the price is that
+# `--profile monitoring up` needs IMAGE_REF set too, for a service it is not
+# starting.  `IMAGE_REF=$(make -s print-tag) docker compose ...` satisfies it.
 
 services:
   hsa-snoop:
@@ -70,6 +94,11 @@ services:
 
   sweep:
     image: ${IMAGE_REF:?set IMAGE_REF, e.g. via make print-tag}
+    # Behind a profile purely so that a bare `up -d`, or an `up -d` for the
+    # monitoring profile, does not silently start a benchmark -- which it did
+    # the first time the monitoring stack was brought up.  `docker compose run
+    # --rm sweep` still works unchanged: naming a service enables its profile.
+    profiles: ["sweep"]
     # Mirrors DOCKER_RUN_FLAGS in the Makefile.  IPC_LOCK plus an unlimited
     # memlock ulimit are both required: docker defaults memlock to 64 KiB, and
     # a GPUDirect registration of a multi-GiB buffer then fails with a bare
@@ -100,6 +129,17 @@ services:
       SWEEP_SET: ${SWEEP_SET:-quick}
       SWEEP_OUT: ${SWEEP_OUT:-/work/logs/storage-sweep.csv}
       SWEEP_MOUNTS: ${SWEEP_MOUNTS:-/mnt/nixl-nvme-*}
+      # NIXL's own exporter, which the image already carries as
+      # libtelemetry_exporter_prometheus.so.  Harmless when nothing scrapes it
+      # -- it is a thread and a listening socket -- so it is on by default
+      # rather than gated behind the monitoring profile, which keeps the
+      # benchmark process identical whether or not Prometheus is running.
+      # Each nixlbench invocation owns :19090 for its lifetime, so the target
+      # flaps up and down across a sweep; that is the intended behaviour and
+      # `up{job="nixl"}` is a free record of when each point ran.
+      NIXL_TELEMETRY_ENABLE: ${NIXL_TELEMETRY_ENABLE:-y}
+      NIXL_TELEMETRY_EXPORTER: ${NIXL_TELEMETRY_EXPORTER:-prometheus}
+      NIXL_TELEMETRY_PROMETHEUS_PORT: ${NIXL_TELEMETRY_PORT:-19090}
       # Deliberately NOT set: HSA_SNOOP.  The sidecar is already collecting;
       # a second collector inside the sweep container would attach duplicate
       # kprobes to the same functions and double-count every event.
@@ -113,3 +153,98 @@ services:
     # It is run out of the bind-mounted checkout, which is also what makes it
     # editable between sweep sets without rebuilding a 34 GB image.
     command: ["bash", "/work/docker/scripts/storage-sweep.sh"]
+
+  # --- monitoring profile ----------------------------------------------------
+  #
+  # The TSV scraper (snoop-sample.sh) and this are not redundant.  The scraper
+  # samples one endpoint on a fixed cadence into a file that survives the node
+  # going away, which is what an unattended overnight run needs.  Prometheus
+  # joins several endpoints on one timeline and can be asked questions after
+  # the fact -- "what were the NVMe doing during the AIS row that plateaued" is
+  # one PromQL query here and a manual join of three files otherwise.
+  prometheus:
+    image: ${PROM_IMAGE:-prom/prometheus:v3.13.2}
+    profiles: ["monitoring"]
+    network_mode: host
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # A named volume, not a bind mount under the checkout.  The checkout is
+      # on NFS; a Prometheus TSDB on NFS is single-writer at best and corrupts
+      # at worst, and the artefact anyone actually wants out of a run is a CSV
+      # (see `make snoop-dump`), not a TSDB directory.
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROM_RETENTION:-15d}
+      - --web.enable-lifecycle
+      - --web.listen-address=:${PROM_PORT:-9090}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:${PROM_PORT:-9090}/-/ready >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+  grafana:
+    image: ${GRAFANA_IMAGE:-grafana/grafana:11.5.2}
+    profiles: ["monitoring"]
+    network_mode: host
+    environment:
+      # Anonymous viewer with the login form off.  These are compute nodes on
+      # an internal network, reached through a port-forward, and being asked
+      # for a password by a dashboard that exists for the duration of one
+      # benchmark is pure friction.  Do not copy this to anything durable.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+      GF_SERVER_HTTP_PORT: ${GRAFANA_PORT:-3000}
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # --- exporters profile -----------------------------------------------------
+  #
+  # Separate from `monitoring` because they are the expensive half: both read
+  # the whole host and neither is needed to answer the AIS questions.  Turn
+  # them on when a storage number needs corroborating from outside NIXL.
+  node-exporter:
+    image: ${NODE_EXPORTER_IMAGE:-quay.io/prometheus/node-exporter:v1.12.1}
+    profiles: ["exporters"]
+    network_mode: host
+    pid: host
+    volumes:
+      - /:/host:ro,rslave
+    command:
+      - --path.rootfs=/host
+      - --web.listen-address=:${NODE_EXPORTER_PORT:-9100}
+      # diskstats + nvme are the point: node_disk_written_bytes_total per NVMe
+      # is the independent witness against a backend's own throughput claim.
+      - --collector.diskstats
+      - --collector.nvme
+      - --collector.infiniband
+    restart: unless-stopped
+
+  amdgpu-exporter:
+    image: ${AMDGPU_EXPORTER_IMAGE:-rocm/device-metrics-exporter:v1.5.1}
+    profiles: ["exporters"]
+    network_mode: host
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    volumes:
+      - /sys:/sys:ro
+    restart: unless-stopped
+
+volumes:
+  prometheus-data:
+  grafana-data:
