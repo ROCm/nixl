@@ -909,10 +909,10 @@ index 0000000..57e7f5d
 +#endif
 diff --git a/src/plugins/rocm_ais/meson.build b/src/plugins/rocm_ais/meson.build
 new file mode 100644
-index 0000000..4494d27
+index 0000000..716d467
 --- /dev/null
 +++ b/src/plugins/rocm_ais/meson.build
-@@ -0,0 +1,95 @@
+@@ -0,0 +1,103 @@
 +# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 +#
 +# SPDX-License-Identifier: Apache-2.0
@@ -968,9 +968,17 @@ index 0000000..4494d27
 +# AIS_MT only needs hipFileRead/Write, which every hipFile has.  This backend
 +# needs the stream API, which older ones do not export -- skip rather than fail
 +# the whole build, the same way an absent hipFile does above.
++#
++# -D__HIP_PLATFORM_AMD__ has to be repeated here even though the root
++# meson.build already adds it: add_project_arguments does not reach compiler
++# checks.  hipfile.h includes hip/hip_runtime_api.h, so without the define and
++# without hip_dep's include path the test program does not preprocess at all --
++# the check then fails against every hipFile, new or old, and quietly drops the
++# plugin from a build that was asked for it.
 +cc_ais = meson.get_compiler('cpp')
 +if not cc_ais.has_header_symbol('hipfile.h', 'hipFileReadAsync',
-+                                args: ['-I' + ais_hipfile_inc])
++                                args: ['-D__HIP_PLATFORM_AMD__'],
++                                dependencies: [hip_dep, hipfile_dep])
 +    message('hipFile at ' + ais_hipfile_inc + ' has no async API - skipping the AIS plugin')
 +    subdir_done()
 +endif

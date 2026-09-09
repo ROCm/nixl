@@ -69,12 +69,12 @@ _extra=(${EXTRA_ARGS})
 # Storage backends address a file, not a peer's memory.  nixlbench needs
 # --filepath for them and fails with a bare "No such file or directory" if the
 # directory does not exist, so check it here where the message can be useful.
-# AIS_MT belongs here: it is hipFile-backed storage, the ROCm counterpart of
-# GDS_MT.  Leaving it out meant --filepath was silently dropped and nixlbench
-# created its test file in the container working directory instead of on the
-# drive under test -- so the run measured the overlay filesystem and looked
-# like a slow NVMe result.
-_STORAGE_BACKENDS=" POSIX GDS GDS_MT AIS_MT HF3FS OBJ GUSLI AZURE_BLOB INFINIA "
+# AIS and AIS_MT belong here: both are hipFile-backed storage, the ROCm
+# counterparts of GDS and GDS_MT.  Leaving AIS_MT out meant --filepath was
+# silently dropped and nixlbench created its test file in the container working
+# directory instead of on the drive under test -- so the run measured the
+# overlay filesystem and looked like a slow NVMe result.
+_STORAGE_BACKENDS=" POSIX GDS GDS_MT AIS AIS_MT HF3FS OBJ GUSLI AZURE_BLOB INFINIA "
 if [[ "${_STORAGE_BACKENDS}" == *" ${BACKEND} "* ]]; then
 	if [[ -z "${FILEPATH:-}" ]]; then
 		echo "ERROR: ${BACKEND} is a storage backend -- set FILEPATH to a writable directory" >&2

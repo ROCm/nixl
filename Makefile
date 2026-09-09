@@ -181,7 +181,7 @@ help:
 	@echo "  make bench-nvme [NVME_PATH=/mnt/nixl-nvme-0/... POSIX_API=AIO|URING]"
 	@echo "                       NVMe via NIXL's POSIX backend, O_DIRECT"
 	@echo "  make storage-sweep SWEEP_SET=quick|rw|threads|drives|wide|readscale|direct|full"
-	@echo "                       AIS_MT vs POSIX across the node's NVMe drives -> logs/*.csv"
+	@echo "                       AIS vs AIS_MT vs POSIX across the node's NVMe drives -> logs/*.csv"
 	@echo ""
 	@echo "Introspection:"
 	@echo "  make print-tag       Print the derived image tag"
@@ -321,7 +321,7 @@ bench-nvme:
 # across sixteen block devices.
 SWEEP_SET ?= quick
 SWEEP_OUT ?= /work/logs/storage-sweep-$(SWEEP_SET).csv
-storage-sweep:                 # AIS_MT vs POSIX across drives/threads/ops
+storage-sweep:                 # AIS vs AIS_MT vs POSIX across drives/threads/ops
 	@mkdir -p logs
 	docker run $(DOCKER_RUN_FLAGS) -v /mnt:/mnt \
 		-e SWEEP_SET=$(SWEEP_SET) -e SWEEP_OUT=$(SWEEP_OUT) \

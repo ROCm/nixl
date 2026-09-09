@@ -16,9 +16,11 @@
 #   pins a commit on it.  A SHA, not the branch head: two builds of the "same"
 #   image must not differ.
 #
-#   What we want from develop is the batch submission path (hipFileBatchIOSetUp
-#   / Submit / GetStatus / Cancel / Destroy) implemented for the AMD backend in
-#   src/amd_detail/batch/.  The AIS plugin is built on it.
+#   What we want from develop is the asynchronous submission path --
+#   hipFileReadAsync / hipFileWriteAsync over a registered HIP stream, reaching
+#   Backend::async_io in src/amd_detail/backend/.  The AIS plugin is built on
+#   it.  NOT the batch path: as of bd0bc233 that is a stub whose submit only
+#   records the ops, with GetStatus/Cancel/Destroy throwing "Not Implemented".
 #
 # hipFile is pure userspace over amdgpu/DRM -- there is no kernel module in the
 # repo -- so overlaying a newer library does not have to be matched against
@@ -42,8 +44,14 @@ export ROCM_PATH
 cd "${HIPFILE_SRC}"
 rm -rf build
 
+# AIS_CXX_STANDARD defaults to 17 upstream, and at 17 the tree does not
+# compile: src/amd_detail/batch/batch.cpp calls std::bit_cast, which libstdc++
+# only declares under C++20, so the default build dies with "'bit_cast' is not
+# a member of 'std'".  20 is an offered value (the cache property lists 17 and
+# 20), and it is what NIXL is built at anyway.
 cmake -S . -B build -G Ninja \
 	-DCMAKE_BUILD_TYPE=RelWithDebInfo \
+	-DAIS_CXX_STANDARD=20 \
 	-DCMAKE_INSTALL_PREFIX="${HIPFILE_PREFIX}" \
 	-DCMAKE_PREFIX_PATH="${ROCM_PATH}" \
 	-DCMAKE_HIP_COMPILER="${ROCM_PATH}/bin/amdclang++" \
@@ -64,21 +72,21 @@ if [[ -f tools/ais-check/ais-check ]]; then
 	install -Dm755 tools/ais-check/ais-check "${HIPFILE_PREFIX}/bin/ais-check"
 fi
 
-# A hipFile without the batch entry points is the one outcome that makes this
+# A hipFile without the async entry points is the one outcome that makes this
 # whole stage pointless -- the AIS plugin's meson gate would skip the plugin and
 # the build would "succeed" with the backend silently absent.  Fail here.
 if [[ ! -e "${HIPFILE_PREFIX}/lib/libhipfile.so" ]]; then
 	echo "ERROR: ${HIPFILE_PREFIX}/lib/libhipfile.so not built" >&2
 	exit 1
 fi
-for sym in hipFileBatchIOSetUp hipFileBatchIOSubmit hipFileBatchIOGetStatus \
-	hipFileBatchIOCancel hipFileBatchIODestroy; do
+for sym in hipFileReadAsync hipFileWriteAsync \
+	hipFileStreamRegister hipFileStreamDeregister; do
 	if ! nm -D --defined-only "${HIPFILE_PREFIX}/lib/libhipfile.so" | grep -q " ${sym}$"; then
-		echo "ERROR: ${sym} is not defined in the built libhipfile -- HIPFILE_REF=${HIPFILE_REF:-?} predates the AMD batch backend" >&2
+		echo "ERROR: ${sym} is not defined in the built libhipfile -- HIPFILE_REF=${HIPFILE_REF:-?} predates the AMD async backend" >&2
 		exit 1
 	fi
 done
 
-echo "PASS: hipFile built with the batch API -> ${HIPFILE_PREFIX}"
+echo "PASS: hipFile built with the async API -> ${HIPFILE_PREFIX}"
 grep -hE '#define HIPFILE_VERSION_(MAJOR|MINOR|PATCH)' \
 	"${HIPFILE_PREFIX}/include/hipfile.h" || true

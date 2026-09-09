@@ -57,7 +57,7 @@ MESON_ARGS=(
 # them, so an unpatched pristine tag still configures.
 #
 # Prefer the source-built hipFile staged at HIPFILE_PREFIX by the hipfile stage
-# over the one the ROCm base image packages: the AIS plugin needs the AMD batch
+# over the one the ROCm base image packages: the AIS plugin needs the AMD async
 # backend, which the packaged copy predates.  The directory is always present
 # but is empty when HIPFILE_REF was unset, hence the test on the library rather
 # than on the directory.
