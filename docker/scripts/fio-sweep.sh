@@ -18,11 +18,13 @@
 #   hipfile_mode=stream  hipFileReadAsync/hipFileWriteAsync  <-> AIS
 #   hipfile_mode=batch   hipFileBatchIOSubmit/GetStatus      <-> (no plugin)
 #
-# `batch` is EXPECTED TO FAIL: hipFile's batch backend accepts submissions and
-# performs no I/O, and GetStatus returns "Not Implemented".  It is in the sweep
-# anyway, as a regression detector -- the day it starts passing is the day the
-# batch plugin from the original plan becomes worth writing, and nobody is going
-# to notice that by re-reading a CHANGELOG.
+# `batch` used to be expected to fail -- upstream hipFile accepts a submission,
+# performs no I/O, and returns "Not Implemented" from GetStatus.
+# patches/hipfile/01-hipfile-batch-worker-pool.patch implements it, so batch is
+# now a real measurement.  It is the interesting one: `stream` is capped near
+# 5 GB/s by HIP servicing every host function from a single thread per process
+# (docker/scripts/hostfunc-serial.hip.cpp), and batch is the only hipFile
+# submission API that is not subject to that cap.
 #
 # Runs INSIDE the container (fio is at /opt/fio/bin/fio, linked against the
 # source-built /opt/hipfile, same library the AIS plugins use).
@@ -89,7 +91,6 @@ fi
 
 npoints=0
 nfail=0
-nexpected_fail=0
 
 run_point() {
 	local label="$1" mode="$2" rw="$3" jobs="$4" ndirs="$5" bs="$6" depth="$7"
@@ -178,19 +179,16 @@ run_point() {
 		mkdir -p /work/logs/fio-fail
 		local logname="/work/logs/fio-fail/${label}-${mode}-${rw}-j${jobs}-d${ndirs}-${bs}-q${depth}.log"
 		cp "${out_t}" "${logname}"
+		echo "    FAILED (rc=${rc}, no parseable JSON) -> ${logname}"
 		if [[ "${mode}" == "batch" ]]; then
-			# The documented state of hipFile's batch backend, not a bug
-			# here.  Recorded as a row so the CSV shows it was attempted.
-			echo "    EXPECTED FAIL (hipFile batch is a stub; rc=${rc})"
-			printf '%s,fio,%s,%s,%s,%s,1,,%s,,,,,%s,%s,batch-stub\n' \
-				"${label}" "${mode}" "${rw^^}" "${jobs}" "${ndirs}" \
-				"${depth}" "${t0}" "${t1}" >> "${FIO_OUT}"
-			nexpected_fail=$((nexpected_fail + 1))
-		else
-			echo "    FAILED (rc=${rc}, no parseable JSON) -> ${logname}"
-			sed -n '1,12p' "${out_t}" | sed 's/^/      | /'
-			nfail=$((nfail + 1))
+			# Not tolerated any more: with patches/hipfile applied, batch
+			# works, so a failure here means the patch did not reach this
+			# image (or regressed) rather than "upstream is a stub".
+			echo "      batch is implemented by patches/hipfile -- check that" \
+				"/opt/hipfile is the source-built one"
 		fi
+		sed -n '1,12p' "${out_t}" | sed 's/^/      | /'
+		nfail=$((nfail + 1))
 		rm -f "${out_t}"
 		return 1
 	fi
@@ -214,12 +212,15 @@ case "${FIO_SET}" in
 		run_point quick batch write 1 1 1m 16
 		;;
 
-	modes) # the headline comparison: sync vs stream at the shape the AIS
-		# sweeps use, on every drive at once.  If stream tops out here
-		# where AIS tops out in nixlbench, the ceiling is hipFile's.
+	modes) # the headline comparison: sync vs stream vs batch at the shape
+		# the AIS sweeps use, on every drive at once.  If stream tops out
+		# here where AIS tops out in nixlbench, the ceiling is hipFile's
+		# -- and batch says whether that ceiling is the submission API's
+		# or the drives'.
 		for rw in write read; do
 			run_point modes sync "${rw}" 8 "${NDRIVES}" 1m 1
 			run_point modes stream "${rw}" 8 "${NDRIVES}" 1m 16
+			run_point modes batch "${rw}" 8 "${NDRIVES}" 1m 16
 		done
 		;;
 
@@ -227,14 +228,18 @@ case "${FIO_SET}" in
 		for bs in 4k 64k 256k 1m 4m 16m; do
 			run_point bs sync write 8 "${NDRIVES}" "${bs}" 1
 			run_point bs stream write 8 "${NDRIVES}" "${bs}" 16
+			run_point bs batch write 8 "${NDRIVES}" "${bs}" 16
 		done
 		;;
 
-	depth) # stream mode only: sync has no queue.  This is the knob that
-		# corresponds to the AIS plugin's stream pool size, and the one
-		# most likely to explain a plateau.
+	depth) # stream and batch only: sync has no queue.  This is the knob
+		# that corresponds to the AIS plugin's stream pool size, and the
+		# one most likely to explain a plateau.  Stream is flat here --
+		# HIP serialises its host functions, so depth buys nothing --
+		# which is exactly the contrast batch is in the sweep for.
 		for qd in 1 2 4 8 16 32 64; do
 			run_point depth stream write 8 "${NDRIVES}" 1m "${qd}"
+			run_point depth batch write 8 "${NDRIVES}" 1m "${qd}"
 		done
 		;;
 
@@ -243,6 +248,7 @@ case "${FIO_SET}" in
 			local_jobs=$((d > 8 ? d : 8))
 			run_point drives sync write "${local_jobs}" "${d}" 1m 1
 			run_point drives stream write "${local_jobs}" "${d}" 1m 16
+			run_point drives batch write "${local_jobs}" "${d}" 1m 16
 		done
 		;;
 
@@ -252,6 +258,7 @@ case "${FIO_SET}" in
 				jobs=$((d > 8 ? d : 8))
 				run_point full sync "${rw}" "${jobs}" "${d}" 1m 1
 				run_point full stream "${rw}" "${jobs}" "${d}" 1m 16
+				run_point full batch "${rw}" "${jobs}" "${d}" 1m 16
 			done
 		done
 		;;
@@ -262,5 +269,5 @@ case "${FIO_SET}" in
 esac
 
 echo
-echo "=== fio-sweep ${FIO_SET}: ${npoints} ok, ${nfail} failed, ${nexpected_fail} expected-fail -> ${FIO_OUT} ==="
+echo "=== fio-sweep ${FIO_SET}: ${npoints} ok, ${nfail} failed -> ${FIO_OUT} ==="
 [[ "${nfail}" -eq 0 ]]

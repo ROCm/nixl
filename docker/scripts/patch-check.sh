@@ -11,8 +11,8 @@
 # Run it after bumping NIXL_REF/MORI_REF, or after adding a patch, to find
 # rebases in seconds instead of after a 30-minute image build.
 #
-#   make patch-check                 # both components
-#   make patch-check COMPONENT=nixl  # just one (ucx, nixl or mori)
+#   make patch-check                 # every component
+#   make patch-check COMPONENT=nixl  # just one (ucx, hipfile, nixl or mori)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -90,6 +90,17 @@ check_one() {
 
 if [[ "${COMPONENT}" == "all" || "${COMPONENT}" == "ucx" ]]; then
 	check_one ucx "$(_arg UCX_GIT_URL)" "$(_arg UCX_REF)"
+fi
+if [[ "${COMPONENT}" == "all" || "${COMPONENT}" == "hipfile" ]]; then
+	# An empty HIPFILE_REF is the documented escape hatch meaning "use the
+	# ROCm-packaged libhipfile": the source-build stage is skipped, so its
+	# patches are not applied and there is nothing to check.
+	hipfile_ref="$(_arg HIPFILE_REF)"
+	if [[ -n "${hipfile_ref}" ]]; then
+		check_one hipfile "$(_arg HIPFILE_GIT_URL)" "${hipfile_ref}"
+	else
+		echo "=== hipfile (skipped: HIPFILE_REF empty -- using the packaged libhipfile) ==="
+	fi
 fi
 if [[ "${COMPONENT}" == "all" || "${COMPONENT}" == "nixl" ]]; then
 	check_one nixl "$(_arg NIXL_GIT_URL)" "$(_arg NIXL_REF)"

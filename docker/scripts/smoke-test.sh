@@ -89,6 +89,27 @@ if [[ "${SMOKE_GPU:-1}" == "1" ]]; then
 	# here: NIC support varies by host, so its exit code is not the verdict.
 	echo "--- mori check (advisory) ---"
 	mori check 2>&1 | sed 's/^/      /' || true
+
+	echo
+	echo "=== hipFile batch ==="
+	# patches/hipfile implements hipFileBatchIO*, which upstream accepts and
+	# then silently drops.  The build-time gate only proves the worker pool got
+	# compiled in; this proves it moves bytes.  It needs O_DIRECT, so it wants a
+	# real block-backed filesystem -- overlayfs will fail the open.
+	smoke_bin="${HIPFILE_PREFIX:-/opt/hipfile}/bin/hipfile-batch-smoke"
+	smoke_dir="${HIPFILE_SMOKE_DIR:-}"
+	if [[ -z "${smoke_dir}" ]]; then
+		for d in /mnt/nixl-nvme-0 /mnt/nixl-nvme /scratch; do
+			[[ -d "${d}" && -w "${d}" ]] && { smoke_dir="${d}"; break; }
+		done
+	fi
+	if [[ ! -x "${smoke_bin}" ]]; then
+		echo "SKIP: hipfile-batch-smoke (not built; HIPFILE_REF empty?)"
+	elif [[ -z "${smoke_dir}" ]]; then
+		echo "SKIP: hipfile-batch-smoke (no O_DIRECT-capable dir; set HIPFILE_SMOKE_DIR)"
+	else
+		_check "hipFile batch API" "${smoke_bin}" "${smoke_dir}"
+	fi
 fi
 
 echo

@@ -1,0 +1,1025 @@
+Implement the batch API on the AMD backend over a worker thread pool
+
+hipFile at bd0bc233 ships a batch API that cannot move a byte.
+BatchContext::submit_operations validates the parameters, constructs
+BatchOperation objects and inserts them into an outstanding_ops set -- and
+stops.  No I/O is ever issued.  hipFileBatchIOGetStatus, hipFileBatchIOCancel
+and hipFileBatchIODestroy each throw std::runtime_error("Not Implemented").
+The failure mode is worse than an outright rejection: SetUp and Submit both
+return hipFileSuccess, so a caller sees a healthy submission path and only
+discovers the truth at the first status poll, having already lost track of
+which buffers it thought were in flight.
+
+This implements the three missing entry points and gives submit_operations
+somewhere to send the work.
+
+Why a thread pool, when hipFile already has an async engine
+
+The asynchronous path (hipFileReadAsync / hipFileWriteAsync) exists and is
+real, but it is capped at the speed of one CPU thread, and structurally so.
+Fastpath::async_io puts the entire transfer inside a hipLaunchHostFunc
+callback, which is how it honours the stream-ordering guarantee that the async
+API makes.  HIP services host functions from exactly one thread per process,
+across all streams.  Measured on MI300X / ROCm 7.14 with a 20-line HIP program
+and no hipFile involved (docker/scripts/hostfunc-serial.hip.cpp in the tree
+this patch is carried by):
+
+    streams x ops   wall     if serial   if parallel   callback threads
+    1 x 4            401 ms     400 ms        400 ms          1
+    8 x 4           3205 ms    3200 ms        400 ms          1
+    16 x 2          3204 ms    3200 ms        200 ms          1
+
+Confirmed from the storage side with fio's libhipfile engine, eight jobs over
+seven NVMe on one MI300X node: hipfile_mode=sync reaches 28.59 GB/s writes and
+18.87 GB/s reads, while hipfile_mode=stream -- the same library, same drives,
+same process -- reaches 5.05 and 2.00.  Sweeping queue depth 1 to 64 moves
+stream throughput by under 2% (5.086 to 4.980 GB/s) while mean latency scales
+exactly linearly, 1.65 ms to 107.6 ms.  That is a single server, and fitting
+the block-size sweep gives its service time as 24 us + size / 5.7 GB/s.
+
+A batch submission carries no ordering guarantee between its operations, so it
+does not need hipLaunchHostFunc and is not subject to any of that.  The
+operations go to worker threads that call the same synchronous path
+hipFileRead and hipFileWrite use, and scale the way it does.
+
+Implementation
+
+  - BatchWorkerPool: one pool per BatchContextMap, created on first
+    createContext so a process that never issues a batch operation never starts
+    the threads.  One pool rather than one per context, because a caller that
+    pools batch handles the way NIXL's GDS backend does would otherwise get
+    num_handles * num_threads threads.  Worker count from
+    HIPFILE_BATCH_THREADS, default 64 -- see the measurement in
+    BatchWorkerPool::configured_threads.
+  - Workers call Hip::hipInit() on entry, mirroring async_fastpath_copy: the
+    HIP runtime SEGFAULTs when a hipFile read/write is the first HIP call made
+    by a new thread.
+  - BatchOperation gains a terminal state, a result, and a claim() that exactly
+    one of run() and cancel() can win.  That is what stops hipFileBatchIOCancel
+    from marking an operation cancelled while a worker is midway through its
+    pread/pwrite.
+  - run() goes through hipFileIo rather than reaching for a backend directly,
+    so batch operations get the same backend selection, compat-mode fallback
+    and errno mapping as the synchronous API and cannot quietly diverge from
+    it.  The cost is one shared_lock on the driver state per operation.
+  - A BatchNotify (mutex, condvar, completed count, in-flight count) is shared
+    by a context and its operations via shared_ptr, so a worker finishing
+    during teardown always has somewhere valid to write.  ~BatchContext cancels
+    what has not started and then waits for in_flight to reach zero;
+    destroyContext drops the context outside batch_mutex so that wait cannot
+    deadlock against a concurrent createContext.
+  - get_status waits on the condvar before taking context_mutex, never while
+    holding it.  min_nr == 0 returns immediately, which is what fio's reap path
+    calls with; a null timeout waits indefinitely; an expired timeout returns
+    zero events and success rather than an error.
+
+Not addressed here: hipFileDriverGetProperties is still unimplemented on the
+AMD backend, so hipFileBatchIOSupported is not advertised even though it is now
+true.  Reporting it means filling in the whole hipFileDriverProps_t, which is a
+separate change.
+
+Result, same fio configuration as above, 8 jobs x iodepth 16 x 1 MiB over
+seven NVMe on one MI300X node (GB/s):
+
+              write    read
+    sync      28.30   18.73
+    stream     4.96    2.01
+    batch     29.32   47.23
+
+Batch matches the synchronous path on writes and is 2.5x it on reads, against
+6x and 23x the stream path.
+
+Verified by docker/scripts/hipfile-batch-smoke.hip.cpp, 29 checks covering the
+data round trip, partial reap, min_nr=0, expiring timeouts, cancel, capacity
+overflow and destroy-under-load.  Upstream's gtest suite is updated for the two
+new IBatchContext methods and the extra BatchOperation constructor argument.
+
+diff --git a/src/amd_detail/batch/batch.cpp b/src/amd_detail/batch/batch.cpp
+index ef42cd4..9ea583a 100644
+--- a/src/amd_detail/batch/batch.cpp
++++ b/src/amd_detail/batch/batch.cpp
+@@ -6,11 +6,17 @@
+ #include "batch.h"
+ #include "buffer.h"
+ #include "context.h"
++#include "environment.h"
+ #include "file.h"
++#include "hip.h"
++#include "hipfile-private.h"
+ #include "hipfile.h"
++#include "io.h"
+ #include "state.h"
+ 
++#include <algorithm>
+ #include <bit>
++#include <chrono>
+ #include <cstddef>
+ #include <memory>
+ #include <mutex>
+@@ -25,8 +31,10 @@
+ namespace hipFile {
+ 
+ BatchOperation::BatchOperation(std::unique_ptr<const hipFileIOParams_t> params,
+-                               std::shared_ptr<IBuffer> _buffer, std::shared_ptr<IFile> _file)
+-    : io_params{std::move(params)}, buffer{std::move(_buffer)}, file{std::move(_file)}
++                               std::shared_ptr<IBuffer> _buffer, std::shared_ptr<IFile> _file,
++                               std::shared_ptr<BatchNotify> _notify)
++    : io_params{std::move(params)}, buffer{std::move(_buffer)}, file{std::move(_file)},
++      notify_{std::move(_notify)}
+ {
+     // Cookie allows the user to track which operation caused the error.
+     // It would be ideal if this could be passed as a member within the exception.
+@@ -89,7 +97,202 @@ BatchOperation::BatchOperation(std::unique_ptr<const hipFileIOParams_t> params,
+     }
+ }
+ 
+-BatchContext::BatchContext(unsigned _capacity) : capacity{_capacity}
++void *
++BatchOperation::cookie() const noexcept
++{
++    return io_params->cookie;
++}
++
++hipFileStatus_t
++BatchOperation::status() const noexcept
++{
++    return state.load(std::memory_order_acquire);
++}
++
++ssize_t
++BatchOperation::result() const noexcept
++{
++    return result_;
++}
++
++const std::shared_ptr<BatchNotify> &
++BatchOperation::notify() const noexcept
++{
++    return notify_;
++}
++
++bool
++BatchOperation::claim() noexcept
++{
++    bool expected{false};
++    return claimed.compare_exchange_strong(expected, true, std::memory_order_acq_rel);
++}
++
++void
++BatchOperation::run(const std::vector<std::shared_ptr<Backend>> &backends) noexcept
++{
++    hipFileStatus_t final_state{hipFileComplete};
++
++    try {
++        // hipFileIo re-resolves the file and buffer from the handle rather than
++        // reusing the shared_ptrs held here. That costs one shared_lock on the
++        // driver state per operation, and buys the whole of the synchronous
++        // path's backend selection, fallback and errno mapping -- the same code
++        // hipFileRead and hipFileWrite run, so a batch operation cannot quietly
++        // diverge from them.
++        const auto type = (io_params->opcode == hipFileBatchWrite) ? IoType::Write : IoType::Read;
++        result_ = hipFileIo(type, io_params->fh, io_params->u.batch.devPtr_base, io_params->u.batch.size,
++                            io_params->u.batch.file_offset, io_params->u.batch.devPtr_offset, backends);
++        if (result_ < 0) {
++            final_state = hipFileFailed;
++        }
++    }
++    catch (...) {
++        // hipFileIo is itself a function-try-block that maps everything to a
++        // negative return, so reaching here means something escaped that. There
++        // is no caller to propagate to -- this is a worker thread -- so record
++        // it as a failed operation and let get_status report it.
++        result_     = -hipFileInternalError;
++        final_state = hipFileFailed;
++    }
++
++    state.store(final_state, std::memory_order_release);
++
++    {
++        std::lock_guard<std::mutex> lock{notify_->mutex};
++        notify_->completed++;
++    }
++    notify_->cv.notify_all();
++}
++
++void
++BatchOperation::cancel() noexcept
++{
++    result_ = 0;
++    state.store(hipFileCanceled, std::memory_order_release);
++
++    {
++        std::lock_guard<std::mutex> lock{notify_->mutex};
++        notify_->completed++;
++    }
++    notify_->cv.notify_all();
++}
++
++unsigned
++BatchWorkerPool::configured_threads()
++{
++    if (const auto configured = Environment::batch_threads(); configured && *configured > 0) {
++        return *configured;
++    }
++
++    // A batch operation blocks in pread/pwrite, so the useful worker count
++    // tracks how many IOs the caller wants in flight rather than the core
++    // count -- but a library cannot see that, nor how many NVMe the caller has
++    // spread its files over.  Measured with fio's libhipfile engine, 8 jobs x
++    // iodepth 16 x 1 MiB over 7 NVMe on one MI300X node (GB/s write / read):
++    //
++    //     threads      8     16     32     64    128
++    //     write     16.5   20.2   26.6   29.3   29.1
++    //     read      14.0   25.3   37.1   47.2   47.8
++    //
++    // The knee is at 64, and past it the extra workers only block, so that is
++    // the default.  Callers who know their device count set
++    // HIPFILE_BATCH_THREADS.
++    //
++    // Not clamped to hardware_concurrency: these threads are blocked in a
++    // syscall, not competing for CPU, so a small core count is not a reason to
++    // keep fewer of them.  The pool is created lazily, so a process that never
++    // issues a batch operation never pays for them.
++    constexpr unsigned DEFAULT_THREADS = 64;
++
++    return DEFAULT_THREADS;
++}
++
++BatchWorkerPool::BatchWorkerPool(unsigned num_threads)
++{
++    if (num_threads == 0) {
++        throw std::invalid_argument("Batch worker pool must have at least one thread");
++    }
++
++    threads.reserve(num_threads);
++    for (unsigned i = 0; i < num_threads; i++) {
++        threads.emplace_back(&BatchWorkerPool::worker, this);
++    }
++}
++
++BatchWorkerPool::~BatchWorkerPool()
++{
++    {
++        std::lock_guard<std::mutex> lock{mutex};
++        stopping = true;
++    }
++    cv.notify_all();
++    for (auto &thread : threads) {
++        if (thread.joinable()) {
++            thread.join();
++        }
++    }
++}
++
++void
++BatchWorkerPool::submit(std::shared_ptr<BatchOperation> op)
++{
++    {
++        std::lock_guard<std::mutex> lock{mutex};
++        queue.push_back(std::move(op));
++    }
++    cv.notify_one();
++}
++
++void
++BatchWorkerPool::worker()
++{
++    // Ensure the HIP Runtime is initialized on this thread before any IO runs
++    // on it. Mirrors async_fastpath_copy: the runtime SEGFAULTs when a hipFile
++    // read/write is the first HIP API call made by a new thread.
++    try {
++        Context<Hip>::get()->hipInit();
++    }
++    catch (...) {
++        // Nothing useful to do here; the first operation will fail and be
++        // reported through get_status rather than taking the process down.
++    }
++
++    while (true) {
++        std::shared_ptr<BatchOperation> op;
++
++        {
++            std::unique_lock<std::mutex> lock{mutex};
++            cv.wait(lock, [this] { return stopping || !queue.empty(); });
++            if (queue.empty()) {
++                // Only reachable when stopping.
++                return;
++            }
++            op = std::move(queue.front());
++            queue.pop_front();
++        }
++
++        // A losing claim means hipFileBatchIOCancel got here first, so the
++        // operation is already terminal and must not be run.
++        if (op->claim()) {
++            op->run(getBackends());
++        }
++
++        // Unconditional: in_flight tracks operations the pool still holds a
++        // reference to, which is what BatchContext's destructor waits on. A
++        // cancelled operation still has to be accounted for here.
++        const auto notify = op->notify();
++        op.reset();
++        {
++            std::lock_guard<std::mutex> lock{notify->mutex};
++            notify->in_flight--;
++        }
++        notify->cv.notify_all();
++    }
++}
++
++BatchContext::BatchContext(unsigned _capacity, std::shared_ptr<BatchWorkerPool> _pool)
++    : capacity{_capacity}, pool{std::move(_pool)}, notify{std::make_shared<BatchNotify>()}
+ {
+     if (_capacity == 0) {
+         throw std::invalid_argument("Batch capacity cannot be zero");
+@@ -97,6 +300,24 @@ BatchContext::BatchContext(unsigned _capacity) : capacity{_capacity}
+     if (_capacity > MAX_SIZE) {
+         throw std::invalid_argument("Batch capacity is limited to " + std::to_string(MAX_SIZE));
+     }
++    if (!pool) {
++        throw std::invalid_argument("Batch context requires a worker pool");
++    }
++}
++
++BatchContext::~BatchContext()
++{
++    // Cancel what has not started, then wait for whatever the pool is still
++    // holding. Returning while a worker can still write into an operation this
++    // context owns would let the operation outlive its own memory.
++    try {
++        cancel();
++    }
++    catch (...) {
++    }
++
++    std::unique_lock<std::mutex> lock{notify->mutex};
++    notify->cv.wait(lock, [this] { return notify->in_flight == 0; });
+ }
+ 
+ unsigned
+@@ -130,13 +351,105 @@ BatchContext::submit_operations(const hipFileIOParams_t *params, unsigned num_pa
+         // file flags.
+         auto [_file, _buffer] =
+             Context<DriverState>::get()->getFileAndBuffer(param_copy->fh, param_copy->u.batch.devPtr_base);
+-        auto op = std::make_shared<BatchOperation>(std::move(param_copy), _buffer, _file);
++        auto op = std::make_shared<BatchOperation>(std::move(param_copy), _buffer, _file, notify);
+ 
+         pending_ops.push_back(std::move(op));
+     }
+ 
+     // All submitted operations look valid at this point. Accept them.
+     outstanding_ops.insert(pending_ops.begin(), pending_ops.end());
++
++    // Account for every operation before any of them can be picked up, so that
++    // a worker finishing early cannot drive in_flight negative.
++    {
++        std::lock_guard<std::mutex> lock{notify->mutex};
++        notify->in_flight += num_params;
++    }
++
++    for (auto &op : pending_ops) {
++        pool->submit(std::move(op));
++    }
++}
++
++unsigned
++BatchContext::reap(unsigned max_nr, hipFileIOEvents_t *events)
++{
++    unsigned                            count{0};
++    std::unique_lock<std::shared_mutex> _ulock{context_mutex};
++
++    for (auto it = outstanding_ops.begin(); it != outstanding_ops.end() && count < max_nr;) {
++        const auto &op = *it;
++        if (op->status() == hipFilePending) {
++            ++it;
++            continue;
++        }
++
++        events[count].cookie = op->cookie();
++        events[count].status = op->status();
++        events[count].ret    = static_cast<size_t>(op->result());
++        count++;
++
++        it = outstanding_ops.erase(it);
++    }
++
++    if (count > 0) {
++        std::lock_guard<std::mutex> lock{notify->mutex};
++        notify->completed -= count;
++    }
++
++    return count;
++}
++
++void
++BatchContext::get_status(unsigned min_nr, unsigned *nr, hipFileIOEvents_t *events,
++                         const struct timespec *timeout)
++{
++    if (nr == nullptr) {
++        throw std::invalid_argument("nr must not be null");
++    }
++    const unsigned max_nr = *nr;
++    *nr                   = 0;
++
++    if (max_nr == 0) {
++        return;
++    }
++    if (events == nullptr) {
++        throw std::invalid_argument("events must not be null");
++    }
++
++    // Wait before taking context_mutex, never while holding it: reap() needs
++    // that lock and a worker completing is what ends this wait.
++    if (min_nr > 0) {
++        const unsigned                 want = std::min(min_nr, max_nr);
++        std::unique_lock<std::mutex>   lock{notify->mutex};
++        const auto                     ready = [&] { return notify->completed >= want; };
++
++        if (timeout == nullptr) {
++            notify->cv.wait(lock, ready);
++        }
++        else {
++            const auto duration = std::chrono::seconds{timeout->tv_sec} +
++                                  std::chrono::nanoseconds{timeout->tv_nsec};
++            notify->cv.wait_for(lock, duration, ready);
++        }
++    }
++
++    *nr = reap(max_nr, events);
++}
++
++void
++BatchContext::cancel()
++{
++    std::unique_lock<std::shared_mutex> _ulock{context_mutex};
++
++    for (const auto &op : outstanding_ops) {
++        // Losing the claim means a worker already owns this operation. There is
++        // no way to interrupt a pread/pwrite in progress, so it is left to run
++        // and report its real outcome.
++        if (op->claim()) {
++            op->cancel();
++        }
++    }
+ }
+ 
+ void
+@@ -144,18 +457,26 @@ BatchContextMap::clear()
+ {
+     std::unique_lock<std::shared_mutex> ulock{batch_mutex};
+     active_contexts.clear();
++    pool.reset();
+ }
+ 
+ hipFileBatchHandle_t
+ BatchContextMap::createContext(unsigned capacity)
+ {
+-    auto                 context = std::shared_ptr<IBatchContext>{new BatchContext{capacity}};
++    std::unique_lock<std::shared_mutex> ulock{batch_mutex};
++
++    // Created on first use so that a process which never issues a batch
++    // operation never starts the worker threads.
++    if (!pool) {
++        pool = std::make_shared<BatchWorkerPool>(BatchWorkerPool::configured_threads());
++    }
++
++    auto                 context = std::shared_ptr<IBatchContext>{new BatchContext{capacity, pool}};
+     hipFileBatchHandle_t handle  = context.get();
+ 
+     // Should not need to worry about duplicate keys unless the application
+     // somehow deallocates this handle...
+ 
+-    std::unique_lock<std::shared_mutex> ulock{batch_mutex};
+     active_contexts[handle] = std::move(context);
+     return handle;
+ }
+@@ -163,17 +484,23 @@ BatchContextMap::createContext(unsigned capacity)
+ void
+ BatchContextMap::destroyContext(hipFileBatchHandle_t handle)
+ {
+-    std::unique_lock<std::shared_mutex> ulock{batch_mutex};
++    std::shared_ptr<IBatchContext> context;
+ 
+-    auto context = active_contexts.find(handle);
+-    if (context == active_contexts.end()) {
+-        throw InvalidBatchHandle();
++    {
++        std::unique_lock<std::shared_mutex> ulock{batch_mutex};
++
++        auto found = active_contexts.find(handle);
++        if (found == active_contexts.end()) {
++            throw InvalidBatchHandle();
++        }
++        context = std::move(found->second);
++        active_contexts.erase(found);
+     }
+-    // TODO: Check for outstanding operations.
+-    // TODO: Attempt to cancel any outstanding operations.
+-    // TODO: Determine if we return unconditionally or require
+-    //       outstanding ops to terminate first.
+-    active_contexts.erase(handle);
++
++    // Dropped outside batch_mutex: ~BatchContext waits for the worker pool to
++    // release the operations it still holds, and a worker that needs to create
++    // a context would otherwise deadlock against this lock.
++    context.reset();
+ }
+ 
+ std::shared_ptr<IBatchContext>
+diff --git a/src/amd_detail/batch/batch.h b/src/amd_detail/batch/batch.h
+index f8372a1..50ee817 100644
+--- a/src/amd_detail/batch/batch.h
++++ b/src/amd_detail/batch/batch.h
+@@ -7,11 +7,19 @@
+ 
+ #include "hipfile.h"
+ 
++#include <atomic>
++#include <condition_variable>
++#include <cstddef>
++#include <deque>
+ #include <memory>
++#include <mutex>
+ #include <shared_mutex>
+ #include <stdexcept>
++#include <sys/types.h>
++#include <thread>
+ #include <unordered_map>
+ #include <unordered_set>
++#include <vector>
+ 
+ namespace hipFile {
+ class IBuffer;
+@@ -19,6 +27,9 @@ class IBuffer;
+ namespace hipFile {
+ class IFile;
+ }
++namespace hipFile {
++struct Backend;
++}
+ 
+ namespace hipFile {
+ 
+@@ -28,6 +39,29 @@ struct InvalidBatchHandle : public std::invalid_argument {
+     }
+ };
+ 
++/// @brief Completion signal shared between a BatchContext and the worker
++///        threads running its operations.
++///
++/// Held by shared_ptr rather than living in the context so that a worker which
++/// finishes after its context has begun tearing down still has somewhere valid
++/// to record that fact. BatchContext's destructor waits for in_flight to reach
++/// zero, so in practice the workers are gone first; the shared_ptr is what
++/// makes that wait safe to write rather than something to reason about.
++struct BatchNotify {
++    std::mutex              mutex;
++    std::condition_variable cv;
++
++    /// Operations that have reached a terminal state and have not yet been
++    /// handed to the application by hipFileBatchIOGetStatus.
++    unsigned completed{0};
++
++    /// Operations handed to the worker pool that have not yet finished. Note
++    /// this counts queued operations as well as running ones: the pool cannot
++    /// remove an operation from its queue on cancellation, it can only decline
++    /// to run it, so "in flight" has to mean "the pool still holds a reference".
++    unsigned in_flight{0};
++};
++
+ /// @brief Represents a single IO Request
+ class BatchOperation {
+ public:
+@@ -35,8 +69,43 @@ public:
+     /// @param [in] params IO parameters
+     /// @param [in] buffer Buffer corresponding to params->u.batch.devPtr_base
+     /// @param [in] file File corresponding params->fh
++    /// @param [in] notify Completion signal of the owning BatchContext
+     BatchOperation(std::unique_ptr<const hipFileIOParams_t> params, std::shared_ptr<IBuffer> buffer,
+-                   std::shared_ptr<IFile> file);
++                   std::shared_ptr<IFile> file, std::shared_ptr<BatchNotify> notify);
++
++    /// @brief The application's tracking token for this operation.
++    void *cookie() const noexcept;
++
++    /// @brief Current state of this operation.
++    hipFileStatus_t status() const noexcept;
++
++    /// @brief Bytes transferred, or a negative error code if status() is
++    ///        hipFileFailed.
++    ssize_t result() const noexcept;
++
++    /// @brief The completion signal of the context that owns this operation.
++    const std::shared_ptr<BatchNotify> &notify() const noexcept;
++
++    /// @brief Take exclusive responsibility for advancing this operation.
++    ///
++    /// Exactly one of run() and cancel() will win for any given operation. This
++    /// is what stops hipFileBatchIOCancel from marking an operation cancelled
++    /// while a worker is midway through issuing its pread/pwrite.
++    ///
++    /// @return True if the caller claimed the operation.
++    bool claim() noexcept;
++
++    /// @brief Perform the IO synchronously and record the outcome.
++    ///
++    /// @note The caller must have won claim(). Does not throw: every failure
++    ///       path is reported through status() and result(), because the caller
++    ///       is a worker thread with nowhere to propagate an exception to.
++    void run(const std::vector<std::shared_ptr<Backend>> &backends) noexcept;
++
++    /// @brief Mark a not-yet-started operation cancelled.
++    ///
++    /// @note The caller must have won claim().
++    void cancel() noexcept;
+ 
+ private:
+     /// @brief A copy of the params provided by the application.
+@@ -48,6 +117,63 @@ private:
+ 
+     /// @brief A reference to the specified registered File.
+     const std::shared_ptr<const IFile> file;
++
++    /// @brief Completion signal of the owning context.
++    const std::shared_ptr<BatchNotify> notify_;
++
++    /// @brief Set by whichever of run()/cancel() gets there first.
++    std::atomic<bool> claimed{false};
++
++    /// @brief Terminal state, published after result_ is written.
++    std::atomic<hipFileStatus_t> state{hipFilePending};
++
++    /// @brief Only read once state is terminal, so the atomic on state above
++    ///        is what orders this.
++    ssize_t result_{0};
++};
++
++/// @brief Thread pool that runs BatchOperations to completion.
++///
++/// The batch API is the only submission path in hipFile that is both
++/// asynchronous and free of HIP stream ordering, and that is the whole reason
++/// it is worth implementing on threads. The async path (hipFileReadAsync et al)
++/// cannot be: it promises that operations enqueued on one stream complete in
++/// stream order, so Fastpath::async_io puts the transfer inside a
++/// hipLaunchHostFunc callback -- and HIP services host functions from exactly
++/// one thread per process, across all streams. Measured on MI300X/ROCm 7.14:
++/// 32 callbacks of 100ms spread over 16 streams take 3204ms, not 200ms.
++///
++/// A batch submission carries no such ordering promise. Operations within one
++/// hipFileBatchIOSubmit are explicitly unordered, so they can go straight to
++/// worker threads calling the same synchronous pread/pwrite path that
++/// hipFileRead/hipFileWrite use, and scale the way that path does.
++///
++/// One pool is shared by every context (it lives in BatchContextMap) rather
++/// than one pool per context. A caller that pools batch handles the way NIXL's
++/// GDS backend does would otherwise get num_handles * num_threads threads.
++class BatchWorkerPool {
++public:
++    /// @param num_threads Worker count; must be non-zero.
++    explicit BatchWorkerPool(unsigned num_threads);
++    ~BatchWorkerPool();
++
++    BatchWorkerPool(const BatchWorkerPool &)            = delete;
++    BatchWorkerPool &operator=(const BatchWorkerPool &) = delete;
++
++    /// @brief Hand an operation to the pool. Consumes the reference.
++    void submit(std::shared_ptr<BatchOperation> op);
++
++    /// @brief Worker count taken from HIPFILE_BATCH_THREADS, or the default.
++    static unsigned configured_threads();
++
++private:
++    void worker();
++
++    std::vector<std::thread>                    threads;
++    std::deque<std::shared_ptr<BatchOperation>> queue;
++    std::mutex                                  mutex;
++    std::condition_variable                     cv;
++    bool                                        stopping{false};
+ };
+ 
+ class IBatchContext {
+@@ -57,10 +183,23 @@ public:
+     virtual ~IBatchContext()                                                                 = default;
+     virtual unsigned get_capacity() const noexcept                                           = 0;
+     virtual void     submit_operations(const hipFileIOParams_t *params, unsigned num_params) = 0;
++
++    /// @brief Collect completed operations.
++    /// @param [in]     min_nr  Wait until this many are available, or timeout.
++    /// @param [in,out] nr      In: capacity of events. Out: number written.
++    /// @param [out]    events  Completion records.
++    /// @param [in]     timeout Relative deadline, or nullptr to wait forever.
++    virtual void get_status(unsigned min_nr, unsigned *nr, hipFileIOEvents_t *events,
++                            const struct timespec *timeout) = 0;
++
++    /// @brief Cancel every operation that has not yet started.
++    virtual void cancel() = 0;
+ };
+ 
+ class BatchContext : public IBatchContext {
+ public:
++    ~BatchContext() override;
++
+     ///
+     /// @brief Return the max number of concurrent operations supported by this BatchContext.
+     ///
+@@ -78,9 +217,21 @@ public:
+     ///
+     void submit_operations(const hipFileIOParams_t *params, const unsigned num_params) override;
+ 
++    void get_status(unsigned min_nr, unsigned *nr, hipFileIOEvents_t *events,
++                    const struct timespec *timeout) override;
++
++    void cancel() override;
++
+ private:
+     const unsigned capacity;
+ 
++    /// The pool that runs this context's operations. Held by shared_ptr so the
++    /// pool outlives every context that has work queued on it.
++    const std::shared_ptr<BatchWorkerPool> pool;
++
++    /// Completion signal shared with the workers.
++    const std::shared_ptr<BatchNotify> notify;
++
+     /// Per-Context mutex to limit access to one caller at a time.
+     /// Shared as internally we can be more strategic about concurrent access.
+     mutable std::shared_mutex context_mutex;
+@@ -91,7 +242,11 @@ private:
+     /// shared_ptr as it may need to be passed to a backend.
+     std::unordered_set<std::shared_ptr<BatchOperation>> outstanding_ops;
+ 
+-    BatchContext(unsigned capacity);
++    BatchContext(unsigned capacity, std::shared_ptr<BatchWorkerPool> pool);
++
++    /// @brief Move terminal operations out of outstanding_ops into events.
++    /// @return Number of events written.
++    unsigned reap(unsigned max_nr, hipFileIOEvents_t *events);
+ 
+     friend class BatchContextMap;
+ };
+@@ -127,6 +282,10 @@ private:
+     /// batch context lookup table
+     std::unordered_map<hipFileBatchHandle_t, std::shared_ptr<IBatchContext>> active_contexts;
+ 
++    /// Worker pool shared by every context, created on first use so that a
++    /// process which never issues a batch operation never starts the threads.
++    std::shared_ptr<BatchWorkerPool> pool;
++
+     /// Mutex to protect the active context map
+     mutable std::shared_mutex batch_mutex;
+ };
+diff --git a/src/amd_detail/environment.cpp b/src/amd_detail/environment.cpp
+index efbf160..9fb0f35 100644
+--- a/src/amd_detail/environment.cpp
++++ b/src/amd_detail/environment.cpp
+@@ -75,3 +75,9 @@ Environment::stats_level()
+ {
+     return Environment::get<unsigned int>(Environment::STATS_LEVEL);
+ }
++
++optional<unsigned int>
++Environment::batch_threads()
++{
++    return Environment::get<unsigned int>(Environment::BATCH_THREADS);
++}
+diff --git a/src/amd_detail/environment.h b/src/amd_detail/environment.h
+index 374b85e..16c8b5c 100644
+--- a/src/amd_detail/environment.h
++++ b/src/amd_detail/environment.h
+@@ -60,6 +60,20 @@ public:
+     /// nullopt if HIPFILE_UNSUPPORTED_FILE_SYSTEMS was unset or had a value other than
+     /// true or false.
+     static std::optional<bool> unsupported_file_systems();
++
++    /// @brief Number of worker threads serving batch IO submissions
++    ///
++    /// Batch operations are dispatched to a process-wide thread pool, since a
++    /// batch submission carries no ordering guarantee between its operations.
++    /// The useful value tracks the number of storage devices the caller's files
++    /// are spread over, which the library cannot see for itself. Unset or zero
++    /// selects the built-in default.
++    static constexpr const char *const BATCH_THREADS{"HIPFILE_BATCH_THREADS"};
++
++    /// @brief Get the value of HIPFILE_BATCH_THREADS from the environment
++    /// @return An optional unsigned value if HIPFILE_BATCH_THREADS was set,
++    /// nullopt if it was unset or did not hold a number.
++    static std::optional<unsigned int> batch_threads();
+ };
+ 
+ }
+diff --git a/src/amd_detail/hipfile-private.h b/src/amd_detail/hipfile-private.h
+index fd47f07..567edcd 100644
+--- a/src/amd_detail/hipfile-private.h
++++ b/src/amd_detail/hipfile-private.h
+@@ -18,4 +18,10 @@ struct Backend;
+ ssize_t hipFileIo(hipFile::IoType type, hipFileHandle_t fh, const void *buffer_base, size_t size,
+                   hoff_t file_offset, hoff_t buffer_offset,
+                   const std::vector<std::shared_ptr<hipFile::Backend>> &backends);
++
++/// @brief The process-wide backend list, as used by hipFileRead/hipFileWrite.
++///
++/// Exposed for the batch worker threads, which run the synchronous IO path
++/// directly rather than going back through the public entry points.
++const std::vector<std::shared_ptr<hipFile::Backend>> &getBackends();
+ }
+diff --git a/src/amd_detail/hipfile.cpp b/src/amd_detail/hipfile.cpp
+index 44dbbe9..e1b90b4 100644
+--- a/src/amd_detail/hipfile.cpp
++++ b/src/amd_detail/hipfile.cpp
+@@ -180,6 +180,12 @@ getCachedBackends()
+     return backends;
+ }
+ 
++const vector<shared_ptr<Backend>> &
++getBackends()
++{
++    return getCachedBackends();
++}
++
+ static shared_ptr<Backend>
+ selectBackend(const vector<shared_ptr<Backend>> &backends, const shared_ptr<IFile> &file,
+               const shared_ptr<IBuffer> &buffer, size_t size, hoff_t file_offset, hoff_t buffer_offset)
+@@ -427,13 +433,14 @@ hipFileBatchIOGetStatus(hipFileBatchHandle_t batch_idp, unsigned min_nr, unsigne
+                         hipFileIOEvents_t *iocbp, struct timespec *timeout)
+ try {
+     hipFileInit();
+-    (void)batch_idp;
+-    (void)min_nr;
+-    (void)nr;
+-    (void)iocbp;
+-    (void)timeout;
+ 
+-    throw std::runtime_error("Not Implemented");
++    std::shared_ptr<IBatchContext> batch_context = Context<DriverState>::get()->getBatchContext(batch_idp);
++    batch_context->get_status(min_nr, nr, iocbp, timeout);
++
++    return {hipFileSuccess, hipSuccess};
++}
++catch (const std::invalid_argument &) {
++    return {hipFileInvalidValue, hipSuccess};
+ }
+ catch (...) {
+     return handle_exception();
+@@ -443,9 +450,14 @@ hipFileError_t
+ hipFileBatchIOCancel(hipFileBatchHandle_t batch_idp)
+ try {
+     hipFileInit();
+-    (void)batch_idp;
+ 
+-    throw std::runtime_error("Not Implemented");
++    std::shared_ptr<IBatchContext> batch_context = Context<DriverState>::get()->getBatchContext(batch_idp);
++    batch_context->cancel();
++
++    return {hipFileSuccess, hipSuccess};
++}
++catch (const std::invalid_argument &) {
++    return {hipFileInvalidValue, hipSuccess};
+ }
+ catch (...) {
+     return handle_exception();
+@@ -455,9 +467,11 @@ void
+ hipFileBatchIODestroy(hipFileBatchHandle_t batch_idp)
+ try {
+     hipFileInit();
+-    (void)batch_idp;
+ 
+-    throw std::runtime_error("Not Implemented");
++    // Blocks until the worker pool has released every operation this context
++    // owns. cuFile's equivalent is documented as freeing the resources, which
++    // cannot be done while a worker may still write into one of them.
++    Context<DriverState>::get()->destroyBatchContext(batch_idp);
+ }
+ catch (...) {
+     return;
+diff --git a/test/amd_detail/batch/batch.cpp b/test/amd_detail/batch/batch.cpp
+index b416c47..b0653c9 100644
+--- a/test/amd_detail/batch/batch.cpp
++++ b/test/amd_detail/batch/batch.cpp
+@@ -38,6 +38,7 @@ struct HipFileBatch : public HipFileUnopened {
+     std::unique_ptr<hipFileIOParams_t>   io_params;
+     std::shared_ptr<StrictMock<MBuffer>> default_mock_buffer;
+     std::shared_ptr<StrictMock<MFile>>   default_mock_file;
++    std::shared_ptr<BatchNotify>         notify = std::make_shared<BatchNotify>();
+     const hipFileHandle_t                file_handle{reinterpret_cast<void *>(0xDEADBEEF)};
+     void *const                          buffer_pointer{reinterpret_cast<void *>(0x0BADF00D)};
+ 
+@@ -68,27 +69,27 @@ TEST_F(HipFileBatch, CreateOperationRead)
+ {
+     io_params->opcode = hipFileBatchRead;
+ 
+-    BatchOperation op = BatchOperation{std::move(io_params), default_mock_buffer, default_mock_file};
++    BatchOperation op = BatchOperation{std::move(io_params), default_mock_buffer, default_mock_file, notify};
+ }
+ 
+ TEST_F(HipFileBatch, CreateOperationWrite)
+ {
+     io_params->opcode = hipFileBatchWrite;
+ 
+-    BatchOperation op = BatchOperation{std::move(io_params), default_mock_buffer, default_mock_file};
++    BatchOperation op = BatchOperation{std::move(io_params), default_mock_buffer, default_mock_file, notify};
+ }
+ 
+ TEST_F(HipFileBatch, CreateOperationBadBuffer)
+ {
+     EXPECT_CALL(*default_mock_buffer, getBuffer).WillOnce(Return(reinterpret_cast<void *>(0xFACEFEED)));
+-    EXPECT_THROW(BatchOperation(std::move(io_params), default_mock_buffer, default_mock_file),
++    EXPECT_THROW(BatchOperation(std::move(io_params), default_mock_buffer, default_mock_file, notify),
+                  std::invalid_argument);
+ }
+ 
+ TEST_F(HipFileBatch, CreateOperationBadFileHandle)
+ {
+     EXPECT_CALL(*default_mock_file, handle).WillOnce(Return(reinterpret_cast<hipFileHandle_t>(0xFACEFEED)));
+-    EXPECT_THROW(BatchOperation(std::move(io_params), default_mock_buffer, default_mock_file),
++    EXPECT_THROW(BatchOperation(std::move(io_params), default_mock_buffer, default_mock_file, notify),
+                  std::invalid_argument);
+ }
+ 
+@@ -96,7 +97,7 @@ TEST_F(HipFileBatch, CreateOperationBadbufferOffsetIsNegative)
+ {
+     io_params->u.batch.devPtr_offset = -1;
+ 
+-    EXPECT_THROW(BatchOperation(std::move(io_params), default_mock_buffer, default_mock_file),
++    EXPECT_THROW(BatchOperation(std::move(io_params), default_mock_buffer, default_mock_file, notify),
+                  std::invalid_argument);
+ }
+ 
+@@ -104,7 +105,7 @@ TEST_F(HipFileBatch, CreateOperationBadBufferOffsetExceedsBuffer)
+ {
+     io_params->u.batch.devPtr_offset = 1;
+ 
+-    EXPECT_THROW(BatchOperation(std::move(io_params), default_mock_buffer, default_mock_file),
++    EXPECT_THROW(BatchOperation(std::move(io_params), default_mock_buffer, default_mock_file, notify),
+                  std::invalid_argument);
+ }
+ 
+@@ -112,7 +113,7 @@ TEST_F(HipFileBatch, CreateOperationBadOperationLargerThanBuffer)
+ {
+     io_params->u.batch.size = 2;
+ 
+-    EXPECT_THROW(BatchOperation(std::move(io_params), default_mock_buffer, default_mock_file),
++    EXPECT_THROW(BatchOperation(std::move(io_params), default_mock_buffer, default_mock_file, notify),
+                  std::invalid_argument);
+ }
+ 
+@@ -122,7 +123,7 @@ TEST_F(HipFileBatch, CreateOperationBadOperationLargerThanBufferWithOffset)
+     io_params->u.batch.devPtr_offset = 6;
+     io_params->u.batch.size          = 5;
+ 
+-    EXPECT_THROW(BatchOperation(std::move(io_params), default_mock_buffer, default_mock_file),
++    EXPECT_THROW(BatchOperation(std::move(io_params), default_mock_buffer, default_mock_file, notify),
+                  std::invalid_argument);
+ }
+ 
+@@ -130,7 +131,7 @@ TEST_F(HipFileBatch, CreateOperationBadFileOffsetIsNegative)
+ {
+     io_params->u.batch.file_offset = -1;
+ 
+-    EXPECT_THROW(BatchOperation(std::move(io_params), default_mock_buffer, default_mock_file),
++    EXPECT_THROW(BatchOperation(std::move(io_params), default_mock_buffer, default_mock_file, notify),
+                  std::invalid_argument);
+ }
+ 
+@@ -138,7 +139,7 @@ TEST_F(HipFileBatch, CreateOperationBadOpcode)
+ {
+     io_params->opcode = invalidEnum<hipFileOpcode_t>(maxEnum<hipFileOpcode_t>());
+ 
+-    EXPECT_THROW(BatchOperation(std::move(io_params), default_mock_buffer, default_mock_file),
++    EXPECT_THROW(BatchOperation(std::move(io_params), default_mock_buffer, default_mock_file, notify),
+                  std::invalid_argument);
+ }
+ 
+@@ -146,7 +147,7 @@ TEST_F(HipFileBatch, CreateOperationBadMode)
+ {
+     io_params->mode = invalidEnum<hipFileBatchMode_t>(maxEnum<hipFileBatchMode_t>());
+ 
+-    EXPECT_THROW(BatchOperation(std::move(io_params), default_mock_buffer, default_mock_file),
++    EXPECT_THROW(BatchOperation(std::move(io_params), default_mock_buffer, default_mock_file, notify),
+                  std::invalid_argument);
+ }
+ 
+@@ -234,6 +235,7 @@ struct HipFileBatchContext : public HipFileUnopened {
+     std::shared_ptr<StrictMock<MBuffer>> default_mock_buffer;
+     int                                  default_mock_buffer_length = 1;
+     std::shared_ptr<StrictMock<MFile>>   default_mock_file;
++    std::shared_ptr<BatchNotify>         notify = std::make_shared<BatchNotify>();
+ 
+     void SetUp() override
+     {
+diff --git a/test/amd_detail/mbatch.h b/test/amd_detail/mbatch.h
+index c59ba90..6e5aab0 100644
+--- a/test/amd_detail/mbatch.h
++++ b/test/amd_detail/mbatch.h
+@@ -20,6 +20,10 @@ public:
+     MOCK_METHOD(unsigned, get_capacity, (), (const, noexcept, override));
+     MOCK_METHOD(void, submit_operations, (const hipFileIOParams_t *params, const unsigned num_params),
+                 (override));
++    MOCK_METHOD(void, get_status,
++                (unsigned min_nr, unsigned *nr, hipFileIOEvents_t *events, const struct timespec *timeout),
++                (override));
++    MOCK_METHOD(void, cancel, (), (override));
+ };
+ 
+ }

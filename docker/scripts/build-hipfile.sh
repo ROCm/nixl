@@ -19,8 +19,15 @@
 #   What we want from develop is the asynchronous submission path --
 #   hipFileReadAsync / hipFileWriteAsync over a registered HIP stream, reaching
 #   Backend::async_io in src/amd_detail/backend/.  The AIS plugin is built on
-#   it.  NOT the batch path: as of bd0bc233 that is a stub whose submit only
-#   records the ops, with GetStatus/Cancel/Destroy throwing "Not Implemented".
+#   it.
+#
+#   The batch path is a stub at bd0bc233 -- submit only records the ops, and
+#   GetStatus/Cancel/Destroy throw "Not Implemented" -- so
+#   patches/hipfile/01-hipfile-batch-worker-pool.patch implements it here.  That
+#   patch is the point of this stage as much as the version bump is: the async
+#   path is capped at one CPU thread by HIP's single host-function callback
+#   thread (see docker/scripts/hostfunc-serial.hip.cpp), and batch is the only
+#   submission API in hipFile that is not subject to that.
 #
 # hipFile is pure userspace over amdgpu/DRM -- there is no kernel module in the
 # repo -- so overlaying a newer library does not have to be matched against
@@ -80,13 +87,45 @@ if [[ ! -e "${HIPFILE_PREFIX}/lib/libhipfile.so" ]]; then
 	exit 1
 fi
 for sym in hipFileReadAsync hipFileWriteAsync \
-	hipFileStreamRegister hipFileStreamDeregister; do
+	hipFileStreamRegister hipFileStreamDeregister \
+	hipFileBatchIOSetUp hipFileBatchIOSubmit hipFileBatchIOGetStatus \
+	hipFileBatchIOCancel hipFileBatchIODestroy; do
 	if ! nm -D --defined-only "${HIPFILE_PREFIX}/lib/libhipfile.so" | grep -q " ${sym}$"; then
 		echo "ERROR: ${sym} is not defined in the built libhipfile -- HIPFILE_REF=${HIPFILE_REF:-?} predates the AMD async backend" >&2
 		exit 1
 	fi
 done
 
-echo "PASS: hipFile built with the async API -> ${HIPFILE_PREFIX}"
+# The batch symbols above are exported by the unpatched tree too -- they just
+# throw.  What actually distinguishes a patched build is the worker pool, so
+# check for that instead.  It is an internal (hidden) symbol, so this reads the
+# full .symtab rather than the dynamic table, and matches the identifier as it
+# appears mangled ("15BatchWorkerPool") so it does not depend on nm being able
+# to demangle -- llvm-nm and binutils nm disagree there.
+batch_syms="$(nm --defined-only "${HIPFILE_PREFIX}/lib/libhipfile.so" 2>&1 || true)"
+if ! grep -q "BatchWorkerPool" <<< "${batch_syms}"; then
+	echo "ERROR: BatchWorkerPool is absent -- patches/hipfile did not reach this build," >&2
+	echo "so hipFileBatchIOGetStatus still throws \"Not Implemented\" and hipfile_mode=batch" >&2
+	echo "will fail at runtime instead of at build time." >&2
+	echo "nm reported $(wc -l <<< "${batch_syms}") line(s):" >&2
+	head -5 <<< "${batch_syms}" >&2
+	exit 1
+fi
+
+# Built here rather than in the runtime stage because this is where hipcc and
+# the freshly installed headers are both present.  Not run here: it needs a GPU
+# and a writable O_DIRECT-capable filesystem, so smoke-test.sh runs it.
+SMOKE_SRC="${SMOKE_SRC:-/tmp/scripts/hipfile-batch-smoke.hip.cpp}"
+if [[ -f "${SMOKE_SRC}" ]]; then
+	mkdir -p "${HIPFILE_PREFIX}/bin"
+	"${ROCM_PATH}/bin/hipcc" -O2 -std=c++17 \
+		-I "${HIPFILE_PREFIX}/include" "${SMOKE_SRC}" \
+		-L "${HIPFILE_PREFIX}/lib" -lhipfile \
+		-Wl,-rpath,"${HIPFILE_PREFIX}/lib" \
+		-o "${HIPFILE_PREFIX}/bin/hipfile-batch-smoke"
+	echo "built hipfile-batch-smoke -> ${HIPFILE_PREFIX}/bin"
+fi
+
+echo "PASS: hipFile built with the async API and a working batch API -> ${HIPFILE_PREFIX}"
 grep -hE '#define HIPFILE_VERSION_(MAJOR|MINOR|PATCH)' \
 	"${HIPFILE_PREFIX}/include/hipfile.h" || true

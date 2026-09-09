@@ -262,8 +262,8 @@ wheels:
 # ---- Patches ----------------------------------------------------------------
 
 patch-list:
-	@for c in ucx nixl mori; do \
-		case $$c in ucx) r=$(UCX_REF);; nixl) r=$(NIXL_REF);; mori) r=$(MORI_REF);; esac; \
+	@for c in ucx hipfile nixl mori; do \
+		case $$c in ucx) r=$(UCX_REF);; hipfile) r=$(HIPFILE_REF);; nixl) r=$(NIXL_REF);; mori) r=$(MORI_REF);; esac; \
 		echo "patches/$$c/  ($$c $$r)"; \
 		found=0; \
 		for p in patches/$$c/*.patch; do \
@@ -275,6 +275,7 @@ patch-list:
 patch-check:
 	@COMPONENT="$(COMPONENT)" NIXL_REF="$(NIXL_REF)" NIXL_GIT_URL="$(NIXL_GIT_URL)" \
 		MORI_REF="$(MORI_REF)" MORI_GIT_URL="$(MORI_GIT_URL)" \
+		HIPFILE_REF="$(HIPFILE_REF)" HIPFILE_GIT_URL="$(HIPFILE_GIT_URL)" \
 		"$(REPO_ROOT)/docker/scripts/patch-check.sh"
 
 # ---- Run --------------------------------------------------------------------

@@ -198,7 +198,12 @@ ARG HIPFILE_REF=bd0bc2330a1573223209b9899055d1d6188b9113
 
 ENV HIPFILE_PREFIX=/opt/hipfile
 
-COPY docker/scripts/clone-src.sh docker/scripts/build-hipfile.sh /tmp/scripts/
+COPY docker/scripts/clone-src.sh docker/scripts/build-hipfile.sh \
+     docker/scripts/hipfile-batch-smoke.hip.cpp /tmp/scripts/
+# patches/hipfile implements the batch API, which upstream accepts and then
+# silently drops.  Patched here rather than worked around in the AIS plugin
+# because the defect is in hipFile and fio hits it too.
+COPY patches/hipfile /tmp/patches/hipfile
 
 RUN mkdir -p /opt/hipfile && \
     if [ -z "${HIPFILE_REF}" ]; then \
@@ -208,6 +213,7 @@ RUN mkdir -p /opt/hipfile && \
         SRC_GIT_URL="${HIPFILE_GIT_URL}" \
         SRC_REF="${HIPFILE_REF}" \
         SRC_DEST=/tmp/hipfile-src \
+        SRC_PATCH_DIR=/tmp/patches/hipfile \
         bash /tmp/scripts/clone-src.sh; \
     fi
 

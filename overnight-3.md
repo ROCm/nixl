@@ -44,6 +44,32 @@ written submitters landing within 10% of each other on a ceiling the
 synchronous path clears by nearly 6×. The plugin is extracting essentially all
 of what `hipFileWriteAsync` will give.
 
+**The cap is structural, and it is HIP's, not hipFile's.**
+`Fastpath::async_io` runs the whole transfer inside a `hipLaunchHostFunc`
+callback — that is how it honours the stream-ordering promise the async API
+makes — and HIP services host functions from exactly one thread per process
+across all streams. A 20-line HIP program with no hipFile in it
+(`docker/scripts/hostfunc-serial.hip.cpp`) reproduces it: 8 streams × 4 × 100 ms
+of host-function work takes 3205 ms, not 400.
+
+**So the fix was to implement the one submission API that is not subject to it,
+and it works.** `patches/hipfile/01-hipfile-batch-worker-pool.patch` implements
+hipFile's batch API — a stub upstream, accepting submissions and moving no
+bytes — over a worker pool running the synchronous path. Same drives, same
+process, same fio invocation (see 06:15):
+
+| submission mode | write GB/s | read GB/s |
+|---|---|---|
+| `hipfile_mode=sync` | 28.30 | 19.10 |
+| `hipfile_mode=stream` | 4.94 | 2.13 |
+| **`hipfile_mode=batch`** | **29.19** | **47.24** |
+
+Batch ties the synchronous path on writes and beats it **2.5×** on reads —
+47 GB/s is the highest single-process number this array has produced. 29/29
+correctness checks pass in-image on the MI300X. This also un-shelves the
+original plan's `AIS` NIXL plugin, which is a batch-API port of upstream's
+`cuda_gds` and was dropped when the batch API turned out to be a stub.
+
 **The async path behaves as a single server with two constants.** Fitting the
 fio block-size curve gives `service time ≈ 24 µs + size / 5.7 GB/s`, and that
 one line accounts for everything observed all night: queue depth changes
@@ -956,6 +982,65 @@ The practical recommendation is unchanged — hsa-snoop remains the source of
 truth for storage throughput, because a metric with these semantics cannot be
 aggregated safely — but for the opposite reason from the one recorded at 01:40.
 
+### 2026-09-09 06:15 — the batch API, implemented, and the ceiling is gone
+
+The stub was the whole problem. `hipfile_mode=batch` was in the sweep as a
+regression detector on the assumption that hipFile would fix it eventually;
+it was cheaper to fix it here.
+
+`patches/hipfile/01-hipfile-batch-worker-pool.patch` (1000 lines) implements the
+three entry points that threw `"Not Implemented"` and gives
+`submit_operations` somewhere to send the work: a lazily-created pool of worker
+threads, one per `BatchContextMap`, each running the *synchronous* `hipFileIo`
+path. A batch submission promises no ordering between its operations, so unlike
+the async path it does not need `hipLaunchHostFunc` — which is the entire
+reason it is not capped.
+
+Same fio configuration as 03:33, 8 jobs × iodepth 16 × 1 MiB over the seven
+NVMe, one MI300X node:
+
+| mode | write GB/s | read GB/s |
+|---|---|---|
+| sync | 28.30 | 19.10 |
+| stream | 4.94 | 2.13 |
+| **batch** | **29.19** | **47.24** |
+
+Batch matches the synchronous path on writes and is **2.5× it on reads**,
+against 5.9× and 22× the stream path. The read number is the surprise: sync
+reads at queue depth 1 leave more than half the array idle, and batch is the
+first submission mode in this tree that has actually filled it.
+
+Worker count matters, and 16 (the first default) was leaving most of that on
+the floor. Scan at the same shape, `HIPFILE_BATCH_THREADS`:
+
+| threads | 8 | 16 | 32 | 64 | 128 |
+|---|---|---|---|---|---|
+| write | 16.48 | 20.18 | 26.56 | 29.32 | 29.13 |
+| read | 14.01 | 25.25 | 37.14 | 47.23 | 47.75 |
+
+The knee is at 64 and the patch now defaults there, deliberately *not* clamped
+to `hardware_concurrency`: these threads are blocked in `pread`/`pwrite`, not
+competing for CPU, so core count is the wrong thing to size against.
+
+Correctness is not taken on faith. `docker/scripts/hipfile-batch-smoke.hip.cpp`
+is 29 checks — byte-exact write-then-read-back round trip, cookie accounting,
+partial reap, `min_nr=0`, expiring timeouts, cancel, capacity overflow, and 20
+rounds of destroy-under-load — and passes 29/29 in the image on the MI300X
+against `/mnt/nixl-nvme-0`. `build-hipfile.sh` additionally refuses to produce a
+library without `BatchWorkerPool` in it, so the patch silently failing to apply
+becomes a build failure rather than a runtime one.
+
+One trap worth recording: the first version of that gate used `nm -C` and it
+failed inside the image while passing on the dev box. The ROCm image puts
+`llvm-nm` ahead of binutils on `PATH` and the two disagree about demangling
+local symbols. The gate now matches the mangled identifier and does not depend
+on demangling at all.
+
+This unblocks the original plan's Part B — the `AIS` NIXL plugin as a port of
+upstream's `cuda_gds`, which is a batch-API plugin and was shelved when the
+batch API turned out to be a stub. It is now worth writing, and the fio numbers
+above are the target it should be measured against.
+
 ## Open items
 
 - **NIXL's transfer metrics reset to zero mid-run** (see 03:55). Mechanism not
@@ -970,7 +1055,11 @@ aggregated safely — but for the opposite reason from the one recorded at 01:40
 - **`hipfile_mode=stream` at 16 MiB drops off the fitted line** (4.47 GB/s
   against a predicted ~5.7, with 477 ms mean latency). Not chased; outside the
   sizes this project uses.
-- **File an upstream observation against ROCm/hipFile**: async submission does
+- **File two upstream observations against ROCm/hipFile.** First, the batch API
+  at `bd0bc233` accepts submissions and performs no I/O while returning
+  `hipFileSuccess` from SetUp and Submit — a silent data-loss shape, and the
+  worse of the two defects. `patches/hipfile/` carries a working implementation
+  and is offerable as-is. Second, async submission does
   not scale past ~5 GB/s per context at `bd0bc233`. The headline evidence is now
   the fio result — ROCm's own fio fork, `hipfile_mode=sync` 28.59 GB/s against
   `hipfile_mode=stream` 5.05 GB/s on identical drives in one process, with 26 ms
