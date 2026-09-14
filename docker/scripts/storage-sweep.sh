@@ -283,12 +283,17 @@ case "${SWEEP_SET}" in
 		;;
 
 	full)
+		# threads tracks files upward for the same reason the drives set does:
+		# nixlbench allocates one buffer per thread and refuses to start when
+		# there are fewer buffers than files.  Hardcoding 8 here silently lost
+		# the whole f=16 row -- the widest and most interesting one.
 		for op in WRITE READ; do
 			for f in 1 4 16; do
-				run_point "full" AIS batch VRAM "${op}" 8 "${f}" 1
-				run_point "full" AIS stream VRAM "${op}" 8 "${f}" 1
-				run_point "full" AIS_MT "" VRAM "${op}" 8 "${f}" 1
-				run_point "full" POSIX AIO DRAM "${op}" 8 "${f}" 1
+				thr=$((f > 8 ? f : 8))
+				run_point "full" AIS batch VRAM "${op}" "${thr}" "${f}" 1
+				run_point "full" AIS stream VRAM "${op}" "${thr}" "${f}" 1
+				run_point "full" AIS_MT "" VRAM "${op}" "${thr}" "${f}" 1
+				run_point "full" POSIX AIO DRAM "${op}" "${thr}" "${f}" 1
 			done
 		done
 		;;
@@ -300,4 +305,13 @@ esac
 
 echo
 echo "=== sweep ${SWEEP_SET}: ${npoints} points ok, ${nfail} failed -> ${SWEEP_OUT} ==="
+
+# A partial sweep is a failed sweep: .slurm/validate-image.sh gates on this,
+# and exiting 0 with a third of the points missing is how a broken sweep set
+# passes validation.  2 is taken by the unknown-SWEEP_SET error above.
+[[ ${nfail} -gt 0 ]] && exit 1
+[[ ${npoints} -eq 0 ]] && {
+	echo "ERROR: no points ran at all" >&2
+	exit 1
+}
 exit 0
