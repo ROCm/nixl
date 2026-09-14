@@ -99,6 +99,15 @@ run_point() {
 	)
 	[[ "${backend}" == "POSIX" ]] && args+=(--posix_api_type "${api}")
 
+	# For AIS the api column carries the submission mode, the same way it
+	# carries AIO/URING/POSIXAIO for POSIX -- both name a variant of one
+	# backend's submit path, which is what the column has always meant.  It
+	# travels as an environment variable because nixlbench has no flag for a
+	# backend-specific parameter; the plugin reads AIS_MODE when ais_mode is
+	# absent from customParams.
+	local ais_mode_env=()
+	[[ "${backend}" == "AIS" ]] && ais_mode_env=(AIS_MODE="${api:-batch}")
+
 	echo "--- $(date -Is) ${label}: ${backend}${api:+/${api}} seg=${seg} op=${op} thr=${threads} files=${files} direct=${direct}"
 
 	local out_t
@@ -109,7 +118,10 @@ run_point() {
 	# need nixlbench itself to emit per-block timestamps.
 	local t0 t1
 	t0="$(date +%s)"
-	HIP_VISIBLE_DEVICES=0 timeout "${TIMEOUT}" nixlbench "${args[@]}" > "${out_t}" 2>&1
+	# via env, not as an assignment prefix: bash recognises VAR=value prefixes at
+	# parse time, so an expansion that produces one is a command word instead and
+	# the run dies with "AIS_MODE=batch: command not found".
+	HIP_VISIBLE_DEVICES=0 env "${ais_mode_env[@]}" timeout "${TIMEOUT}" nixlbench "${args[@]}" > "${out_t}" 2>&1
 	local rc_t=$?
 	t1="$(date +%s)"
 
@@ -162,15 +174,26 @@ run_point() {
 # numbers do not include.  Comparisons below are written with that in mind.
 #
 # AIS vs AIS_MT is the one clean comparison in here: same library, same buffer
-# registration, same VRAM segment, differing only in how work is submitted --
-# hipFile's async stream API against a Taskflow pool driving synchronous
-# hipFileRead/Write.  --num_threads does not drive AIS's concurrency (streams
-# do, via --gds_batch_pool_size), but it is left tracking the AIS_MT rows so
-# both see the same buffer and file counts.
+# registration, same VRAM segment, differing only in how work is submitted.
+# AIS itself has two submit paths, carried in the api column: AIS/batch drives
+# hipFile's batch API, AIS/stream drives hipFileReadAsync on HIP streams, and
+# AIS_MT drives synchronous hipFileRead/Write from a Taskflow pool.
+#
+# Expect stream to lose badly and do not read that as a tuning problem.
+# Fastpath::async_io runs the whole transfer inside a hipLaunchHostFunc callback
+# so it can honour the stream-ordering promise, and HIP services host functions
+# from exactly one thread per process across every stream and device -- so the
+# stream path is single-threaded no matter how many streams it is given.  fio
+# over these same seven drives puts it at 4.9 GB/s writing against batch's 29.2.
+#
+# --num_threads does not drive AIS's concurrency in either mode (batch handles
+# and streams do, via --gds_batch_pool_size), but it is left tracking the AIS_MT
+# rows so all three see the same buffer and file counts.
 
 case "${SWEEP_SET}" in
 	quick) # smoke test: does each path still work at all
-		run_point base AIS "" VRAM WRITE 1 1 1
+		run_point base AIS batch VRAM WRITE 1 1 1
+		run_point base AIS stream VRAM WRITE 1 1 1
 		run_point base AIS_MT "" VRAM WRITE 1 1 1
 		run_point base POSIX AIO DRAM WRITE 1 1 1
 		;;
@@ -179,7 +202,8 @@ case "${SWEEP_SET}" in
 		# default), and NVMe reads are typically ~2x writes, so the read
 		# direction -- the one a KV-cache load actually uses -- is unmeasured.
 		for op in WRITE READ; do
-			run_point "rw" AIS "" VRAM "${op}" 1 1 1
+			run_point "rw" AIS batch VRAM "${op}" 1 1 1
+			run_point "rw" AIS stream VRAM "${op}" 1 1 1
 			run_point "rw" AIS_MT "" VRAM "${op}" 1 1 1
 			run_point "rw" POSIX AIO DRAM "${op}" 1 1 1
 			run_point "rw" POSIX URING DRAM "${op}" 1 1 1
@@ -191,7 +215,8 @@ case "${SWEEP_SET}" in
 		# so anything above ~7 GB/s is impossible and the question is
 		# purely how few threads it takes to get there.
 		for thr in 1 2 4 8 16; do
-			run_point "threads" AIS "" VRAM WRITE "${thr}" 1 1
+			run_point "threads" AIS batch VRAM WRITE "${thr}" 1 1
+			run_point "threads" AIS stream VRAM WRITE "${thr}" 1 1
 			run_point "threads" AIS_MT "" VRAM WRITE "${thr}" 1 1
 			run_point "threads" POSIX AIO DRAM WRITE "${thr}" 1 1
 			run_point "threads" POSIX URING DRAM WRITE "${thr}" 1 1
@@ -208,7 +233,8 @@ case "${SWEEP_SET}" in
 		# the number of files (16)").  So threads tracks files upward.
 		for f in 1 2 4 8 16; do
 			thr=$((f > 8 ? f : 8))
-			run_point "drives" AIS "" VRAM WRITE "${thr}" "${f}" 1
+			run_point "drives" AIS batch VRAM WRITE "${thr}" "${f}" 1
+			run_point "drives" AIS stream VRAM WRITE "${thr}" "${f}" 1
 			run_point "drives" AIS_MT "" VRAM WRITE "${thr}" "${f}" 1
 			run_point "drives" POSIX AIO DRAM WRITE "${thr}" "${f}" 1
 			run_point "drives" POSIX URING DRAM WRITE "${thr}" "${f}" 1
@@ -225,8 +251,10 @@ case "${SWEEP_SET}" in
 		run_point "wide" POSIX AIO DRAM WRITE 32 16 1  # more threads than drives
 		run_point "wide" AIS_MT "" VRAM WRITE 16 8 1
 		run_point "wide" AIS_MT "" VRAM WRITE 32 16 1
-		run_point "wide" AIS "" VRAM WRITE 16 8 1
-		run_point "wide" AIS "" VRAM WRITE 32 16 1
+		run_point "wide" AIS batch VRAM WRITE 16 8 1
+		run_point "wide" AIS stream VRAM WRITE 16 8 1
+		run_point "wide" AIS batch VRAM WRITE 32 16 1
+		run_point "wide" AIS stream VRAM WRITE 32 16 1
 		;;
 
 	readscale) # READ is the direction a KV-cache load uses, and it is ~2x
@@ -236,7 +264,8 @@ case "${SWEEP_SET}" in
 		# files to already exist.
 		for f in 1 4 8 16; do
 			thr=$((f > 8 ? f : 8))
-			run_point "readscale" AIS "" VRAM READ "${thr}" "${f}" 1
+			run_point "readscale" AIS batch VRAM READ "${thr}" "${f}" 1
+			run_point "readscale" AIS stream VRAM READ "${thr}" "${f}" 1
 			run_point "readscale" AIS_MT "" VRAM READ "${thr}" "${f}" 1
 			run_point "readscale" POSIX AIO DRAM READ "${thr}" "${f}" 1
 		done
@@ -246,7 +275,8 @@ case "${SWEEP_SET}" in
 		# and reports numbers that are about DRAM, not about the drive;
 		# worth quantifying once so the size of the lie is on record.
 		for d in 1 0; do
-			run_point "direct" AIS "" VRAM WRITE 8 4 "${d}"
+			run_point "direct" AIS batch VRAM WRITE 8 4 "${d}"
+			run_point "direct" AIS stream VRAM WRITE 8 4 "${d}"
 			run_point "direct" AIS_MT "" VRAM WRITE 8 4 "${d}"
 			run_point "direct" POSIX AIO DRAM WRITE 8 4 "${d}"
 		done
@@ -255,7 +285,8 @@ case "${SWEEP_SET}" in
 	full)
 		for op in WRITE READ; do
 			for f in 1 4 16; do
-				run_point "full" AIS "" VRAM "${op}" 8 "${f}" 1
+				run_point "full" AIS batch VRAM "${op}" 8 "${f}" 1
+				run_point "full" AIS stream VRAM "${op}" 8 "${f}" 1
 				run_point "full" AIS_MT "" VRAM "${op}" 8 "${f}" 1
 				run_point "full" POSIX AIO DRAM "${op}" 8 "${f}" 1
 			done

@@ -29,7 +29,7 @@ mkdir -p "${MORI_WHEEL_DIR}"
 # tag, but git apply leaves the tree dirty, which would stamp the wheel
 # 1.2.2+d<date> and make the build non-reproducible.  Pin the version to the
 # tag instead (MORI_VERSION overrides; a non-tag ref falls back to scm).
-if [[ -z "${MORI_VERSION:-}" && "${MORI_REF}" =~ ^v[0-9]+(\.[0-9]+)*$ ]]; then
+if [[ -z "${MORI_VERSION:-}" && "${MORI_REF}" =~ ^v[0-9]+(\.[0-9]+)*(\.post[0-9]+)?$ ]]; then
 	MORI_VERSION="${MORI_REF#v}"
 fi
 if [[ -n "${MORI_VERSION:-}" ]]; then

@@ -1041,7 +1041,95 @@ upstream's `cuda_gds`, which is a batch-API plugin and was shelved when the
 batch API turned out to be a stub. It is now worth writing, and the fio numbers
 above are the target it should be measured against.
 
+### 2026-09-09 13:20 — the AIS plugin gets a batch mode, and the stream ceiling reproduces inside NIXL
+
+The plugin port is done. `AIS` now has two submission paths behind one runtime
+parameter, `ais_mode=batch|stream` (default `batch`, also readable from the
+`AIS_MODE` environment variable because nixlbench has no flag for a
+backend-specific parameter). The batch path is the structural port of `cuda_gds`
+the original plan asked for; the stream path is kept, not replaced, because it
+is the only way to reproduce the host-function ceiling from inside NIXL against
+a batch path running on the same descriptors.
+
+`storage-sweep.sh` carries the mode in the `api` column, the same column that
+already distinguishes `POSIX/AIO` from `POSIX/URING` — it has always meant "which
+submit path of this backend", which is exactly what this is.
+
+Seven NVMe on `ctr-smc-mi300x-cx67-5`, peak GB/s over the block-size curve:
+
+    WRITE            files:    1      2      4      8     16
+      AIS/batch             4.05   7.66  15.19  14.41  19.96
+      AIS/stream            4.04   5.86   4.65   5.18   5.31
+      AIS_MT                4.00   7.60  14.72  14.56  19.58
+      POSIX/AIO             3.95   7.82  15.06  15.27  20.29
+
+    READ             files:    1      4      8     16
+      AIS/batch             6.60  24.50  26.48  35.17
+      AIS/stream            6.09   5.80   5.74   5.76
+      AIS_MT                6.67  24.84  26.80  35.23
+      POSIX/AIO             6.63  24.13  25.41  29.57
+
+Two results, and only one of them is the one that was expected.
+
+**The stream ceiling is confirmed from inside NIXL.** `AIS/stream` flatlines at
+~5 GB/s from two files onward and never moves again — 5.31 writing, 5.76 reading
+at sixteen files, against fio's independent prediction of 4.9 and 2.1 on these
+same drives. The single HIP host-function thread is now demonstrated three ways:
+in a bare HIP probe, in fio with no NIXL in the picture, and now in the NIXL
+plugin next to a batch path that scales past it on identical descriptors. That
+part is closed.
+
+**Batch's fio advantage does not reproduce through NIXL, and that is the new
+open question.** In fio, batch beat sync 47.2 to 19.1 reading. Here `AIS/batch`
+and `AIS_MT` are indistinguishable — 35.17 against 35.23 reading, 19.96 against
+19.58 writing — and both sit short of fio's batch figure of 47.2/29.2 on the
+same seven drives. So the batch path did what it was built to do (it removed the
+5 GB/s cap and tracks the best existing NIXL path) but it did not reach hipFile's
+demonstrated ceiling, and neither did anything else. Three unrelated submit paths
+converging on one number, with a NIXL-free control sitting above it, points at
+something common to the NIXL path rather than at any one backend. Not chased yet.
+
+Worth noting the write direction was the least discriminating one to have run
+first: in fio, sync and batch are nearly tied writing (28.3 vs 29.2) and only
+separate reading. The write table above therefore says less than it looks like it
+says.
+
+**`hipFileBatchIOSetUp` caps a batch context at 128 operations.**
+`BatchContext::MAX_SIZE` is 128, matching cuFile's `CUFILE_MAX_BATCH_IO_SIZE`,
+and it is not exported in `hipfile.h`. `--gds_batch_limit 256` therefore fails at
+agent creation with a bare `hipFileInvalidValue` (5022), nowhere near the flag
+that caused it. `DEFAULT_OPS_PER_HANDLE` is 128, which sits exactly on the cap by
+luck rather than design; the plugin now names the limit and the flag when SetUp
+rejects the size.
+
+**`--group-add` was passing group *names* to docker**, which resolves them
+against the *container's* `/etc/group`. On `ctr-smc-mi300x-cx68-25` the host's
+`render` group is 109 and the image's is 994, so the flag granted a group that
+owns nothing, `/dev/kfd` stayed unopenable, and every ROCm tool reported "no
+ROCm-capable device is detected" on a node with eight MI300X in it. Now numeric.
+Separately: `srun --overlap` steps get no GPUs unless the step itself passes
+`--gres`, which produces the identical symptom from a different cause.
+
+**There is no free storage node.** The `storage` partition has four GPU nodes:
+`cx67-15` and `cx67-25` are drained ("Kill task failed"), `cx68-25` has its NVMe
+array unmounted (all sixteen `/mnt/nixl-nvme-*` resolve to the boot drive), and
+`cx67-5` is the seven-drive node everything above was measured on. The two idle
+nodes, `ctr-smc-strg-cx68-[3,5]`, have `GRES=(null)` — no GPUs, so AIS cannot run
+on them at all. A sixteen-drive number to compare against session 2's 56 GB/s is
+therefore not available without an admin resuming a drained node, or `mkfs` on
+`cx68-25`'s ten blank drives.
+
 ## Open items
+
+- **Batch and thread-pool converge ~30% below fio on the same drives** (see
+  13:20). `AIS/batch`, `AIS_MT` and `POSIX/AIO` all land within a few percent of
+  each other at 35 GB/s read and 20 GB/s write, where fio's batch mode does
+  47.2/29.2. Three unrelated submit paths hitting one number with a NIXL-free
+  control above it is the shape of a limit in the NIXL path, not in any backend.
+  Candidates not yet separated: nixlbench's per-thread submit-and-wait loop, the
+  16 MiB `max_request_size` chunking, and the batch pool depth. The cheap first
+  experiment is `max_request_size`, since it is one parameter and a 64 MiB block
+  is currently split four ways.
 
 - **NIXL's transfer metrics reset to zero mid-run** (see 03:55). Mechanism not
   pinned — "resets when read" and "resets on the 100 ms telemetry interval" are

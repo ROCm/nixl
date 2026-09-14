@@ -18,7 +18,7 @@ ROCM_VERSION ?= 7.14.0
 NIXL_GIT_URL ?= https://github.com/ai-dynamo/nixl.git
 NIXL_REF     ?= v1.4.1
 MORI_GIT_URL ?= https://github.com/ROCm/mori.git
-MORI_REF     ?= v1.2.3
+MORI_REF     ?= v1.2.3.post1
 UCX_GIT_URL  ?= https://github.com/openucx/ucx.git
 UCX_REF      ?= v1.22.0
 # hipFile is the odd one out: ROCm/hipFile publishes no releases, its `nightly`
@@ -156,7 +156,8 @@ DIST := $(REPO_ROOT)/.slurm/run-build.sh
         snoop-sweep snoop-up snoop-down monitor-up monitor-down snoop-dump \
         fio-sweep dist-build dist-load \
         dist-build-here dist-bench dist-bench-2node \
-        patch-check patch-list print-tag print-config clean clean-images
+        patch-check patch-list readme readme-check \
+        print-tag print-config clean clean-images
 
 .DEFAULT_GOAL := help
 
@@ -214,6 +215,8 @@ help:
 	@echo "Introspection:"
 	@echo "  make print-tag       Print the derived image tag"
 	@echo "  make print-config    Print every resolved pin and build knob"
+	@echo "  make readme          Regenerate the README pin table from the pins"
+	@echo "  make readme-check    Fail if that table is stale"
 	@echo "  make clean           Remove build/ (patch-check clones) and dist/"
 	@echo "  make clean-images    Remove local $(IMAGE_NAME) images"
 	@echo ""
@@ -462,6 +465,20 @@ dist-load:                     # docker load the saved tarball onto NM_TARGETS
 
 print-tag:
 	@echo "$(IMAGE_REF)"
+
+_README_ENV := IMAGE_NAME="$(IMAGE_NAME)" IMAGE_REF="$(IMAGE_REF)" \
+	ROCM_VERSION="$(ROCM_VERSION)" \
+	NIXL_REF="$(NIXL_REF)" NIXL_GIT_URL="$(NIXL_GIT_URL)" \
+	MORI_REF="$(MORI_REF)" MORI_GIT_URL="$(MORI_GIT_URL)" \
+	UCX_REF="$(UCX_REF)" UCX_GIT_URL="$(UCX_GIT_URL)" \
+	HIPFILE_REF="$(HIPFILE_REF)" HIPFILE_GIT_URL="$(HIPFILE_GIT_URL)" \
+	FIO_REF="$(FIO_REF)" FIO_GIT_URL="$(FIO_GIT_URL)"
+
+readme:
+	@$(_README_ENV) "$(REPO_ROOT)/docker/scripts/readme-pins.sh"
+
+readme-check:
+	@$(_README_ENV) "$(REPO_ROOT)/docker/scripts/readme-pins.sh" --check
 
 print-config:
 	@echo "VERSION        = $(VERSION)"

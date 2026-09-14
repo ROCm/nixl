@@ -272,7 +272,7 @@ RUN --mount=type=cache,target=/root/.cache,sharing=locked \
 FROM base AS mori
 
 ARG MORI_GIT_URL=https://github.com/ROCm/mori.git
-ARG MORI_REF=v1.2.3
+ARG MORI_REF=v1.2.3.post1
 # MORI's optional pieces.  UMBP/SPDK is off (the SPDK submodule is huge and
 # needs its own selective checkout); tests/examples/benchmarks need MPI.
 ARG MORI_BUILD_UMBP=OFF

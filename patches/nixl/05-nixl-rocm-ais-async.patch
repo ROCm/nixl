@@ -952,10 +952,10 @@ index 0000000..7c860ff
 +#endif
 diff --git a/src/plugins/rocm_ais/ais_utils.cpp b/src/plugins/rocm_ais/ais_utils.cpp
 new file mode 100644
-index 0000000..04f3335
+index 0000000..3e753e3
 --- /dev/null
 +++ b/src/plugins/rocm_ais/ais_utils.cpp
-@@ -0,0 +1,275 @@
+@@ -0,0 +1,283 @@
 +/* Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 + *
 + * SPDX-License-Identifier: Apache-2.0
@@ -1058,7 +1058,15 @@ index 0000000..04f3335
 +    : io_batch_events(size), io_batch_params(size), max_reqs(size) {
 +    const hipFileError_t err = hipFileBatchIOSetUp(&batch_handle, size);
 +    if (err.err != hipFileSuccess) {
-+        NIXL_ERROR << "AIS: hipFileBatchIOSetUp failed: err=" << err.err;
++        NIXL_ERROR << "AIS: hipFileBatchIOSetUp failed: err=" << err.err
++                   << " max_nr=" << size;
++        if (err.err == hipFileInvalidValue) {
++            // BatchContext::MAX_SIZE is 128 and is not exported in hipfile.h,
++            // so an oversized batch_limit fails here as a bare "invalid value"
++            // at agent creation, nowhere near the flag that caused it.
++            NIXL_ERROR << "AIS: hipFile caps one batch context at 128 operations"
++                       << " -- lower batch_limit (nixlbench: --gds_batch_limit)";
++        }
 +        return;
 +    }
 +    init_ok = true;
