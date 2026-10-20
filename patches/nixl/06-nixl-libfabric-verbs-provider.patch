@@ -1,0 +1,90 @@
+# Let NIXL's LIBFABRIC backend select the verbs provider.
+#
+# getAvailableNetworkDevices() picks a provider from a hardcoded preference
+# ladder -- cxi, then efa, then tcp, then sockets -- using exact-match lookups
+# into a map keyed on fabric_attr->prov_name.  There is no verbs entry, so on
+# any verbs-capable RDMA hardware the function falls through to tcp and NIXL
+# benchmarks a 100GbE-class NIC over TCP sockets while reporting success.  That
+# is the whole reason this repo cannot currently measure LIBFABRIC against UCX
+# on ConnectX-7 or on the emulated AMD Pensando ionic NIC that rocm-ernic
+# presents.
+#
+# Adding the string "verbs" to the ladder does NOT fix it, which is the subtle
+# part.  This function asks fi_getinfo for FI_EP_RDM.  The verbs provider is
+# natively FI_EP_MSG; RDM is supplied by ofi_rxm layered on top, and libfabric
+# names a layered provider "<core>;<util>" joined by OFI_NAME_DELIM.  So
+# prov_name comes back as "verbs;ofi_rxm" and an exact lookup for "verbs"
+# matches nothing at all.  Hence a prefix match, with a delimiter check so a
+# future unrelated provider whose name merely starts with those five letters
+# cannot be mistaken for verbs.
+#
+# Placed after efa and before tcp: it is real RDMA, so it must outrank the
+# sockets-based fallbacks, but it must not displace the two purpose-built
+# providers on hardware that has them.  Returns every verbs device rather than
+# just the first, because the rail manager stripes across devices -- tcp and
+# sockets stay capped at one device, which is the existing behaviour.
+#
+# NOT a complete answer to running on ERNIC.  Two further things bite, both
+# upstream and neither fixed here:
+#
+#   * libfabric's vrb_cmp_domain_and_dev_name() (prov/verbs/src/verbs_info.c)
+#     truncates the domain name at the LAST hyphen before comparing it to the
+#     device name, so any hyphenated RDMA device name fails to match itself,
+#     src_addr is left NULL and the endpoint binds 0.0.0.0.  rocm-ernic names
+#     its device rocm-rdma-ernic<n>, which trips exactly that.  Present in
+#     libfabric v1.22.0, v2.1.0 and main.  Worked around on our guests by
+#     udev/99-zz-nixl-ernic-name.rules in this repo; see that file.
+#
+#   * vrb_hmem_supported() gates FI_HMEM on strstr(dev_name, "mlx"), so no
+#     non-Mellanox device can ever register VRAM through the verbs provider.
+#     DRAM_SEG only, until that is fixed upstream.
+#
+# Upstream-worthy as-is, and no open ai-dynamo/nixl PR or issue touches this
+# ladder (checked against all 175 open PRs).  Drop this patch once one does.
+#
+# To regenerate on a NIXL bump: the hunk is a self-contained insert into
+# getAvailableNetworkDevices() in src/utils/libfabric/libfabric_common.cpp.  If
+# it conflicts, re-add the verbs_it scan immediately before the if/else ladder
+# and the matching `else if (verbs_it != provider_device_map.end())` arm
+# between the efa and tcp arms.
+#
+diff --git a/src/utils/libfabric/libfabric_common.cpp b/src/utils/libfabric/libfabric_common.cpp
+index 662da308..bad2e580 100644
+--- a/src/utils/libfabric/libfabric_common.cpp
++++ b/src/utils/libfabric/libfabric_common.cpp
+@@ -98,10 +98,35 @@ getAvailableNetworkDevices() {
+         }
+     }
+ 
++    // Locate a verbs provider, if one is present.  This cannot be an exact
++    // lookup for "verbs": this function asks fi_getinfo for FI_EP_RDM, and the
++    // verbs provider is natively FI_EP_MSG -- RDM is supplied by ofi_rxm
++    // layered over it.  libfabric names a layered provider "<core>;<util>"
++    // (OFI_NAME_DELIM), so fabric_attr->prov_name is reported as
++    // "verbs;ofi_rxm", and provider_device_map is keyed on that full string.
++    // Matching the "verbs" prefix covers the layered name, the bare name, and
++    // any future utility layering, while the delimiter check keeps it from
++    // matching an unrelated provider that merely begins with those letters.
++    auto verbs_it = provider_device_map.end();
++    for (auto it = provider_device_map.begin(); it != provider_device_map.end(); ++it) {
++        if (it->first.compare(0, 5, "verbs") == 0 &&
++            (it->first.size() == 5 || it->first[5] == ';')) {
++            verbs_it = it;
++            break;
++        }
++    }
++
+     if (provider_device_map.find("cxi") != provider_device_map.end()) {
+         return {"cxi", provider_device_map["cxi"]};
+     } else if (provider_device_map.find("efa") != provider_device_map.end()) {
+         return {"efa", provider_device_map["efa"]};
++    } else if (verbs_it != provider_device_map.end()) {
++        // Every verbs device, not just the first: verbs is real RDMA and the
++        // rail manager stripes across devices, which is the whole point of
++        // multi-rail.  tcp and sockets below are deliberately capped at one
++        // device because striping a benchmark across loopback-ish transports
++        // measures nothing useful.
++        return {verbs_it->first, verbs_it->second};
+     } else if (provider_device_map.find("tcp") != provider_device_map.end()) {
+         return {"tcp", {provider_device_map["tcp"][0]}};
+     } else if (provider_device_map.find("sockets") != provider_device_map.end()) {

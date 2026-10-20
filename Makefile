@@ -16,11 +16,16 @@ REPO_ROOT := $(CURDIR)
 # args, and docker/scripts/image-tag.sh reads the Dockerfile when they are not.
 ROCM_VERSION ?= 7.14.0
 NIXL_GIT_URL ?= https://github.com/ai-dynamo/nixl.git
-NIXL_REF     ?= v1.4.1
+NIXL_REF     ?= v1.5.0
 MORI_GIT_URL ?= https://github.com/ROCm/mori.git
 MORI_REF     ?= v1.2.3.post1
 UCX_GIT_URL  ?= https://github.com/openucx/ucx.git
 UCX_REF      ?= v1.22.0
+# libfabric (OFI), for NIXL's LIBFABRIC backend -- a second RDMA transport to
+# put beside UCX.  Source-built because Ubuntu 24.04 ships 1.17 and the NIXL
+# plugin's floor is 1.21.0.  Empty leaves the plugin out of the image.
+LIBFABRIC_GIT_URL ?= https://github.com/ofiwg/libfabric.git
+LIBFABRIC_REF     ?= v1.22.0
 # hipFile is the odd one out: ROCm/hipFile publishes no releases, its `nightly`
 # git tag has been frozen since 2026-01-22 and the .deb assets on the "Nightly"
 # GitHub release since 2026-06-08 -- all three older than the 0.3.0 the ROCm
@@ -93,6 +98,8 @@ _BUILD_ARGS := \
 	--build-arg UCX_GIT_URL=$(UCX_GIT_URL) \
 	--build-arg UCX_REF=$(UCX_REF) \
 	--build-arg UCX_FAST=$(UCX_FAST) \
+	--build-arg LIBFABRIC_GIT_URL=$(LIBFABRIC_GIT_URL) \
+	--build-arg LIBFABRIC_REF=$(LIBFABRIC_REF) \
 	--build-arg HIPFILE_GIT_URL=$(HIPFILE_GIT_URL) \
 	--build-arg HIPFILE_REF=$(HIPFILE_REF) \
 	--build-arg FIO_GIT_URL=$(FIO_GIT_URL) \
@@ -225,6 +232,7 @@ help:
 	@echo "  NIXL_REF=$(NIXL_REF)   ($(NIXL_GIT_URL))"
 	@echo "  MORI_REF=$(MORI_REF)   ($(MORI_GIT_URL))"
 	@echo "  UCX_REF=$(UCX_REF)     ($(UCX_GIT_URL))"
+	@echo "  LIBFABRIC_REF=$(LIBFABRIC_REF) ($(LIBFABRIC_GIT_URL))"
 	@echo "  HIPFILE_REF=$(HIPFILE_REF) ($(HIPFILE_GIT_URL))"
 	@echo "  FIO_REF=$(FIO_REF) ($(FIO_GIT_URL))"
 	@echo ""
@@ -471,6 +479,7 @@ _README_ENV := IMAGE_NAME="$(IMAGE_NAME)" IMAGE_REF="$(IMAGE_REF)" \
 	NIXL_REF="$(NIXL_REF)" NIXL_GIT_URL="$(NIXL_GIT_URL)" \
 	MORI_REF="$(MORI_REF)" MORI_GIT_URL="$(MORI_GIT_URL)" \
 	UCX_REF="$(UCX_REF)" UCX_GIT_URL="$(UCX_GIT_URL)" \
+	LIBFABRIC_REF="$(LIBFABRIC_REF)" LIBFABRIC_GIT_URL="$(LIBFABRIC_GIT_URL)" \
 	HIPFILE_REF="$(HIPFILE_REF)" HIPFILE_GIT_URL="$(HIPFILE_GIT_URL)" \
 	FIO_REF="$(FIO_REF)" FIO_GIT_URL="$(FIO_GIT_URL)"
 

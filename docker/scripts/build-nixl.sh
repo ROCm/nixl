@@ -90,6 +90,45 @@ if grep -q "option('mori_path'" "${NIXL_SRC}/meson_options.txt"; then
 	echo "[nixl] building with the MORI backend plugin (-Dmori_path=${MORI_INSTALL_PREFIX})"
 fi
 
+# The LIBFABRIC backend.  Two options have to line up for it to build at all:
+#
+#   -Dlibfabric_path  where to find libfabric itself.  Without it meson falls
+#                     back to `dependency('libfabric', required: false)`, and
+#                     that does NOT come up empty: the base image carries the
+#                     distro libfabric1 (1.17 on Ubuntu 24.04), pulled in as a
+#                     transitive dependency of libopenmpi3t64.  So omitting
+#                     this does not disable the plugin -- it silently builds
+#                     it against a libfabric below the plugin's own 1.21.0
+#                     floor.  Explicit beats implicit here.
+#   -Drocm_path       requests ROCm/HIP support, new in NIXL v1.5.0.  The
+#                     plugin's GPU paths are written against CUDA; with this
+#                     set, meson runs them through hipify-perl and compiles
+#                     them against HIP.  Without it the plugin still builds,
+#                     but host-memory only -- VRAM transfers are not available,
+#                     which defeats the point of testing it here.
+#
+# rocm_path is scoped to the libfabric subdirs upstream (src/utils/libfabric,
+# src/plugins/libfabric, test/unit/utils), so passing it does not change how any
+# other backend is built.  Guarded on the option existing so an older NIXL_REF
+# still configures -- v1.4.1 and earlier have libfabric_path but no rocm_path,
+# and would build a CUDA-only plugin that then fails to link.
+LIBFABRIC_PREFIX="${LIBFABRIC_PREFIX:-/opt/libfabric}"
+if [[ -e "${LIBFABRIC_PREFIX}/lib/libfabric.so" ]]; then
+	if grep -q "option('rocm_path'" "${NIXL_SRC}/meson_options.txt"; then
+		MESON_ARGS+=("-Dlibfabric_path=${LIBFABRIC_PREFIX}" "-Drocm_path=${ROCM_PATH}")
+		WANT_LIBFABRIC=1
+		export PKG_CONFIG_PATH="${LIBFABRIC_PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH}"
+		export LD_LIBRARY_PATH="${LIBFABRIC_PREFIX}/lib:${LD_LIBRARY_PATH}"
+		echo "[nixl] building the LIBFABRIC backend with HIP support" \
+			"(-Dlibfabric_path=${LIBFABRIC_PREFIX} -Drocm_path=${ROCM_PATH})"
+	else
+		echo "[nixl] libfabric present at ${LIBFABRIC_PREFIX} but ${NIXL_SRC} has no rocm_path" \
+			"option (NIXL_REF predates v1.5.0) -- skipping the LIBFABRIC plugin" >&2
+	fi
+else
+	echo "[nixl] no libfabric at ${LIBFABRIC_PREFIX} -- skipping the LIBFABRIC plugin"
+fi
+
 # NIXL_MESON_EXTRA_ARGS lets the Dockerfile/Makefile append one-off options
 # without editing this script (word-split on purpose).
 # shellcheck disable=SC2206
@@ -163,6 +202,16 @@ find "${NIXL_PLUGIN_DIR}" -name 'libplugin_*.so' -printf '  %f\n' 2>/dev/null ||
 # The UCX backend is the one plugin this image cannot be useful without.
 if [[ ! -e "${NIXL_PLUGIN_DIR}/libplugin_UCX.so" ]]; then
 	echo "ERROR: libplugin_UCX.so not built -- NIXL did not find UCX at ${UCX_PREFIX}" >&2
+	exit 1
+fi
+
+# meson drops an optional plugin whose dependency does not resolve without
+# failing the build, so "we asked for LIBFABRIC" and "we got LIBFABRIC" are
+# different claims.  Assert the second one, or the image ships a backend that
+# only fails at nixlbench --backend=LIBFABRIC time.
+if [[ "${WANT_LIBFABRIC:-0}" == "1" && ! -e "${NIXL_PLUGIN_DIR}/libplugin_LIBFABRIC.so" ]]; then
+	echo "ERROR: libplugin_LIBFABRIC.so not built despite -Dlibfabric_path=${LIBFABRIC_PREFIX}" >&2
+	echo "Check meson's libfabric/hwloc/numa dependency resolution in the configure log." >&2
 	exit 1
 fi
 

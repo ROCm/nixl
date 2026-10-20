@@ -1,0 +1,258 @@
+# Upstream submission for ROCm/rocm-ernic.  NOT applied by anything in this
+# repo -- this repo's build does not include rocm-ernic.  It is kept here
+# because udev/99-zz-nixl-ernic-name.rules is a local workaround that exists
+# only until this lands; the two should be read together, and the override
+# deleted when this merges.
+#
+# Generated against ROCm/rocm-ernic e80aacc (default branch == develop).
+# Apply with:  git apply /path/to/this.patch      (from a rocm-ernic checkout)
+#
+# Suggested commit message:
+#
+#     udev: name the RDMA device rocm_ernic<n>, not rocm-rdma-ernic<n>
+#
+#     The old name silently broke both RDMA transports, for two unrelated
+#     reasons, and neither reported a failure -- a benchmark still ran and
+#     still printed numbers, just not over this NIC.
+#
+#     libfabric's vrb_cmp_domain_and_dev_name() truncates a domain name at
+#     its LAST hyphen before comparing it to the device name.  That is meant
+#     to strip the "-xrc"/"-dgram" domain suffixes, but it cuts any hyphen,
+#     so "rocm-rdma-ernic0" was compared as 9 characters against a
+#     16-character device name and failed to match its own device.
+#     vrb_info_add_dev_addr() was then never called, src_addr stayed NULL,
+#     rdma_bind_addr() was skipped and the endpoint was exported as
+#     0.0.0.0:<port>, leaving the peer to pick a source device off the
+#     routing table -- in a guest, the virtio management NIC.  Affects
+#     libfabric v1.22.0, v2.1.0 and main.
+#
+#     UCX's UCT_MD_NAME_MAX is 16 and that is the buffer size including the
+#     NUL, so 15 usable characters.  "rocm-rdma-ernic0" is exactly 16, so
+#     ucs_snprintf_zero() in uct/ib/base/ib_md.c stored "rocm-rdma-ernic",
+#     the exact strcmp in uct_ib_get_device_by_name() never matched, and UCX
+#     dropped the memory domain with a bare continue and fell back to TCP.
+#     Indices 0-9 are all exactly 16 characters, so every single-NIC guest
+#     hit it.
+#
+#     rocep1s0, ionic_0 and mlx5_0 clear both checks, which is why this only
+#     appeared once the rule began handing out a long hyphenated name.
+#
+#     rocm_ernic<n> is 11 characters with no hyphen.  The rule's idempotency
+#     guard and its free-index probe move with it -- changing only the rename
+#     would make the rule re-rename on every trigger.  The constraint is
+#     documented in the rules file so it is not reintroduced.
+#
+#     The Ethernet name rocm-ernic<n> is deliberately unchanged: netdev names
+#     go through neither code path, and keeping the two textually distinct
+#     makes logs readable.
+#
+#     Name-matching device lookups accept both spellings so guests
+#     provisioned before this change keep working until their rules are
+#     updated; scripts/find-rdma-device.sh, which matches on the PCI tuple,
+#     remains the rename-immune way to do this and should be preferred.
+#
+diff --git a/.github/workflows/system-tests.yml b/.github/workflows/system-tests.yml
+index 61833c0..61fb234 100644
+--- a/.github/workflows/system-tests.yml
++++ b/.github/workflows/system-tests.yml
+@@ -743,7 +743,7 @@ jobs:
+         # Identify the device by the emulated PCI tuple rather than by name.  The
+         # name is rewritten twice during boot -- kernel ionic_%d, then
+         # 60-rdma-persistent-naming.rules to rocep<bus>s<slot>, then
+-        # 99-rocm-ernic.rules to rocm-rdma-ernic<n> -- so it says nothing
++        # 99-rocm-ernic.rules to rocm_ernic<n> -- so it says nothing
+         # about which driver bound the device, and any name pattern is a
+         # snapshot of one moment in that sequence.  A pattern that
+         # silently stops matching is exactly how a guest with a working
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index eb700d4..108b80e 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -111,6 +111,22 @@
+ 
+ ### Changed
+ 
++* The RDMA device is now named `rocm_ernic<n>` rather than
++  `rocm-rdma-ernic<n>`. The old name silently broke both RDMA transports:
++  libfabric's `vrb_cmp_domain_and_dev_name()` truncates a domain name at its
++  last hyphen before comparing it to the device name, so the verbs domain
++  failed to match its own device, `src_addr` was left NULL and the endpoint
++  bound `0.0.0.0`; and UCX's `UCT_MD_NAME_MAX` is 16 including the NUL, so the
++  16-character name was truncated by one and the exact `strcmp` in
++  `uct_ib_get_device_by_name()` never matched, dropping the memory domain and
++  falling back to TCP without an error. Neither reported a failure. The new
++  name is hyphen-free and 11 characters; `udev/99-rocm-ernic.rules` documents
++  the constraint so it is not reintroduced. The Ethernet name
++  `rocm-ernic<n>` is unchanged -- netdev names go through neither code path.
++  Device lookups that match on name accept both spellings for now; prefer
++  `scripts/find-rdma-device.sh`, which matches on the PCI tuple and is immune
++  to renaming. Guests provisioned before this change keep the old name until
++  their udev rules are updated and the device is re-triggered.
+ * The emulated device now identifies as `1dd8:1002` with subsystem
+   `1dd8:5400`, rather than `1022:8001`. A guest image built for an older
+   release needs its udev rules updated to match and should refresh `pci.ids`
+diff --git a/ansible/roles/ernic_guest_setup/README.md b/ansible/roles/ernic_guest_setup/README.md
+index 1b8b023..b8c9d9a 100644
+--- a/ansible/roles/ernic_guest_setup/README.md
++++ b/ansible/roles/ernic_guest_setup/README.md
+@@ -11,7 +11,7 @@ upstream `ionic` and `ionic_rdma` modules, built by DKMS from patched upstream
+ kernel sources as the `ionic-ernic` package, against stock rdma-core with its
+ upstream `providers/ionic`. rocm-xio is built with `GDA_IONIC=ON` and
+ `RDMA_CORE_BUILD=OFF`. udev names the devices `rocm-ernic0` and
+-`rocm-rdma-ernic0`.
++`rocm_ernic0`.
+ 
+ This needs a guest kernel of 6.18 or newer
+ (`ernic_ionic_min_kernel`) — that is where `drivers/infiniband/hw/ionic`
+diff --git a/scripts/find-rdma-device.sh b/scripts/find-rdma-device.sh
+index 526b947..405c359 100755
+--- a/scripts/find-rdma-device.sh
++++ b/scripts/find-rdma-device.sh
+@@ -7,7 +7,7 @@
+ # it is rewritten twice: the kernel registers ionic_%d,
+ # 60-rdma-persistent-naming.rules rewrites that to rocep<bus>s<slot> via
+ # rdma_rename, and udev/99-rocm-ernic.rules rewrites it again to
+-# rocm-rdma-ernic<n>.  Any list of name patterns is a snapshot of one
++# rocm_ernic<n>.  Any list of name patterns is a snapshot of one
+ # moment in that sequence and goes stale silently.
+ #
+ # Intended to be run in the guest:
+diff --git a/service/vm-driver-install.sh.in b/service/vm-driver-install.sh.in
+index 51fb513..0098e94 100755
+--- a/service/vm-driver-install.sh.in
++++ b/service/vm-driver-install.sh.in
+@@ -96,9 +96,9 @@ sudo modprobe ionic_rdma
+ 
+ log_info "Verifying RDMA device..."
+ sleep 2
+-if ibv_devices 2>/dev/null | grep -qE "rocm-rdma-ernic|ionic|rocep"; then
++if ibv_devices 2>/dev/null | grep -qE "rocm_ernic|rocm-rdma-ernic|ionic|rocep"; then
+     DEVICE="$(ibv_devices \
+-        | grep -E "rocm-rdma-ernic|ionic|rocep" \
++        | grep -E "rocm_ernic|rocm-rdma-ernic|ionic|rocep" \
+         | awk '{print $1}' | head -1)"
+     log_info "RDMA device found: ${DEVICE}"
+     ibv_devinfo -d "${DEVICE}" 2>/dev/null | head -20 || true
+diff --git a/tests/ernic_device.h b/tests/ernic_device.h
+index 92460e0..0305133 100644
+--- a/tests/ernic_device.h
++++ b/tests/ernic_device.h
+@@ -6,7 +6,7 @@
+  * to, and on our guests it is rewritten twice: the kernel registers
+  * ionic_%d, 60-rdma-persistent-naming.rules rewrites that to
+  * rocep<bus>s<slot> via rdma_rename, and udev/99-rocm-ernic.rules
+- * rewrites it again to rocm-rdma-ernic<n>.  Any list of name patterns
++ * rewrites it again to rocm_ernic<n>.  Any list of name patterns
+  * is therefore a snapshot of one moment in a three-step rename, and
+  * goes stale silently -- a test that stops matching returns 77 and
+  * CTest reports the skip as a pass.
+diff --git a/tests/test_loopback_with_vm.sh b/tests/test_loopback_with_vm.sh
+index b7cca08..42129e6 100755
+--- a/tests/test_loopback_with_vm.sh
++++ b/tests/test_loopback_with_vm.sh
+@@ -206,7 +206,7 @@ test_config() {
+            ssh -o StrictHostKeyChecking=no -p "$SSH_PORT" "${VM_USER}@localhost" << EOFVM
+         set -e
+         # Check for the emulated RDMA device
+-        if ! ibv_devices | grep -qE 'rocm-rdma-ernic|ionic_'; then
++        if ! ibv_devices | grep -qE 'rocm_ernic|rocm-rdma-ernic|ionic_'; then
+           echo "No emulated RDMA device found - driver may need to be loaded"
+           exit 77
+         fi
+diff --git a/udev/99-rocm-ernic.rules b/udev/99-rocm-ernic.rules
+index 0b34c77..2210972 100644
+--- a/udev/99-rocm-ernic.rules
++++ b/udev/99-rocm-ernic.rules
+@@ -7,7 +7,50 @@
+ # Renames network interfaces and InfiniBand devices
+ # created by rocm-ernic (1dd8:1002, upstream ionic driver)
+ # to stable names, so guests always see rocm-ernic<n> and
+-# rocm-rdma-ernic<n>.
++# rocm_ernic<n>.
++#
++# THE RDMA NAME IS CONSTRAINED.  It must contain no
++# hyphen and be at most 15 characters.  Both come
++# from consumers, not from us, and both failures are
++# silent -- the benchmark still runs and still prints
++# numbers, just not over this NIC:
++#
++#   * libfabric prov/verbs/src/verbs_info.c,
++#     vrb_cmp_domain_and_dev_name(), truncates the
++#     domain name at the LAST hyphen before comparing
++#     it to the device name.  That is meant to strip
++#     the "-xrc"/"-dgram" domain suffixes, but it cuts
++#     any hyphen, so "rocm-rdma-ernic0" was compared
++#     as 9 characters against a 16-character device
++#     name and failed to match its OWN device.
++#     vrb_info_add_dev_addr() is then never called,
++#     src_addr stays NULL, rdma_bind_addr() is skipped,
++#     and the endpoint is exported as 0.0.0.0:<port>;
++#     the peer picks a source device off the routing
++#     table instead -- in a guest, the virtio
++#     management NIC.  Affects v1.22.0, v2.1.0 and main.
++#
++#   * UCX src/uct/api/uct_def.h sets UCT_MD_NAME_MAX to
++#     16, and that is the buffer size INCLUDING the NUL,
++#     so 15 usable characters.  "rocm-rdma-ernic0" is
++#     exactly 16, so ucs_snprintf_zero() in
++#     uct/ib/base/ib_md.c stored "rocm-rdma-ernic", the
++#     exact strcmp in uct_ib_get_device_by_name() never
++#     matched, and UCX dropped the memory domain with a
++#     bare `continue` and fell back to TCP in silence.
++#     Indices 0-9 were all exactly 16 characters, so
++#     every single-NIC guest hit it.
++#
++# "rocm_ernic<n>" is 11 characters with no hyphen.
++# rocep1s0, ionic_0 and mlx5_0 clear both checks too,
++# which is why neither bug surfaced before this rule
++# started handing out a long hyphenated name.
++#
++# The ETHERNET name keeps its hyphen on purpose: netdev
++# names go through neither code path, 15 characters is
++# the kernel IFNAMSIZ limit rather than UCX's, and
++# keeping the two textually distinct makes it obvious
++# which is which in logs.
+ #
+ # Install with:
+ #   sudo cp udev/99-rocm-ernic.rules /etc/udev/rules.d/
+@@ -33,7 +76,7 @@ SUBSYSTEM=="net", ACTION=="add", \
+ # --- InfiniBand device naming ---
+ #
+ # Renames the RDMA device from the PCI-topology
+-# name (e.g. rocep2s0) to rocm-rdma-ernic<n>.
++# name (e.g. rocep2s0) to rocm_ernic<n>.
+ #
+ # The system rule 60-rdma-persistent-naming.rules
+ # renames the device from its kernel-registered
+@@ -48,7 +91,7 @@ SUBSYSTEM=="net", ACTION=="add", \
+ # the old version scanned all of
+ # /sys/class/infiniband for the emulated vendor and
+ # renamed every match to the same hard-coded
+-# rocm-rdma-ernic0, so a guest with two emulated
++# rocm_ernic0, so a guest with two emulated
+ # devices had the second rename fail.
+ #
+ # Reading the current name this way also removes
+@@ -60,7 +103,7 @@ SUBSYSTEM=="net", ACTION=="add", \
+ # which a caller checking for the device could
+ # lose a race against.
+ #
+-# The rocm-rdma-ernic* guard makes this idempotent
++# The rocm_ernic* guard makes this idempotent
+ # -- without it a re-triggered event would rename
+ # an already-correct device to the next free index.
+ 
+@@ -74,10 +117,10 @@ SUBSYSTEM=="infiniband", ACTION=="add", \
+     for ibdev in $pci/infiniband/*; do \
+       [ -d $ibdev ] || continue; \
+       cur=${ibdev##*/}; \
+-      case $cur in rocm-rdma-ernic*) continue;; esac; \
++      case $cur in rocm_ernic*) continue;; esac; \
+       i=0; \
+-      while [ -e /sys/class/infiniband/rocm-rdma-ernic$i ]; do \
++      while [ -e /sys/class/infiniband/rocm_ernic$i ]; do \
+         i=$((i+1)); \
+       done; \
+-      /usr/bin/rdma dev set $cur name rocm-rdma-ernic$i; \
++      /usr/bin/rdma dev set $cur name rocm_ernic$i; \
+     done'"

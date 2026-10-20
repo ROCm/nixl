@@ -1,0 +1,92 @@
+# Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+#
+# Rename the emulated ERNIC RDMA device to a name that UCX and libfabric can
+# actually bind to.  Guest-side only -- udev does not run inside a container.
+#
+# WHY THIS EXISTS
+#
+# rocm-ernic's udev/99-rocm-ernic.rules names the device rocm-rdma-ernic<n>.
+# That name trips two independent, SILENT bugs, one in each transport this
+# repo benchmarks.  Neither is ERNIC's fault; ERNIC is just the first device
+# whose name is long enough and hyphenated enough to hit both.
+#
+#   1. libfabric -- prov/verbs/src/verbs_info.c, vrb_cmp_domain_and_dev_name()
+#
+#        char *s = strrchr(domain_name, '-');
+#        if (s) cmp_len = s - domain_name; else cmp_len = strlen(domain_name);
+#        if (cmp_len != strlen(dev_name)) return -1;
+#
+#      The strrchr is meant to strip the "-xrc" / "-dgram" domain suffixes, but
+#      it cuts at the LAST hyphen in any name.  "rocm-rdma-ernic0" is cut to 9
+#      characters and compared against the 16-character device name, so the
+#      domain fails to match its OWN device.  vrb_info_add_dev_addr() is then
+#      never called, src_addr stays NULL, rdma_bind_addr() is skipped, and the
+#      endpoint is exported as 0.0.0.0:<port>.  The peer picks a source device
+#      off the routing table instead -- i.e. the virtio management NIC.  The
+#      benchmark runs and reports plausible numbers over the wrong interface.
+#      Present in v1.22.0, v2.1.0 (what Ubuntu 26.04 ships) and main.
+#
+#   2. UCX -- UCT_MD_NAME_MAX is 16 (src/uct/api/uct_def.h), and that is the
+#      buffer size INCLUDING the NUL, so 15 usable characters.
+#      "rocm-rdma-ernic0" is exactly 16, so ucs_snprintf_zero() at
+#      src/uct/ib/base/ib_md.c:900 stores "rocm-rdma-ernic", the exact strcmp
+#      in uct_ib_get_device_by_name() never matches, and ucp_context.c drops
+#      the memory domain with a bare `continue`.  UCX falls back to TCP and
+#      says nothing.  Indices 0-9 are all exactly 16 characters, so every
+#      single-NIC guest hits this.
+#
+# rocep1s0, ionic_0 and mlx5_0 all clear both checks, which is why neither bug
+# has surfaced before.
+#
+# "rocm_ernic<i>" is 11 characters with no hyphen, clearing both.
+#
+# THIS IS A LOCAL OVERRIDE, NOT THE FIX.  The real fix is one edit to
+# rocm-ernic's own rule (and its guard and sysfs probe, which must change in
+# the same commit or it re-renames on every trigger).  This file exists so the
+# hypothesis can be proven on a live guest before that lands upstream, and so
+# this repo's benchmarks are not quietly measuring the wrong NIC in the
+# meantime.  Delete it once rocm-ernic names the device itself.
+#
+# Install:
+#   sudo cp udev/99-zz-nixl-ernic-name.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger -s infiniband
+#   udevadm settle
+# Verify with scripts/ernic-rename-verify.sh.
+#
+# ORDERING: the filename must sort after 99-rocm-ernic.rules so our RUN+= is
+# queued after theirs and we rename last ("zz" does that).  The rule does not
+# DEPEND on theirs having run, though -- it renames from whatever the current
+# name is, so it is equally correct on a guest where their rule is absent.
+#
+# Matching is on the emulated PCI tuple, never on a name: the name is exactly
+# the thing in flux here, and rocm-ernic's own scripts/find-rdma-device.sh
+# warns that any name-pattern list "is a snapshot of one moment in that
+# sequence and goes stale silently".  The subsystem guard (0x1dd8:0x5400,
+# registered upstream in pci.ids as "ROCm Emulated RDMA NIC") is what keeps
+# this off real Pensando hardware, which the same ionic driver also binds.
+#
+# $devpath is scoped to the device the event is about, so a guest with two
+# emulated NICs renames each one once.  Scanning all of /sys/class/infiniband
+# instead is the bug rocm-ernic already fixed in their own rule.
+
+SUBSYSTEM=="infiniband", ACTION=="add", \
+  DRIVERS=="ionic|ionic_rdma", \
+  ATTRS{vendor}=="0x1dd8", \
+  ATTRS{device}=="0x1002", \
+  ATTRS{subsystem_vendor}=="0x1dd8", \
+  ATTRS{subsystem_device}=="0x5400", \
+  RUN+="/bin/sh -c 'rdma=/usr/bin/rdma; [ -x $rdma ] || rdma=/usr/sbin/rdma; \
+    [ -x $rdma ] || exit 0; \
+    pci=/sys$devpath; pci=${pci%/infiniband/*}; \
+    for ibdev in $pci/infiniband/*; do \
+      [ -d $ibdev ] || continue; \
+      cur=${ibdev##*/}; \
+      case $cur in rocm_ernic*) continue;; esac; \
+      i=0; \
+      while [ -e /sys/class/infiniband/rocm_ernic$i ]; do \
+        i=$((i+1)); \
+      done; \
+      $rdma dev set $cur name rocm_ernic$i; \
+    done'"

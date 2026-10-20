@@ -62,6 +62,7 @@ ROCM_VERSION="$(_arg ROCM_VERSION)"
 NIXL_GIT_URL="$(_arg NIXL_GIT_URL)"; NIXL_REF="$(_arg NIXL_REF)"
 MORI_GIT_URL="$(_arg MORI_GIT_URL)"; MORI_REF="$(_arg MORI_REF)"
 UCX_GIT_URL="$(_arg UCX_GIT_URL)"; UCX_REF="$(_arg UCX_REF)"
+LIBFABRIC_GIT_URL="$(_arg LIBFABRIC_GIT_URL)"; LIBFABRIC_REF="$(_arg LIBFABRIC_REF)"
 HIPFILE_GIT_URL="$(_arg HIPFILE_GIT_URL)"; HIPFILE_REF="$(_arg HIPFILE_REF)"
 FIO_GIT_URL="$(_arg FIO_GIT_URL)"; FIO_REF="$(_arg FIO_REF)"
 
@@ -96,6 +97,9 @@ render() {
 	printf '| UCX | %s | %s | %s |\n' \
 		"$(_ref_cell "${UCX_GIT_URL}" "${UCX_REF}" '—')" \
 		"$(_repo_cell "${UCX_GIT_URL}")" "$(_count_patches ucx)"
+	printf '| libfabric | %s | %s | %s |\n' \
+		"$(_ref_cell "${LIBFABRIC_GIT_URL}" "${LIBFABRIC_REF}" '_not built_')" \
+		"$(_repo_cell "${LIBFABRIC_GIT_URL}")" "$(_count_patches libfabric)"
 	printf '| hipFile | %s | %s | %s |\n' \
 		"$(_ref_cell "${HIPFILE_GIT_URL}" "${HIPFILE_REF}" '_ROCm-packaged_')" \
 		"$(_repo_cell "${HIPFILE_GIT_URL}")" "$(_count_patches hipfile)"

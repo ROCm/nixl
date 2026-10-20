@@ -33,10 +33,10 @@
 # no files -- but an AIS run needs both.
 #
 diff --git a/benchmark/nixlbench/src/utils/utils.cpp b/benchmark/nixlbench/src/utils/utils.cpp
-index 32942ea..b0dab1b 100644
+index 1ba445d2..00e0e129 100644
 --- a/benchmark/nixlbench/src/utils/utils.cpp
 +++ b/benchmark/nixlbench/src/utils/utils.cpp
-@@ -63,7 +63,7 @@ NB_ARG_STRING(worker_type, XFERBENCH_WORKER_NIXL, "Type of worker [nixl, nvshmem
+@@ -59,7 +59,7 @@ NB_ARG_STRING(worker_type, XFERBENCH_WORKER_NIXL, "Type of worker [nixl, nvshmem
  NB_ARG_STRING(backend,
                XFERBENCH_BACKEND_UCX,
                "Name of NIXL backend [UCX, GDS, GDS_MT, POSIX, GPUNETIO, Mooncake, HF3FS, OBJ, "
@@ -45,7 +45,7 @@ index 32942ea..b0dab1b 100644
  NB_ARG_STRING(initiator_seg_type,
                XFERBENCH_SEG_TYPE_DRAM,
                "Type of memory segment for initiator [DRAM, VRAM]. Note: Storage backends always "
-@@ -127,6 +127,12 @@ NB_ARG_INT32(gds_mt_num_threads, 1, "Number of threads used by GDS MT plugin");
+@@ -123,6 +123,12 @@ NB_ARG_INT32(gds_mt_num_threads, 1, "Number of threads used by GDS MT plugin");
  NB_ARG_STRING(device_list,
                "all",
                "Comma-separated device name to use for communication (only used with nixl worker)");
@@ -58,15 +58,15 @@ index 32942ea..b0dab1b 100644
  NB_ARG_STRING(etcd_endpoints,
                "",
                "ETCD server endpoints for communication (optional for storage backends)");
-@@ -269,6 +275,7 @@ bool xferBenchConfig::enable_vmm = false;
+@@ -288,6 +294,7 @@ bool xferBenchConfig::enable_vmm = false;
  bool xferBenchConfig::use_hugepages = false;
  std::string xferBenchConfig::device_list = "";
  std::string xferBenchConfig::etcd_endpoints = "";
 +std::string xferBenchConfig::ucx_error_handling_mode = "";
  std::string xferBenchConfig::asio_address = "127.0.0.1";
  std::uint16_t xferBenchConfig::asio_port = 12345;
- std::string xferBenchConfig::benchmark_group = "default";
-@@ -392,8 +399,9 @@ xferBenchConfig::loadParams(void) {
+ std::string xferBenchConfig::randomize_location_mode = "none";
+@@ -512,8 +519,9 @@ xferBenchConfig::loadParams(void) {
              return -1;
  #endif
          }
@@ -78,15 +78,15 @@ index 32942ea..b0dab1b 100644
              gds_batch_pool_size = NB_ARG(gds_batch_pool_size);
              gds_batch_limit = NB_ARG(gds_batch_limit);
          }
-@@ -505,6 +513,7 @@ xferBenchConfig::loadParams(void) {
-     warmup_iter = NB_ARG(warmup_iter);
-     num_threads = NB_ARG(num_threads);
+@@ -641,6 +649,7 @@ xferBenchConfig::loadParams(void) {
+         return -1;
+     }
      etcd_endpoints = NB_ARG(etcd_endpoints);
 +    ucx_error_handling_mode = NB_ARG(ucx_error_handling_mode);
      asio_address = NB_ARG(asio_address);
      asio_port = NB_ARG(asio_port);
-     filepath = NB_ARG(filepath);
-@@ -694,8 +703,8 @@ xferBenchConfig::printConfig() {
+     randomize_location_mode = NB_ARG(randomize_location_mode);
+@@ -870,8 +879,8 @@ xferBenchConfig::printConfig() {
          printOption("Pipeline depth (--pipeline_depth=N)", std::to_string(pipeline_depth));
          printOption("Use hugepages (--use_hugepages=[0,1])", std::to_string(use_hugepages));
  
@@ -97,7 +97,7 @@ index 32942ea..b0dab1b 100644
              printOption("GDS batch pool size (--gds_batch_pool_size=N)",
                          std::to_string(gds_batch_pool_size));
              printOption("GDS batch limit (--gds_batch_limit=N)", std::to_string(gds_batch_limit));
-@@ -820,6 +829,8 @@ bool
+@@ -1023,6 +1032,8 @@ bool
  xferBenchConfig::isStorageBackend() {
      return (XFERBENCH_BACKEND_GDS == xferBenchConfig::backend ||
              XFERBENCH_BACKEND_GDS_MT == xferBenchConfig::backend ||
@@ -107,10 +107,10 @@ index 32942ea..b0dab1b 100644
              XFERBENCH_BACKEND_POSIX == xferBenchConfig::backend ||
              XFERBENCH_BACKEND_OBJ == xferBenchConfig::backend ||
 diff --git a/benchmark/nixlbench/src/utils/utils.h b/benchmark/nixlbench/src/utils/utils.h
-index bbf4cb7..d1e2bc0 100644
+index 8336a949..3ab2817e 100644
 --- a/benchmark/nixlbench/src/utils/utils.h
 +++ b/benchmark/nixlbench/src/utils/utils.h
-@@ -112,6 +112,9 @@
+@@ -116,6 +116,9 @@
  #define XFERBENCH_BACKEND_UCCL "UCCL"
  #define XFERBENCH_BACKEND_AZURE_BLOB "AZURE_BLOB"
  #define XFERBENCH_BACKEND_INFINIA "INFINIA"
@@ -120,19 +120,19 @@ index bbf4cb7..d1e2bc0 100644
  
  // POSIX API types
  #define XFERBENCH_POSIX_API_AIO "AIO"
-@@ -189,6 +192,7 @@ public:
+@@ -198,6 +201,7 @@ public:
      static size_t progress_threads;
      static std::string device_list;
      static std::string etcd_endpoints;
 +    static std::string ucx_error_handling_mode;
      static std::string asio_address; // IPv4
      static uint16_t asio_port;
-     static std::string benchmark_group;
+     static std::string randomize_location_mode;
 diff --git a/benchmark/nixlbench/src/worker/nixl/nixl_worker.cpp b/benchmark/nixlbench/src/worker/nixl/nixl_worker.cpp
-index 8b88a32..647b9d2 100644
+index d6a5d75b..c94a2d7a 100644
 --- a/benchmark/nixlbench/src/worker/nixl/nixl_worker.cpp
 +++ b/benchmark/nixlbench/src/worker/nixl/nixl_worker.cpp
-@@ -128,6 +128,7 @@ xferBenchNixlWorker::xferBenchNixlWorker(const std::vector<std::string> &devices
+@@ -146,6 +146,7 @@ xferBenchNixlWorker::xferBenchNixlWorker(const std::vector<std::string> &devices
          0 == xferBenchConfig::backend.compare(XFERBENCH_BACKEND_GPUNETIO) ||
          0 == xferBenchConfig::backend.compare(XFERBENCH_BACKEND_MOONCAKE) ||
          0 == xferBenchConfig::backend.compare(XFERBENCH_BACKEND_UCCL) ||
@@ -140,7 +140,7 @@ index 8b88a32..647b9d2 100644
          xferBenchConfig::isStorageBackend()) {
          backend_name = xferBenchConfig::backend;
      } else {
-@@ -137,8 +138,34 @@ xferBenchNixlWorker::xferBenchNixlWorker(const std::vector<std::string> &devices
+@@ -155,8 +156,34 @@ xferBenchNixlWorker::xferBenchNixlWorker(const std::vector<std::string> &devices
  
      agent->getPluginParams(backend_name, mems, backend_params);
  
@@ -173,6 +173,6 @@ index 8b88a32..647b9d2 100644
 +        if (!xferBenchConfig::ucx_error_handling_mode.empty()) {
 +            backend_params["ucx_error_handling_mode"] = xferBenchConfig::ucx_error_handling_mode;
 +        }
- 
-         // No need to set device_list if all is specified
-         // fallback to backend preference
+         if (xferBenchConfig::use_device_api) {
+             backend_params["ucx_num_device_channels"] =
+                 std::to_string(xferBenchConfig::device_channel_num);

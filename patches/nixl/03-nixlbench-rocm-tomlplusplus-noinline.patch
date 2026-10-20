@@ -22,13 +22,13 @@
 # benchmark/nixlbench/src/utils/utils.h.
 #
 diff --git a/benchmark/nixlbench/src/utils/utils.h b/benchmark/nixlbench/src/utils/utils.h
-index 425b923..6d72568 100644
+index c6ea26ac..8336a949 100644
 --- a/benchmark/nixlbench/src/utils/utils.h
 +++ b/benchmark/nixlbench/src/utils/utils.h
-@@ -27,7 +27,21 @@
- #include <variant>
+@@ -28,7 +28,21 @@
  #include <vector>
  #include <optional>
+ #include <nixl_types.h>
 +// toml++ 3.4.0's preprocessor.hpp evaluates
 +//     #if TOML_GCC || TOML_CLANG || TOML_HAS_ATTR(__noinline__)
 +// and the preprocessor macro-expands the WHOLE #if expression before it can

@@ -103,6 +103,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libdrm-dev \
         libdw-dev \
         libgflags-dev \
+        libhwloc-dev \
         libibverbs-dev \
         libltdl-dev \
         libmount-dev \
@@ -181,6 +182,43 @@ RUN --mount=type=cache,target=/root/.cache,sharing=locked \
     UCX_SRC=/tmp/ucx-src UCX_FAST="${UCX_FAST}" UCX_DEBUG_LOG="${UCX_DEBUG_LOG}" \
     bash /tmp/scripts/build-ucx.sh && \
     rm -rf /tmp/ucx-src
+
+# ----- 1a-bis. libfabric (OFI, for NIXL's LIBFABRIC backend) -----------------
+# FROM base, not FROM ucx: libfabric and UCX are independent transports, so this
+# stage runs concurrently with the UCX, hipFile and MORI stages.
+#
+# Source-built for the same reason UCX is: Ubuntu 24.04 packages libfabric 1.17,
+# below the 1.21.0 floor the NIXL plugin requires.  See build-libfabric.sh for
+# which providers are compiled in and why.
+#
+# LIBFABRIC_REF empty skips the stage and leaves /opt/libfabric empty, which
+# build-nixl.sh reads as "do not build the LIBFABRIC plugin" -- the escape hatch
+# if a libfabric bump regresses, and what keeps the COPY below unconditional.
+FROM base AS libfabric
+
+ARG LIBFABRIC_GIT_URL=https://github.com/ofiwg/libfabric.git
+ARG LIBFABRIC_REF=v1.22.0
+
+ENV LIBFABRIC_PREFIX=/opt/libfabric
+
+COPY docker/scripts/clone-src.sh docker/scripts/build-libfabric.sh /tmp/scripts/
+
+RUN mkdir -p /opt/libfabric && \
+    if [ -z "${LIBFABRIC_REF}" ]; then \
+        echo "LIBFABRIC_REF empty -- skipping libfabric; NIXL's LIBFABRIC plugin will not be built"; \
+    else \
+        SRC_NAME=libfabric \
+        SRC_GIT_URL="${LIBFABRIC_GIT_URL}" \
+        SRC_REF="${LIBFABRIC_REF}" \
+        SRC_DEST=/tmp/libfabric-src \
+        bash /tmp/scripts/clone-src.sh; \
+    fi
+
+RUN --mount=type=cache,target=/root/.cache,sharing=locked \
+    if [ -n "${LIBFABRIC_REF}" ]; then \
+        LIBFABRIC_SRC=/tmp/libfabric-src \
+        bash /tmp/scripts/build-libfabric.sh && rm -rf /tmp/libfabric-src; \
+    fi
 
 # ----- 1b. hipFile (source-built, overlays the ROCm-packaged copy) -----------
 # FROM base, not FROM ucx: hipFile depends on neither, so this runs concurrently
@@ -317,7 +355,7 @@ RUN --mount=type=cache,target=/root/.cache,sharing=locked \
 FROM ucx AS nixl
 
 ARG NIXL_GIT_URL=https://github.com/ai-dynamo/nixl.git
-ARG NIXL_REF=v1.4.1
+ARG NIXL_REF=v1.5.0
 # Plugins excluded from the build: CUDA-only (GDS/GDS_MT/GPUNETIO) or needing
 # vendor SDKs / cloud object stores we do not test here.
 ARG NIXL_DISABLE_PLUGINS=GDS,GDS_MT,GPUNETIO,OBJ,AZURE_BLOB,INFINIA
@@ -341,6 +379,11 @@ COPY --from=mori /opt/mori /opt/mori
 # HIPFILE_REF is unset, in which case build-nixl.sh falls back to $ROCM_PATH and
 # both plugins link the packaged libhipfile instead.
 COPY --from=hipfile /opt/hipfile /opt/hipfile
+
+# The source-built libfabric the LIBFABRIC backend links against.  Empty when
+# LIBFABRIC_REF is unset, in which case build-nixl.sh leaves the plugin out of
+# the build rather than falling back to the too-old distro libfabric.
+COPY --from=libfabric /opt/libfabric /opt/libfabric
 
 COPY docker/scripts/clone-src.sh docker/scripts/build-nixl.sh \
      docker/scripts/build-nixlbench.sh /tmp/scripts/
@@ -395,6 +438,7 @@ ARG ROCM_VERSION
 ARG NIXL_REF
 ARG MORI_REF
 ARG UCX_REF
+ARG LIBFABRIC_REF
 ARG HIPFILE_REF
 ARG FIO_REF
 ARG VERSION=
@@ -418,10 +462,14 @@ LABEL org.opencontainers.image.title="nixl-mori-test" \
       com.amd.mori.ref="${MORI_REF}" \
       com.amd.ucx.ref="${UCX_REF}" \
       com.amd.hipfile.ref="${HIPFILE_REF}" \
+      com.amd.libfabric.ref="${LIBFABRIC_REF}" \
       com.amd.fio.ref="${FIO_REF}"
 
 COPY --from=ucx     /opt/rocnixl-ucx /opt/rocnixl-ucx
 COPY --from=hipfile /opt/hipfile     /opt/hipfile
+# Empty when LIBFABRIC_REF is unset; libplugin_LIBFABRIC.so carries an rpath to
+# it, and fi_info comes along for diagnosing provider selection on a new host.
+COPY --from=libfabric /opt/libfabric /opt/libfabric
 # Both are symlink trees or empty when FIO_REF is unset; /opt/fio-hipfile is
 # the prefix fio's rpath points at, so it has to come along with the binary.
 COPY --from=fio     /opt/fio         /opt/fio
@@ -454,7 +502,8 @@ ENV NIXL_PREFIX=/opt/nixl \
     NIXL_PLUGIN_DIR=/opt/nixl/lib/x86_64-linux-gnu/plugins \
     PYTHONPATH=/opt/nixl/lib/python3/dist-packages \
     FIO_PREFIX=/opt/fio \
-    PATH=/opt/nixlbench/bin:/opt/hsa-snoop/bin:/opt/fio/bin:/opt/rocnixl-ucx/bin:${PATH}
+    LIBFABRIC_PREFIX=/opt/libfabric \
+    PATH=/opt/nixlbench/bin:/opt/hsa-snoop/bin:/opt/fio/bin:/opt/rocnixl-ucx/bin:/opt/libfabric/bin:${PATH}
 
 # /opt/mori/lib holds the same libmori_*.so the amd_mori wheel bundles under its
 # package dir.  Both are on the search path, which is fine as long as one
@@ -474,6 +523,7 @@ RUN printf '%s\n' \
         /opt/nixl/lib \
         /opt/mori/lib \
         /opt/rocnixl-ucx/lib \
+        /opt/libfabric/lib \
         > /etc/ld.so.conf.d/nixl-mori.conf && \
     ldconfig
 
@@ -508,6 +558,18 @@ RUN set -eu; \
         echo "hipFile OK: AIS/AIS_MT link the source-built /opt/hipfile"; \
     else \
         echo "HIPFILE_REF unset -- AIS/AIS_MT link the ROCm-packaged libhipfile"; \
+    fi; \
+    if [ -e /opt/libfabric/lib/libfabric.so ]; then \
+        test -e "${NIXL_PLUGIN_DIR}/libplugin_LIBFABRIC.so" || \
+            { echo "ERROR: libfabric is staged but libplugin_LIBFABRIC.so did not survive to the runtime stage" >&2; exit 1; }; \
+        ldd "${NIXL_PLUGIN_DIR}/libplugin_LIBFABRIC.so" | grep "not found" && \
+            { echo "ERROR: libplugin_LIBFABRIC.so has unresolved libs" >&2; exit 1; }; \
+        ldd "${NIXL_PLUGIN_DIR}/libplugin_LIBFABRIC.so" | grep -q "libfabric.*=> */opt/libfabric/lib/" || \
+            { echo "ERROR: libplugin_LIBFABRIC.so resolves libfabric outside /opt/libfabric:" >&2; \
+              ldd "${NIXL_PLUGIN_DIR}/libplugin_LIBFABRIC.so" | grep libfabric >&2; exit 1; }; \
+        echo "libfabric OK: LIBFABRIC links the source-built /opt/libfabric"; \
+    else \
+        echo "LIBFABRIC_REF unset -- no LIBFABRIC plugin in this image"; \
     fi; \
     if [ -x /opt/fio/bin/fio ]; then \
         fio --enghelp 2>&1 | grep -qE "^[[:space:]]*libhipfile[[:space:]]*$" || \
