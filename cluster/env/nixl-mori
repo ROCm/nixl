@@ -1,0 +1,70 @@
+# qemu-tool settings for a NIXL + MORI test cluster.
+#
+# An N-VM rocm-ernic mesh, one emulated RDMA NIC and one rocjitsu GPU per VM,
+# each VM with a local NVMe. Enough to exercise the NIXL backends that do not
+# need real hardware: UCX and LIBFABRIC between guests over the emulated ERNIC
+# port, POSIX and the AIS family against the local NVMe.
+#
+# This file is an overlay on qemu-minimal's own `scale-out` profile, which is
+# the authoritative one -- it is layered after it, and only carries the keys
+# that differ. Render and bring up with:
+#
+#   QM=~/Projects/qemu-minimal
+#   qemu-tool gen-compose \
+#       --env-file $QM/qemu/env/scale-out \
+#       --env-file cluster/env/nixl-mori \
+#       --output-dir /var/lib/qemu-tool/stacks/nixl-mori
+#   qemu-tool compose --stack-dir /var/lib/qemu-tool/stacks/nixl-mori \
+#       --env-file $QM/qemu/env/scale-out \
+#       --env-file cluster/env/nixl-mori up -d
+#
+# `make cluster-up` does both. Both directory flags are load-bearing: without
+# --output-dir the render lands on qemu-minimal's committed stack, and without
+# --stack-dir the compose run brings up that stack rather than this one.
+#
+# ---- What each VM gets ------------------------------------------------------
+#
+# Two containers per VM beyond QEMU itself, and the order they start in
+# matters:
+#
+#   ernic-N     the emulated RDMA NIC, serving a vfio-user socket.
+#   tapsetup-N  joins ernic-N's *network namespace*, creates tap0 there, exits.
+#
+# ernic-N waits for tap0 before it execs, so restarting ernic-N alone strands
+# it: the restart gives it a fresh namespace with no tap0 and it dies after
+# two minutes with "tap0 never appeared". Start tapsetup-N again right after.
+# Restarting ernic-N also recreates its vfio-user socket, so the guest loses
+# its device and qemu-N has to be restarted too.
+#
+# rocjitsu-N leaves a stale socket behind when it stops and cannot rebind to
+# it; delete /run/vfu/rocjitsu-N.sock before restarting it.
+
+VM_COUNT=2
+VM_NAME_PREFIX=nixl-mori
+
+# Non-colliding with qemu-minimal's own fleets. Change all of these together
+# if two clusters have to coexist on one host.
+FLEET_NET_PREFIX=172.26
+ERNIC_TCP_PORT=6520
+VM_SSH_PORT_BASE=2400
+ERNIC_MAC_PREFIX=72:6f:63:6e
+ERNIC_GUEST_SUBNET=192.168.220
+ERNIC_STATS_PORT=9870
+PROM_PORT=9290
+
+# A local NVMe per guest, which is what the POSIX and AIS backends are pointed
+# at. It arrives unformatted: `make cluster-nvme` makes an ext4 on it and
+# mounts it at /mnt/nvme.
+VM_NVME=1
+
+# 7 GB is the qemu-minimal default and it is tight: nixlbench allocates
+# --total_buffer_size per process, default 8 GiB, which does not fit. Either
+# raise this or pass a smaller buffer; the cluster targets pass 1 GiB.
+VM_VMEM=8192
+VM_VCPUS=4
+
+GRAFANA_ENABLE=false
+LOGS_ENABLE=false
+LMCACHE_ENABLE=false
+VM_EXTRA_HOSTFWD=
+PROM_DATA_DIR=/var/lib/qemu-tool/stacks/nixl-mori/prom-data

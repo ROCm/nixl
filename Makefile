@@ -163,6 +163,8 @@ DIST := $(REPO_ROOT)/.slurm/run-build.sh
         snoop-sweep snoop-up snoop-down monitor-up monitor-down snoop-dump \
         fio-sweep dist-build dist-load \
         dist-build-here dist-bench dist-bench-2node \
+        cluster-tool cluster-gen cluster-up cluster-down cluster-status \
+        cluster-nvme cluster-stack \
         patch-check patch-list readme readme-check \
         print-tag print-config clean clean-images
 
@@ -507,3 +509,47 @@ clean:
 
 clean-images:
 	-docker images --format '{{.Repository}}:{{.Tag}}' | grep '^$(IMAGE_NAME):' | xargs -r docker rmi
+
+# ---- Test cluster (qemu-tool) ----------------------------------------------
+# An N-VM ernic mesh with a GPU and an NVMe per guest, for exercising the NIXL
+# backends without real hardware. See cluster/README.md.
+#
+# qemu-tool has to come from the qemu-minimal source tree: the packaged build
+# has no gen-compose.
+
+QEMU_MINIMAL ?= $(HOME)/Projects/qemu-minimal
+QEMU_TOOL    ?= /tmp/qt/bin/qemu-tool
+CLUSTER_DIR  ?= /var/lib/qemu-tool/stacks/nixl-mori
+CLUSTER_ENV  := --env-file $(QEMU_MINIMAL)/qemu/env/scale-out \
+                --env-file $(REPO_ROOT)/cluster/env/nixl-mori
+
+cluster-tool:
+	@test -x "$(QEMU_TOOL)" || { \
+	    echo "Installing qemu-tool from $(QEMU_MINIMAL) into /tmp/qt"; \
+	    python3 -m venv /tmp/qt && /tmp/qt/bin/pip install -q "$(QEMU_MINIMAL)/qemu"; }
+	@"$(QEMU_TOOL)" gen-compose --help >/dev/null 2>&1 || { \
+	    echo "ERROR: $(QEMU_TOOL) has no gen-compose; it is not the source build" >&2; \
+	    exit 1; }
+
+cluster-gen: cluster-tool
+	@mkdir -p "$(CLUSTER_DIR)"
+	"$(QEMU_TOOL)" gen-compose $(CLUSTER_ENV) --output-dir "$(CLUSTER_DIR)"
+
+cluster-up: cluster-gen
+	"$(QEMU_TOOL)" compose --stack-dir "$(CLUSTER_DIR)" $(CLUSTER_ENV) up -d
+	@echo "guests will take a few minutes to boot; 'make cluster-status' to watch"
+
+cluster-down: cluster-tool
+	-"$(QEMU_TOOL)" compose --stack-dir "$(CLUSTER_DIR)" $(CLUSTER_ENV) down -v
+
+cluster-status:
+	@"$(REPO_ROOT)/cluster/scripts/cluster.sh" status
+
+# ext4 + mount the local NVMe on every guest. Idempotent.
+cluster-nvme:
+	@"$(REPO_ROOT)/cluster/scripts/cluster.sh" nvme
+
+# Export /opt from the slim image and install it on every guest. Needs
+# `docker buildx bake slim` first.
+cluster-stack:
+	@"$(REPO_ROOT)/cluster/scripts/cluster.sh" stack

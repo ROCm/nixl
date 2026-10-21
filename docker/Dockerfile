@@ -42,6 +42,12 @@
 # ----- 0. Base ---------------------------------------------------------------
 ARG ROCM_VERSION=7.14.0
 ARG ROCM_BASE_IMAGE=rocm/dev-ubuntu-24.04:${ROCM_VERSION}-full
+# Base for the slim runtime stage. Overridable so it can come from somewhere
+# other than Docker Hub: a site mirror that proxies docker.io makes the
+# *mirror* fetch upstream, so a local `docker login` does not apply to it and
+# its quota is what you hit. Naming a registry explicitly --
+# registry-1.docker.io/library/ubuntu:24.04 -- skips the mirror.
+ARG RUNTIME_BASE_IMAGE=ubuntu:24.04
 
 FROM ${ROCM_BASE_IMAGE} AS base
 
@@ -605,6 +611,140 @@ RUN set -eu; \
     else \
         echo "INSTALL_TORCH=0 -- skipping the nixl._api import check"; \
     fi
+
+WORKDIR /work
+CMD ["/bin/bash"]
+
+# ----- 4b. Slim runtime ------------------------------------------------------
+# The same binaries on a base that was never a build environment.
+#
+# `runtime` is FROM base, and base is rocm/dev-ubuntu-24.04:*-full: compilers,
+# headers, static libraries and tests, none of which a benchmark run uses.  AMD
+# publishes no slim 7.14 base to switch to -- only -full exists for that series
+# -- and deleting the unwanted parts in a later layer would save nothing,
+# because the bytes still ship in the layer underneath.  So this stage starts
+# from plain Ubuntu and brings over only what the artifacts actually link.
+#
+# What it gives up, deliberately:
+#
+#   MORI's JIT.  MORI compiles its GPU kernels with hipcc on first use, and
+#   hipcc is most of what was left behind.  `import mori` works and the C++ SDK
+#   is here, but a kernel that is not already in ~/.mori/jit cannot be built in
+#   this image.  Use the full one for MORI, or warm the cache there and mount it.
+#
+#   Anything that wants ROCm headers or a compiler at run time, for the same
+#   reason.
+#
+# NIXL and nixlbench over UCX, libfabric, POSIX, AIS and hipFile are unaffected:
+# they link ROCm runtime libraries, which are copied, not the toolchain.
+FROM runtime AS runtime-slim-deps
+
+# Resolve what the artifacts link and stage just those, with their symlinks.
+# ldd rather than a package list: the closure is whatever the binaries name,
+# which is smaller and cannot drift from what was actually built.
+RUN set -eux; \
+    mkdir -p /slim/opt/rocm/lib; \
+    : > /tmp/libs; \
+    for d in /opt/nixl /opt/nixlbench /opt/mori /opt/rocnixl-ucx \
+             /opt/libfabric /opt/hipfile /opt/fio /opt/fio-hipfile \
+             /opt/hsa-snoop; do \
+        [ -d "$d" ] || continue; \
+        find "$d" -type f \( -name '*.so*' -o -perm -u+x \) -print0 \
+        | xargs -0 -r -n1 ldd 2>/dev/null \
+        | awk '/=> \/opt\/rocm/ {print $3}' >> /tmp/libs || true; \
+    done; \
+    sort -u /tmp/libs | grep -v '^$' > /tmp/libs.u; \
+    echo "ROCm libraries the artifacts link: $(wc -l < /tmp/libs.u)"; \
+    # Follow the whole symlink chain, not just its ends. A ROCm soname
+    # reaches its file through two hops -- lib/libfoo.so.N ->
+    # lib/libfoo.so.N.x.y -> core-N/lib/libfoo.so.N.x.y -- and copying only
+    # the first link and the final target leaves the first one dangling,
+    # which ldconfig then ignores and the loader reports as "not found".
+    while read -r lib; do \
+        [ -e "$lib" ] || continue; \
+        p="$lib"; \
+        hops=0; \
+        while [ -L "$p" ] && [ "$hops" -lt 16 ]; do \
+            cp -a --parents "$p" /slim/ 2>/dev/null || true; \
+            t=$(readlink "$p"); \
+            case "$t" in /*) p="$t" ;; *) p="$(dirname "$p")/$t" ;; esac; \
+            hops=$((hops + 1)); \
+        done; \
+        [ -e "$p" ] && cp -a --parents "$p" /slim/ 2>/dev/null || true; \
+    done < /tmp/libs.u; \
+    du -sh /slim
+
+# Base is RUNTIME_BASE_IMAGE, declared at the top of this file: an ARG used in
+# FROM has to be global, before the first FROM.
+FROM ${RUNTIME_BASE_IMAGE} AS runtime-slim
+
+ARG ROCM_VERSION
+ARG NIXL_REF
+ARG MORI_REF
+ARG UCX_REF
+ARG LIBFABRIC_REF
+ARG VERSION=
+
+LABEL org.opencontainers.image.title="nixl-mori-test (slim runtime)" \
+      org.opencontainers.image.description="NIXL + MORI runtime artifacts without the ROCm build environment" \
+      org.opencontainers.image.version="${VERSION}" \
+      com.amd.rocm.version="${ROCM_VERSION}"
+
+# Only what the artifacts need to load and run: libibverbs/librdmacm for the
+# RDMA backends, numa/atomic for UCX, python3 for the bindings and the wheel.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        ca-certificates libibverbs1 librdmacm1 libnuma1 libatomic1 \
+        libglib2.0-0t64 libgomp1 libelf1t64 libdrm2 libnl-3-200 \
+        libnl-route-3-200 python3 python3-pip pciutils kmod iproute2 \
+        libaio1t64 libdrm-amdgpu1 libgflags2.2 libhwloc15 liburing2; \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=runtime-slim-deps /slim/opt/rocm /opt/rocm
+COPY --from=ucx       /opt/rocnixl-ucx /opt/rocnixl-ucx
+COPY --from=libfabric /opt/libfabric   /opt/libfabric
+COPY --from=hipfile   /opt/hipfile     /opt/hipfile
+COPY --from=fio       /opt/fio         /opt/fio
+COPY --from=fio       /opt/fio-hipfile /opt/fio-hipfile
+COPY --from=mori      /opt/mori        /opt/mori
+COPY --from=nixl      /opt/nixl        /opt/nixl
+COPY --from=nixl      /opt/nixlbench   /opt/nixlbench
+COPY --from=hsasnoop  /opt/hsa-snoop   /opt/hsa-snoop
+COPY --from=mori      /wheels          /wheels
+
+ENV ROCM_PATH=/opt/rocm \
+    NIXL_PREFIX=/opt/nixl \
+    NIXL_PLUGIN_DIR=/opt/nixl/lib/x86_64-linux-gnu/plugins \
+    PYTHONPATH=/opt/nixl/lib/python3/dist-packages \
+    MORI_PREFIX=/opt/mori \
+    UCX_PREFIX=/opt/rocnixl-ucx \
+    LIBFABRIC_PREFIX=/opt/libfabric \
+    FIO_PREFIX=/opt/fio \
+    FI_UNIVERSE_SIZE=16 \
+    PATH=/opt/nixlbench/bin:/opt/hsa-snoop/bin:/opt/fio/bin:/opt/rocnixl-ucx/bin:/opt/libfabric/bin:/opt/rocm/bin:${PATH}
+
+RUN set -eux; \
+    printf '%s\n' /opt/rocm/lib /opt/rocm/lib/rocm_sysdeps/lib \
+        /opt/rocnixl-ucx/lib /opt/libfabric/lib \
+        /opt/mori/lib /opt/hipfile/lib /opt/nixl/lib/x86_64-linux-gnu \
+        > /etc/ld.so.conf.d/nixl-mori-slim.conf; \
+    ldconfig
+
+# The same assertion the full runtime makes: a plugin that cannot resolve its
+# libraries is the failure this stage is most likely to introduce, and it
+# should fail the build rather than the first benchmark.
+RUN set -eux; \
+    for so in "${NIXL_PLUGIN_DIR}"/libplugin_*.so; do \
+        [ -e "$so" ] || continue; \
+        if ldd "$so" | grep -q "not found"; then \
+            echo "ERROR: $so has unresolved libraries in the slim runtime:" >&2; \
+            ldd "$so" | grep "not found" >&2; \
+            exit 1; \
+        fi; \
+    done; \
+    nixlbench --help >/dev/null 2>&1 || nixlbench --help 2>&1 | head -3; \
+    echo "slim runtime: plugins resolve"
 
 WORKDIR /work
 CMD ["/bin/bash"]
