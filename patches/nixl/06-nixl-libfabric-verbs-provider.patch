@@ -24,6 +24,15 @@
 # just the first, because the rail manager stripes across devices -- tcp and
 # sockets stay capped at one device, which is the existing behaviour.
 #
+# The candidates are RANKED rather than taken in map order.  provider_device_map
+# is an unordered_map, so "the first verbs entry" is not reproducible, and the
+# variants are not interchangeable: verbs;ofi_rxm advertises FI_MR_PROV_KEY and
+# verbs;ofi_rxd advertises an empty mr_mode.  This backend always calls
+# fi_mr_reg with requested_key = 0, which only works when the provider assigns
+# keys, so landing on ofi_rxd fails the SECOND registration with -FI_ENOKEY,
+# long after the rails came up.  Measured on an emulated AMD Pensando ionic NIC
+# that offers both: unranked selection picked ofi_rxd and died in registerMem.
+#
 # NOT a complete answer to running on ERNIC.  Two further things bite, both
 # upstream and neither fixed here:
 #
@@ -49,10 +58,10 @@
 # between the efa and tcp arms.
 #
 diff --git a/src/utils/libfabric/libfabric_common.cpp b/src/utils/libfabric/libfabric_common.cpp
-index 662da308..bad2e580 100644
+index 662da308..985f8ccc 100644
 --- a/src/utils/libfabric/libfabric_common.cpp
 +++ b/src/utils/libfabric/libfabric_common.cpp
-@@ -98,10 +98,35 @@ getAvailableNetworkDevices() {
+@@ -98,10 +98,58 @@ getAvailableNetworkDevices() {
          }
      }
  
@@ -65,12 +74,35 @@ index 662da308..bad2e580 100644
 +    // Matching the "verbs" prefix covers the layered name, the bare name, and
 +    // any future utility layering, while the delimiter check keeps it from
 +    // matching an unrelated provider that merely begins with those letters.
++    // provider_device_map is an unordered_map, so "the first verbs entry" is not
++    // a stable choice when more than one verbs variant is present -- and on a
++    // device that offers both, the variants are NOT interchangeable:
++    //
++    //   verbs;ofi_rxm  RDM over MSG/RC endpoints.  Reports
++    //                  mr_mode = [FI_MR_LOCAL, FI_MR_VIRT_ADDR, FI_MR_ALLOCATED,
++    //                  FI_MR_PROV_KEY].  This backend always calls fi_mr_reg with
++    //                  requested_key = 0 and relies on the provider assigning the
++    //                  key, which is exactly what FI_MR_PROV_KEY means.
++    //   verbs;ofi_rxd  RDM over DGRAM/UD endpoints.  Reports an EMPTY mr_mode, so
++    //                  the *caller* owns key assignment.  Registering twice with
++    //                  requested_key = 0 then fails the second time with
++    //                  -FI_ENOKEY ("Required key not available"), after rails have
++    //                  already come up -- i.e. it fails at registerMem, far from
++    //                  the cause.
++    //
++    // So rank the candidates rather than taking whichever one hashes first:
++    // ofi_rxm, then a bare "verbs", then any other utility layering.
 +    auto verbs_it = provider_device_map.end();
++    int verbs_rank = 3; // one past the worst rank below
 +    for (auto it = provider_device_map.begin(); it != provider_device_map.end(); ++it) {
-+        if (it->first.compare(0, 5, "verbs") == 0 &&
-+            (it->first.size() == 5 || it->first[5] == ';')) {
++        const std::string &name = it->first;
++        if (name.compare(0, 5, "verbs") != 0) continue;
++        if (name.size() != 5 && name[5] != ';') continue;
++
++        const int rank = (name == "verbs;ofi_rxm") ? 0 : (name.size() == 5 ? 1 : 2);
++        if (rank < verbs_rank) {
++            verbs_rank = rank;
 +            verbs_it = it;
-+            break;
 +        }
 +    }
 +

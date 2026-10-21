@@ -180,6 +180,8 @@ make wheels        # export the MORI wheel to ./dist, no image loaded
 | `/opt/nixlbench` | nixlbench, on `PATH` (`NIXLBENCH_PREFIX`) |
 | `/opt/mori` | MORI C++ SDK: headers + `libmori_*.so` (`MORI_PREFIX`) |
 | `/opt/rocnixl-ucx` | ROCm UCX install prefix (`UCX_PREFIX`) |
+| `/opt/libfabric` | libfabric for the LIBFABRIC backend (`LIBFABRIC_PREFIX`) |
+| `FI_UNIVERSE_SIZE=16` | how many peers libfabric sizes itself for; see below |
 | `PYTHONPATH=/opt/nixl/lib/python3/dist-packages` | so `import nixl` resolves |
 | `amd_mori` wheel | pip-installed system-wide; `import mori` |
 | `nixl-mori-smoke-test` | the smoke test, on `PATH` |
@@ -187,6 +189,16 @@ make wheels        # export the MORI wheel to ./dist, no image loaded
 
 NIXL's ROCm bindings install as `nixl_rocm`; a small shim package re-exports
 them as `nixl`, so consumers keep writing `import nixl`.
+
+`FI_UNIVERSE_SIZE` is set because the LIBFABRIC backend does not come up
+without it on an emulated ERNIC port. libfabric's `ofi_rxm` sizes the MSG
+completion queue it opens under an RDM endpoint from the universe, and the
+default of 256 asks the verbs provider for a CQ far larger than the device
+offers -- `max_cqe` is 65435 there -- so `fi_enable()` returns EINVAL with
+`Unable to create verbs CQ` before anything is transferred. The per-endpoint
+knobs do not reach that term: neither `FI_OFI_RXM_MSG_RX_SIZE`/`TX_SIZE` nor
+`FI_VERBS_TX_SIZE`/`RX_SIZE` changes the request. Raise it for a fabric with
+more peers, on hardware whose `max_cqe` can take it.
 
 MORI JIT-compiles its GPU kernels with `hipcc` on first use and caches them in
 `~/.mori/jit`, so the first run in a fresh container pays a compile cost. The

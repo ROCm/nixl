@@ -93,9 +93,12 @@ fi
 # address, which is exactly the silent failure.
 printf '\n--- libfabric ---\n'
 if command -v fi_info >/dev/null 2>&1; then
-    out=$(fi_info -p verbs -d "$dev" -e msg -v 2>&1)
+    # -t/--ep_type, NOT -e: in libfabric 2.x -e is --env and prints the
+    # environment-variable help instead of any endpoint info, so `-e msg`
+    # silently reports no src_addr for a perfectly healthy device.
+    out=$(fi_info -p verbs -d "$dev" -t FI_EP_MSG -v 2>&1)
     if [ -z "$out" ] || printf '%s' "$out" | grep -qi "fi_getinfo:.*-61\|No data available"; then
-        fail "fi_info -p verbs -d $dev -e msg returned nothing"
+        fail "fi_info -p verbs -d $dev -t FI_EP_MSG returned nothing"
         note "If the name is clean, suspect that rocm-ernic0 has no IP: without"
         note "one, vrb_device_has_ipoib_addr() drops the device from FI_EP_MSG"
         note "entirely and rxm/RDM has nothing to layer on."

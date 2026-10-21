@@ -505,6 +505,19 @@ ENV NIXL_PREFIX=/opt/nixl \
     LIBFABRIC_PREFIX=/opt/libfabric \
     PATH=/opt/nixlbench/bin:/opt/hsa-snoop/bin:/opt/fio/bin:/opt/rocnixl-ucx/bin:/opt/libfabric/bin:${PATH}
 
+# How many peers libfabric sizes itself for.  rxm derives the size of the MSG
+# completion queue it opens under an RDM endpoint from this, and the default of
+# 256 asks the verbs provider for a CQ far larger than an emulated ERNIC port
+# offers: max_cqe there is 65435, and fi_enable() comes back EINVAL with
+# "Unable to create verbs CQ" before a single transfer.  The per-endpoint knobs
+# do not reach that term -- neither FI_OFI_RXM_MSG_RX_SIZE/TX_SIZE nor
+# FI_VERBS_TX_SIZE/RX_SIZE changes the request -- so this is the one that has
+# to be bounded.
+#
+# Raise it for a fabric with more peers than this, on hardware whose max_cqe
+# can take it; it costs only the CQ depth rxm reserves per endpoint.
+ENV FI_UNIVERSE_SIZE=16
+
 # /opt/mori/lib holds the same libmori_*.so the amd_mori wheel bundles under its
 # package dir.  Both are on the search path, which is fine as long as one
 # process loads only one of them -- the C++ path (nixlbench + a NIXL MORI
