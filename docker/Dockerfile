@@ -655,6 +655,16 @@ RUN set -eux; \
     done; \
     sort -u /tmp/libs | grep -v '^$' > /tmp/libs.u; \
     echo "ROCm libraries the artifacts link: $(wc -l < /tmp/libs.u)"; \
+    # Libraries reached by dlopen have no ldd edge, so the closure above is
+    # blind to them and they have to be named. MORI opens rocm_smi during
+    # agent init and exits 255 without a message when it is missing, so the
+    # MORI_IO backend is unusable in a slim image that omits it.
+    for n in librocm_smi64.so.1 librocm_smi64.so; do \
+        for d in /opt/rocm/lib /opt/rocm/lib/rocm_sysdeps/lib; do \
+            [ -e "$d/$n" ] && echo "$d/$n" >> /tmp/libs.u || true; \
+        done; \
+    done; \
+    sort -u -o /tmp/libs.u /tmp/libs.u; \
     # Follow the whole symlink chain, not just its ends. A ROCm soname
     # reaches its file through two hops -- lib/libfoo.so.N ->
     # lib/libfoo.so.N.x.y -> core-N/lib/libfoo.so.N.x.y -- and copying only
@@ -744,7 +754,13 @@ RUN set -eux; \
         fi; \
     done; \
     nixlbench --help >/dev/null 2>&1 || nixlbench --help 2>&1 | head -3; \
-    echo "slim runtime: plugins resolve"
+    echo "slim runtime: plugins resolve"; \
+    # ldd cannot speak for the dlopen'd ones, so assert them by name.
+    for n in librocm_smi64.so.1; do \
+        ldconfig -p | grep -q "$n" \
+            || { echo "ERROR: $n is dlopen'd at runtime but absent" >&2; exit 1; }; \
+    done; \
+    echo "slim runtime: dlopen'd libraries present"
 
 WORKDIR /work
 CMD ["/bin/bash"]

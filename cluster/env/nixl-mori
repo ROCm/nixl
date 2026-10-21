@@ -52,6 +52,17 @@ ERNIC_GUEST_SUBNET=192.168.220
 ERNIC_STATS_PORT=9870
 PROM_PORT=9290
 
+# Put each vfio-user device behind its own pcie-root-port. qemu-minimal's
+# scale-out profile does this and its overlay-mi100 turns it off, for a reason
+# local to that fleet -- it did not want a PCI-topology change landing at the
+# same time as a new drive. Inheriting the "off" here is wrong: without a root
+# port a device is a conventional PCI endpoint with no Express capability, so
+# it gets a 32-bit prefetchable BAR. The emulated GPU then comes up with a
+# 16 MB BAR0, amdgpu's memory controller cannot map VRAM through a window that
+# small, and the probe fails -EINVAL with no KFD device -- which takes the AIS
+# and AIS_MT backends with it.
+VM_VFIO_USER_ROOT_PORT=true
+
 # A local NVMe per guest, which is what the POSIX and AIS backends are pointed
 # at. It arrives unformatted: `make cluster-nvme` makes an ext4 on it and
 # mounts it at /mnt/nvme.

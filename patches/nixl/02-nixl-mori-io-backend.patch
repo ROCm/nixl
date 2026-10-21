@@ -32,7 +32,7 @@
 #     src/plugins/meson.build src/plugins/mori_io
 #
 diff --git a/meson.build b/meson.build
-index 10ba75f..8e0c118 100644
+index e2c2585..3fdefa5 100644
 --- a/meson.build
 +++ b/meson.build
 @@ -29,7 +29,7 @@ if enable_plugins_opt != '' and disable_plugins_opt != ''
@@ -44,7 +44,7 @@ index 10ba75f..8e0c118 100644
  
  enabled_plugins = {}
  
-@@ -312,6 +312,54 @@ endif
+@@ -388,6 +388,54 @@ endif
  
  has_gpu = cuda_dep.found() or hip_dep.found()
  
@@ -100,7 +100,7 @@ index 10ba75f..8e0c118 100644
  # without otherwise affecting the build. Non-empty value wins over the
  # autodetected CUDA-major value above: e.g. -Dwheel_variant=rocm -> nixl_rocm.
 diff --git a/meson_options.txt b/meson_options.txt
-index e4bf861..c32eca9 100644
+index 7b3ad91..dd444f9 100644
 --- a/meson_options.txt
 +++ b/meson_options.txt
 @@ -25,6 +25,7 @@ option('infinia_path', type: 'string', value: '/opt/ddn/red/', description: 'Pat
@@ -112,10 +112,10 @@ index e4bf861..c32eca9 100644
  option('cudapath_lib', type: 'string', value: '', description: 'Library path for CUDA')
  option('cudapath_stub', type: 'string', value: '', description: 'Extra Stub path for CUDA')
 diff --git a/src/plugins/meson.build b/src/plugins/meson.build
-index 4b69d29..23b487e 100644
+index 0374b54..6fe44da 100644
 --- a/src/plugins/meson.build
 +++ b/src/plugins/meson.build
-@@ -155,4 +155,12 @@ if enabled_plugins.get('GPUNETIO')
+@@ -146,6 +146,14 @@ if enabled_plugins.get('GPUNETIO')
      endif
  endif
  
@@ -128,6 +128,8 @@ index 4b69d29..23b487e 100644
 +endif
 +
  subdir('telemetry')
+ 
+ if nixl_trace_enabled
 diff --git a/src/plugins/mori_io/meson.build b/src/plugins/mori_io/meson.build
 new file mode 100644
 index 0000000..5dd3768
@@ -174,10 +176,10 @@ index 0000000..5dd3768
 +mori_io_backend_interface = declare_dependency(link_with: mori_io_backend_lib)
 diff --git a/src/plugins/mori_io/mori_io_backend.cpp b/src/plugins/mori_io/mori_io_backend.cpp
 new file mode 100644
-index 0000000..a45451e
+index 0000000..6a51ed6
 --- /dev/null
 +++ b/src/plugins/mori_io/mori_io_backend.cpp
-@@ -0,0 +1,796 @@
+@@ -0,0 +1,867 @@
 +/*
 + * SPDX-FileCopyrightText: Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 + * SPDX-License-Identifier: Apache-2.0
@@ -240,14 +242,73 @@ index 0000000..a45451e
 +    return (it == params->end() || it->second.empty()) ? fallback : it->second;
 +}
 +
++// True for an address that is fine to bind but meaningless to a peer.
++bool
++isWildcardHost(const std::string &host) {
++    return host.empty() || host == "0.0.0.0" || host == "::";
++}
++
++// A local IPv4 a peer could actually reach us on.
++//
++// The kernel picks the source address it would use to reach `probe` without
++// sending anything, which resolves to the address of the egress interface for
++// that route.  Only a fallback: on a host with more than one network -- which
++// is the normal case, a management NIC plus the fabric -- the default route is
++// usually the wrong one, so `mori_host` should be set explicitly and this just
++// keeps a single-homed host working without configuration.
++std::string
++routableLocalAddr(const char *probe = "8.8.8.8") {
++    const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
++    if (fd < 0) return {};
++
++    sockaddr_in to{};
++    to.sin_family = AF_INET;
++    to.sin_port = htons(53);
++    if (::inet_pton(AF_INET, probe, &to.sin_addr) != 1 ||
++        ::connect(fd, reinterpret_cast<sockaddr *>(&to), sizeof(to)) < 0) {
++        ::close(fd);
++        return {};
++    }
++
++    sockaddr_in me{};
++    socklen_t len = sizeof(me);
++    std::string out;
++    if (::getsockname(fd, reinterpret_cast<sockaddr *>(&me), &len) == 0) {
++        char buf[INET_ADDRSTRLEN] = {};
++        if (::inet_ntop(AF_INET, &me.sin_addr, buf, sizeof(buf)) != nullptr) out = buf;
++    }
++    ::close(fd);
++    return out;
++}
++
 +// The out-of-band TCP endpoint MORI uses to exchange its own metadata.  Port 0
 +// lets the kernel choose, which is what we want by default: the resulting port
 +// travels to the peer inside EngineDesc via getConnInfo, so nothing needs to be
 +// agreed in advance.
++//
++// The host does not get the same treatment.  It is not only bound, it is
++// advertised: MORI copies it into EngineDesc, getConnInfo ships that to the
++// peer, and the peer's RegisterRemoteEngine connects to whatever it says.  A
++// 0.0.0.0 here therefore reaches the other node as a literal 0.0.0.0 and every
++// transfer fails with "connect(0.0.0.0:<port>): Connection refused" -- after
++// init, registration and rendezvous have all succeeded, which is a long way
++// from the cause.  So resolve a concrete address before MORI ever sees one.
 +mori::io::IOEngineConfig
 +engineConfig(const nixl_b_params_t *params) {
 +    mori::io::IOEngineConfig cfg;
-+    cfg.host = paramOr(params, "mori_host", "0.0.0.0");
++    cfg.host = paramOr(params, "mori_host", "");
++    if (isWildcardHost(cfg.host)) {
++        cfg.host = routableLocalAddr();
++        if (cfg.host.empty()) {
++            NIXL_WARN << "MORI_IO: no routable local address found; falling back to "
++                         "0.0.0.0, which peers on other nodes cannot connect to. "
++                         "Set the 'mori_host' backend parameter.";
++            cfg.host = "0.0.0.0";
++        } else {
++            NIXL_DEBUG << "MORI_IO: advertising auto-detected host " << cfg.host
++                       << " (set 'mori_host' to override)";
++        }
++    }
 +    cfg.port = static_cast<uint16_t>(std::stoi(paramOr(params, "mori_port", "0")));
 +    return cfg;
 +}
@@ -478,7 +539,17 @@ index 0000000..a45451e
 +    sockaddr_in addr{};
 +    addr.sin_family = AF_INET;
 +    addr.sin_port = htons(peerPort);
-+    const std::string h = (peerHost.empty() || peerHost == "0.0.0.0") ? "127.0.0.1" : peerHost;
++    // A peer that advertised a wildcard told us nothing about where it is.
++    // Loopback is the only guess that can be right, and it is right only when
++    // the peer shares this host -- so say so rather than letting a cross-node
++    // run fail later as a bare connection refusal.
++    std::string h = peerHost;
++    if (isWildcardHost(h)) {
++        NIXL_WARN << "MORI_IO: peer advertised a wildcard notif host; assuming loopback. "
++                     "This can only work if the peer is on this node -- set 'mori_host' "
++                     "on it otherwise.";
++        h = "127.0.0.1";
++    }
 +    if (::inet_pton(AF_INET, h.c_str(), &addr.sin_addr) != 1) {
 +        NIXL_ERROR << "MORI_IO: bad notif peer address '" << h << "'";
 +        ::close(fd);
@@ -689,8 +760,10 @@ index 0000000..a45451e
 +    info.engine = engine_->GetEngineDesc();
 +    // Advertise the address MORI already resolved for this engine rather than
 +    // our own bind address, which is usually the 0.0.0.0 wildcard and useless
-+    // to a peer on another node.
-+    info.notifHost = info.engine.host.empty() ? notif_.host() : info.engine.host;
++    // to a peer on another node.  A wildcard is not only the empty string: an
++    // explicit "0.0.0.0" is the value MORI actually carries when nothing better
++    // was configured, so testing emptiness alone lets it through.
++    info.notifHost = isWildcardHost(info.engine.host) ? notif_.host() : info.engine.host;
 +    info.notifPort = notif_.port();
 +    str = pack(info);
 +    return NIXL_SUCCESS;
@@ -1224,10 +1297,10 @@ index 0000000..26c4630
 +#endif // NIXL_SRC_PLUGINS_MORI_IO_MORI_IO_BACKEND_H
 diff --git a/src/plugins/mori_io/mori_io_plugin.cpp b/src/plugins/mori_io/mori_io_plugin.cpp
 new file mode 100644
-index 0000000..14fa747
+index 0000000..f03c422
 --- /dev/null
 +++ b/src/plugins/mori_io/mori_io_plugin.cpp
-@@ -0,0 +1,36 @@
+@@ -0,0 +1,42 @@
 +/*
 + * SPDX-FileCopyrightText: Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 + * SPDX-License-Identifier: Apache-2.0
@@ -1239,9 +1312,15 @@ index 0000000..14fa747
 +using mori_io_plugin_t = nixlBackendPluginCreator<nixlMoriIoEngine>;
 +
 +// Init params surfaced to `nixl_agent.get_plugin_params("MORI_IO")` and
-+// settable through the agent's backend params / nixlbench --backend_params.
++// settable through the agent's backend params.  nixlbench has no generic
++// pass-through for these, so the ones a benchmark run needs have their own
++// flags there (--mori_host, --mori_port).
++//
++// mori_host is empty rather than "0.0.0.0" because the backend auto-detects a
++// routable address when it is unset, and a literal wildcard would be taken as
++// a deliberate choice and advertised to peers, which cannot work off-node.
 +static const nixl_b_params_t mori_io_params = {
-+    {"mori_host", "0.0.0.0"},
++    {"mori_host", ""},
 +    {"mori_port", "0"},
 +    {"mori_backends", "auto"},
 +    {"mori_qp_per_transfer", "1"},

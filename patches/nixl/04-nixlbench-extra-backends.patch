@@ -33,7 +33,7 @@
 # no files -- but an AIS run needs both.
 #
 diff --git a/benchmark/nixlbench/src/utils/utils.cpp b/benchmark/nixlbench/src/utils/utils.cpp
-index 1ba445d2..00e0e129 100644
+index 1ba445d..9a9667c 100644
 --- a/benchmark/nixlbench/src/utils/utils.cpp
 +++ b/benchmark/nixlbench/src/utils/utils.cpp
 @@ -59,7 +59,7 @@ NB_ARG_STRING(worker_type, XFERBENCH_WORKER_NIXL, "Type of worker [nixl, nvshmem
@@ -45,7 +45,7 @@ index 1ba445d2..00e0e129 100644
  NB_ARG_STRING(initiator_seg_type,
                XFERBENCH_SEG_TYPE_DRAM,
                "Type of memory segment for initiator [DRAM, VRAM]. Note: Storage backends always "
-@@ -123,6 +123,12 @@ NB_ARG_INT32(gds_mt_num_threads, 1, "Number of threads used by GDS MT plugin");
+@@ -123,6 +123,23 @@ NB_ARG_INT32(gds_mt_num_threads, 1, "Number of threads used by GDS MT plugin");
  NB_ARG_STRING(device_list,
                "all",
                "Comma-separated device name to use for communication (only used with nixl worker)");
@@ -55,18 +55,31 @@ index 1ba445d2..00e0e129 100644
 +              "Empty keeps NIXL's default of peer; note that peer excludes rocm_ipc, "
 +              "which reports no error-handling support, so intra-node GPU transfers "
 +              "fall back to a far slower transport.");
++NB_ARG_STRING(mori_host,
++              "",
++              "Local IPv4 this process advertises to MORI_IO peers (MORI_IO backend only). "
++              "MORI copies it into the engine descriptor the peer connects back to, so it "
++              "has to be an address the peer can reach -- not a wildcard. Empty lets the "
++              "backend auto-detect, which picks the default route's interface and so needs "
++              "setting on any host with a separate fabric NIC.");
++NB_ARG_STRING(mori_port,
++              "0",
++              "Port for the MORI_IO out-of-band metadata endpoint (MORI_IO backend only). "
++              "0 lets the kernel choose and advertises whatever it picked.");
  NB_ARG_STRING(etcd_endpoints,
                "",
                "ETCD server endpoints for communication (optional for storage backends)");
-@@ -288,6 +294,7 @@ bool xferBenchConfig::enable_vmm = false;
+@@ -288,6 +305,9 @@ bool xferBenchConfig::enable_vmm = false;
  bool xferBenchConfig::use_hugepages = false;
  std::string xferBenchConfig::device_list = "";
  std::string xferBenchConfig::etcd_endpoints = "";
 +std::string xferBenchConfig::ucx_error_handling_mode = "";
++std::string xferBenchConfig::mori_host = "";
++std::string xferBenchConfig::mori_port = "0";
  std::string xferBenchConfig::asio_address = "127.0.0.1";
  std::uint16_t xferBenchConfig::asio_port = 12345;
  std::string xferBenchConfig::randomize_location_mode = "none";
-@@ -512,8 +519,9 @@ xferBenchConfig::loadParams(void) {
+@@ -512,8 +532,9 @@ xferBenchConfig::loadParams(void) {
              return -1;
  #endif
          }
@@ -78,15 +91,17 @@ index 1ba445d2..00e0e129 100644
              gds_batch_pool_size = NB_ARG(gds_batch_pool_size);
              gds_batch_limit = NB_ARG(gds_batch_limit);
          }
-@@ -641,6 +649,7 @@ xferBenchConfig::loadParams(void) {
+@@ -641,6 +662,9 @@ xferBenchConfig::loadParams(void) {
          return -1;
      }
      etcd_endpoints = NB_ARG(etcd_endpoints);
 +    ucx_error_handling_mode = NB_ARG(ucx_error_handling_mode);
++    mori_host = NB_ARG(mori_host);
++    mori_port = NB_ARG(mori_port);
      asio_address = NB_ARG(asio_address);
      asio_port = NB_ARG(asio_port);
      randomize_location_mode = NB_ARG(randomize_location_mode);
-@@ -870,8 +879,8 @@ xferBenchConfig::printConfig() {
+@@ -870,8 +894,8 @@ xferBenchConfig::printConfig() {
          printOption("Pipeline depth (--pipeline_depth=N)", std::to_string(pipeline_depth));
          printOption("Use hugepages (--use_hugepages=[0,1])", std::to_string(use_hugepages));
  
@@ -97,7 +112,7 @@ index 1ba445d2..00e0e129 100644
              printOption("GDS batch pool size (--gds_batch_pool_size=N)",
                          std::to_string(gds_batch_pool_size));
              printOption("GDS batch limit (--gds_batch_limit=N)", std::to_string(gds_batch_limit));
-@@ -1023,6 +1032,8 @@ bool
+@@ -1023,6 +1047,8 @@ bool
  xferBenchConfig::isStorageBackend() {
      return (XFERBENCH_BACKEND_GDS == xferBenchConfig::backend ||
              XFERBENCH_BACKEND_GDS_MT == xferBenchConfig::backend ||
@@ -107,7 +122,7 @@ index 1ba445d2..00e0e129 100644
              XFERBENCH_BACKEND_POSIX == xferBenchConfig::backend ||
              XFERBENCH_BACKEND_OBJ == xferBenchConfig::backend ||
 diff --git a/benchmark/nixlbench/src/utils/utils.h b/benchmark/nixlbench/src/utils/utils.h
-index 8336a949..3ab2817e 100644
+index 8336a94..da8dbc3 100644
 --- a/benchmark/nixlbench/src/utils/utils.h
 +++ b/benchmark/nixlbench/src/utils/utils.h
 @@ -116,6 +116,9 @@
@@ -120,16 +135,18 @@ index 8336a949..3ab2817e 100644
  
  // POSIX API types
  #define XFERBENCH_POSIX_API_AIO "AIO"
-@@ -198,6 +201,7 @@ public:
+@@ -198,6 +201,9 @@ public:
      static size_t progress_threads;
      static std::string device_list;
      static std::string etcd_endpoints;
 +    static std::string ucx_error_handling_mode;
++    static std::string mori_host;
++    static std::string mori_port;
      static std::string asio_address; // IPv4
      static uint16_t asio_port;
      static std::string randomize_location_mode;
 diff --git a/benchmark/nixlbench/src/worker/nixl/nixl_worker.cpp b/benchmark/nixlbench/src/worker/nixl/nixl_worker.cpp
-index d6a5d75b..c94a2d7a 100644
+index d6a5d75..8b98173 100644
 --- a/benchmark/nixlbench/src/worker/nixl/nixl_worker.cpp
 +++ b/benchmark/nixlbench/src/worker/nixl/nixl_worker.cpp
 @@ -146,6 +146,7 @@ xferBenchNixlWorker::xferBenchNixlWorker(const std::vector<std::string> &devices
@@ -140,7 +157,7 @@ index d6a5d75b..c94a2d7a 100644
          xferBenchConfig::isStorageBackend()) {
          backend_name = xferBenchConfig::backend;
      } else {
-@@ -155,8 +156,34 @@ xferBenchNixlWorker::xferBenchNixlWorker(const std::vector<std::string> &devices
+@@ -155,8 +156,42 @@ xferBenchNixlWorker::xferBenchNixlWorker(const std::vector<std::string> &devices
  
      agent->getPluginParams(backend_name, mems, backend_params);
  
@@ -150,6 +167,14 @@ index d6a5d75b..c94a2d7a 100644
 +        // --progress_threads for them so the two transports are configured
 +        // comparably from one flag.
 +        backend_params["mori_worker_threads"] = std::to_string(xferBenchConfig::progress_threads);
++        // Only set when given: empty means "auto-detect", and passing an empty
++        // string through would instead read as an explicit wildcard.
++        if (!xferBenchConfig::mori_host.empty()) {
++            backend_params["mori_host"] = xferBenchConfig::mori_host;
++        }
++        if (!xferBenchConfig::mori_port.empty()) {
++            backend_params["mori_port"] = xferBenchConfig::mori_port;
++        }
 +    } else if (0 == xferBenchConfig::backend.compare(XFERBENCH_BACKEND_AIS)) {
 +        // AIS is the hipFile async-stream backend, the ROCm counterpart of GDS,
 +        // so it reads the same two knobs GDS does.  They mean streams-per-device
