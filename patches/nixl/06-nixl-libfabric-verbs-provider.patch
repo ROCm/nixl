@@ -20,9 +20,19 @@
 #
 # Placed after efa and before tcp: it is real RDMA, so it must outrank the
 # sockets-based fallbacks, but it must not displace the two purpose-built
-# providers on hardware that has them.  Returns every verbs device rather than
-# just the first, because the rail manager stripes across devices -- tcp and
-# sockets stay capped at one device, which is the existing behaviour.
+# providers on hardware that has them.  Returns every DISTINCT verbs device
+# rather than just the first, because the rail manager stripes across devices.
+#
+# The dedup is load-bearing.  The enumeration loop appends domain_attr->name
+# once per fi_info entry, and fi_getinfo returns one entry per capability and
+# mr_mode permutation, so one RDMA port appears many times over -- nine times
+# on the emulated ionic NIC here.  Handing that list on makes the rail manager
+# believe it has nine NICs and build nine rails on the same device, each with
+# a 32 MB buffer chunk and 1024 pre-posted receives, with the peer doing the
+# same; nothing completes, and the run reaches rendezvous and then dies on a
+# receive timeout having moved no data and reported no error.  That is also
+# why tcp and sockets take [0] rather than the whole list -- they meet the
+# same duplication and dodge it by only ever using one device.
 #
 # The candidates are RANKED rather than taken in map order.  provider_device_map
 # is an unordered_map, so "the first verbs entry" is not reproducible, and the
@@ -58,10 +68,18 @@
 # between the efa and tcp arms.
 #
 diff --git a/src/utils/libfabric/libfabric_common.cpp b/src/utils/libfabric/libfabric_common.cpp
-index 662da308..985f8ccc 100644
+index 662da30..11b60a8 100644
 --- a/src/utils/libfabric/libfabric_common.cpp
 +++ b/src/utils/libfabric/libfabric_common.cpp
-@@ -98,10 +98,58 @@ getAvailableNetworkDevices() {
+@@ -19,6 +19,7 @@
+ #include "libfabric_common.h"
+ #include "common/nixl_log.h"
+ 
++#include <algorithm>
+ #include <iomanip>
+ #include <sstream>
+ #include <atomic>
+@@ -98,10 +99,77 @@ getAvailableNetworkDevices() {
          }
      }
  
@@ -111,12 +129,31 @@ index 662da308..985f8ccc 100644
      } else if (provider_device_map.find("efa") != provider_device_map.end()) {
          return {"efa", provider_device_map["efa"]};
 +    } else if (verbs_it != provider_device_map.end()) {
-+        // Every verbs device, not just the first: verbs is real RDMA and the
-+        // rail manager stripes across devices, which is the whole point of
-+        // multi-rail.  tcp and sockets below are deliberately capped at one
-+        // device because striping a benchmark across loopback-ish transports
-+        // measures nothing useful.
-+        return {verbs_it->first, verbs_it->second};
++        // Every DISTINCT verbs device, not just the first: verbs is real RDMA
++        // and the rail manager stripes across devices, which is the whole
++        // point of multi-rail.
++        //
++        // The dedup is load-bearing, not tidiness.  The loop above appends
++        // domain_attr->name once per fi_info entry, and fi_getinfo returns one
++        // entry per capability/mr_mode permutation, so a single RDMA device
++        // appears many times over -- nine times for one port on the emulated
++        // ionic NIC here.  Passed through, the rail manager believes those are
++        // nine NICs and builds nine rails on the same device, each with its own
++        // 32 MB buffer chunk and 1024 pre-posted receives, and the peer does
++        // the same.  Nothing then completes: the run reaches rendezvous and
++        // dies on a receive timeout with no transfer and no error.  That is
++        // also why tcp and sockets below take [0] rather than the whole list;
++        // they hit the identical duplication and sidestep it by only ever
++        // using one device.
++        std::vector<std::string> devices;
++        for (const auto &name : verbs_it->second) {
++            if (std::find(devices.begin(), devices.end(), name) == devices.end()) {
++                devices.push_back(name);
++            }
++        }
++        NIXL_DEBUG << "verbs provider " << verbs_it->first << ": " << verbs_it->second.size()
++                   << " fi_info entries over " << devices.size() << " distinct device(s)";
++        return {verbs_it->first, devices};
      } else if (provider_device_map.find("tcp") != provider_device_map.end()) {
          return {"tcp", {provider_device_map["tcp"][0]}};
      } else if (provider_device_map.find("sockets") != provider_device_map.end()) {
