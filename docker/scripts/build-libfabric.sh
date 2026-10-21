@@ -29,6 +29,23 @@ LIBFABRIC_PREFIX="${LIBFABRIC_PREFIX:-/opt/libfabric}"
 LIBFABRIC_SRC="${LIBFABRIC_SRC:-/tmp/libfabric-src}"
 BUILD_JOBS="${BUILD_JOBS:-$(nproc)}"
 
+# Off by default, and deliberately so: --enable-debug compiles in the
+# providers' FI_DBG calls and their assertions, which is what makes
+# FI_LOG_LEVEL=debug say anything at all.  Without it the only thing that
+# answers a provider-level question is core initialisation chatter.
+#
+# It is not free -- the logging is on the data path and the assertions are
+# real work -- so a benchmark image should not carry it. Build a second image
+# with LIBFABRIC_DEBUG=1 when a provider needs interrogating, and throw it
+# away afterwards.
+LIBFABRIC_DEBUG="${LIBFABRIC_DEBUG:-}"
+DEBUG_ARGS=()
+if [[ -n "${LIBFABRIC_DEBUG}" && "${LIBFABRIC_DEBUG}" != "0" ]]; then
+	DEBUG_ARGS+=(--enable-debug)
+	echo "[libfabric] --enable-debug requested: FI_DBG and assertions compiled in"
+	echo "[libfabric] this build is for diagnosis, not for benchmark numbers"
+fi
+
 # The checkout is made (and patched, if patches/libfabric/ ever gains content)
 # by clone-src.sh, exactly as for UCX, NIXL and MORI.
 if [[ ! -f "${LIBFABRIC_SRC}/configure.ac" ]]; then
@@ -44,6 +61,7 @@ cd build
 
 ../configure \
 	--prefix="${LIBFABRIC_PREFIX}" \
+	"${DEBUG_ARGS[@]}" \
 	--enable-shared \
 	--disable-static \
 	--enable-verbs \

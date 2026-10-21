@@ -204,6 +204,11 @@ FROM base AS libfabric
 
 ARG LIBFABRIC_GIT_URL=https://github.com/ofiwg/libfabric.git
 ARG LIBFABRIC_REF=v1.22.0
+# Empty for a benchmark image.  Set to 1 to compile in the providers' FI_DBG
+# calls and assertions, which is the only way FI_LOG_LEVEL=debug reports
+# anything from a provider rather than from the core.  See
+# docker/scripts/build-libfabric.sh for why this is not the default.
+ARG LIBFABRIC_DEBUG=
 
 ENV LIBFABRIC_PREFIX=/opt/libfabric
 
@@ -223,6 +228,7 @@ RUN mkdir -p /opt/libfabric && \
 RUN --mount=type=cache,target=/root/.cache,sharing=locked \
     if [ -n "${LIBFABRIC_REF}" ]; then \
         LIBFABRIC_SRC=/tmp/libfabric-src \
+        LIBFABRIC_DEBUG="${LIBFABRIC_DEBUG}" \
         bash /tmp/scripts/build-libfabric.sh && rm -rf /tmp/libfabric-src; \
     fi
 
