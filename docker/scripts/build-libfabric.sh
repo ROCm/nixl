@@ -84,4 +84,37 @@ for _prov in verbs tcp shm; do
 done
 
 ldconfig
+
+# fabtests, into the same prefix.
+#
+# fi_info alone cannot tell you whether a provider actually moves data, and the
+# NIXL plugin is too many layers up to bisect with.  What is needed is a pair of
+# programs that differ in exactly one thing: fi_msg_pingpong drives a verbs
+# FI_EP_MSG endpoint directly, fi_rdm_pingpong drives the same device through
+# ofi_rxm.  One working and the other not is the difference between "the device
+# cannot do this" and "rxm's use of it is wrong", and that distinction is not
+# otherwise reachable from inside this image.
+#
+# Not fatal if it fails to build: these are diagnostics, and an image without
+# them is still a working benchmark image.  It builds from the same checkout, so
+# it cannot drift from the library it tests against.
+if [[ -f "${LIBFABRIC_SRC}/fabtests/configure.ac" ]]; then
+	echo "building fabtests"
+	if (
+		cd "${LIBFABRIC_SRC}/fabtests"
+		./autogen.sh
+		./configure --prefix="${LIBFABRIC_PREFIX}" \
+			--with-libfabric="${LIBFABRIC_PREFIX}"
+		make -j"${BUILD_JOBS}"
+		make install
+	); then
+		echo "fabtests installed:"
+		ls "${LIBFABRIC_PREFIX}/bin" | grep -E '^fi_(msg|rdm|rma)' | sed 's/^/  /' | head
+	else
+		echo "WARNING: fabtests did not build; continuing without them" >&2
+	fi
+else
+	echo "no fabtests/ in this libfabric checkout -- skipping"
+fi
+
 echo "PASS: libfabric built -> ${LIBFABRIC_PREFIX}"
