@@ -13,8 +13,8 @@
 #   qemu-tool gen-compose \
 #       --env-file $QM/qemu/env/scale-out \
 #       --env-file cluster/env/nixl-mori \
-#       --output-dir /var/lib/qemu-tool/stacks/nixl-mori
-#   qemu-tool compose --stack-dir /var/lib/qemu-tool/stacks/nixl-mori \
+#       --output-dir /data/qemu-tool-stebates/stacks/nixl-mori
+#   qemu-tool compose --stack-dir /data/qemu-tool-stebates/stacks/nixl-mori \
 #       --env-file $QM/qemu/env/scale-out \
 #       --env-file cluster/env/nixl-mori up -d
 #
@@ -39,8 +39,26 @@
 # rocjitsu-N leaves a stale socket behind when it stops and cannot rebind to
 # it; delete /run/vfu/rocjitsu-N.sock before restarting it.
 
-VM_COUNT=2
+VM_COUNT=4
 VM_NAME_PREFIX=nixl-mori
+
+# Not qemu-minimal's own images directory. The fleet SSH key this cluster
+# reaches its guests with lives here, alongside the prepared backing image,
+# and gen-vm bakes that key into whatever it builds -- so pointing elsewhere
+# produces guests nothing can log into.
+#
+# Under /data, not /var/lib: recreating anything under /var/lib needs root,
+# and this tree was deleted out from under a running cluster once already.
+# /home is not an option either -- it is NFS, and qcow2 images backing live
+# VMs want local disk. /data is local ext4 and writable without sudo.
+VM_IMAGES_DIR=/data/qemu-tool-stebates/images
+
+# Where qemu-tool itself comes from. The qemu container installs it from this
+# tree when the path holds a pyproject.toml, and falls back to the published
+# package otherwise -- and the published one is behind: it has no
+# --vfio-user-root-port, so every VM exits 2 before QEMU starts. The default
+# is a relative path that does not resolve from an absolute --output-dir.
+QEMU_TOOL_SRC=/home/AMD/stebates/Projects/qemu-minimal
 
 # Non-colliding with qemu-minimal's own fleets. Change all of these together
 # if two clusters have to coexist on one host.
@@ -48,7 +66,14 @@ FLEET_NET_PREFIX=172.26
 ERNIC_TCP_PORT=6520
 VM_SSH_PORT_BASE=2400
 ERNIC_MAC_PREFIX=72:6f:63:6e
-ERNIC_GUEST_SUBNET=192.168.220
+# Must fall INSIDE the subnet docker assigns the stack's `l2` network, which
+# is the bridge the guests' tap devices join. That network is declared with no
+# IPAM config, so docker picks the subnet itself -- 192.168.224.0/20 here.
+# Guests outside it ARP fine (not IP-filtered) and then have every unicast
+# packet dropped by docker's FORWARD rules, which looks like a dead fabric
+# with a healthy link. Check `docker network inspect <stack>_l2` before
+# changing this.
+ERNIC_GUEST_SUBNET=192.168.224
 ERNIC_STATS_PORT=9870
 PROM_PORT=9290
 
@@ -63,19 +88,22 @@ PROM_PORT=9290
 # and AIS_MT backends with it.
 VM_VFIO_USER_ROOT_PORT=true
 
-# A local NVMe per guest, which is what the POSIX and AIS backends are pointed
-# at. It arrives unformatted: `make cluster-nvme` makes an ext4 on it and
-# mounts it at /mnt/nvme.
-VM_NVME=1
+# Two local NVMe per guest, which is what the POSIX and AIS backends are
+# pointed at. They arrive unformatted: `make cluster-nvme` makes an ext4 on
+# each and mounts them at /mnt/nvme0 and /mnt/nvme1. Two rather than one so a
+# storage run can be driven across separate devices rather than contending on
+# a single queue.
+VM_NVME=2
 
 # 7 GB is the qemu-minimal default and it is tight: nixlbench allocates
-# --total_buffer_size per process, default 8 GiB, which does not fit. Either
-# raise this or pass a smaller buffer; the cluster targets pass 1 GiB.
-VM_VMEM=8192
-VM_VCPUS=4
+# --total_buffer_size per process, default 8 GiB, which does not fit. 16 GiB
+# leaves room for the default buffer plus the GPU and storage paths; the
+# cluster targets still pass a smaller buffer for most runs.
+VM_VMEM=16384
+VM_VCPUS=8
 
 GRAFANA_ENABLE=false
 LOGS_ENABLE=false
 LMCACHE_ENABLE=false
 VM_EXTRA_HOSTFWD=
-PROM_DATA_DIR=/var/lib/qemu-tool/stacks/nixl-mori/prom-data
+PROM_DATA_DIR=/data/qemu-tool-stebates/stacks/nixl-mori/prom-data

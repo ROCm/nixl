@@ -40,7 +40,7 @@ SLIM_TAG="${SLIM_TAG:-${IMAGE_NAME}:latest-slim}"
 # The guests are reached through the host that runs the stack. Local by
 # default; set CLUSTER_HOST to drive a remote one.
 CLUSTER_HOST="${CLUSTER_HOST:-}"
-SSH_KEY="${SSH_KEY:-/var/lib/qemu-tool/images-stebates/keys/fleet_ed25519}"
+SSH_KEY="${SSH_KEY:-/data/qemu-tool-stebates/artifacts/20261021/id_rsa}"
 SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
           -o LogLevel=ERROR -o ConnectTimeout=8 -o BatchMode=yes)
 

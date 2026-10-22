@@ -519,7 +519,7 @@ clean-images:
 
 QEMU_MINIMAL ?= $(HOME)/Projects/qemu-minimal
 QEMU_TOOL    ?= /tmp/qt/bin/qemu-tool
-CLUSTER_DIR  ?= /var/lib/qemu-tool/stacks/nixl-mori
+CLUSTER_DIR  ?= /data/qemu-tool-stebates/stacks/nixl-mori
 CLUSTER_ENV  := --env-file $(QEMU_MINIMAL)/qemu/env/scale-out \
                 --env-file $(REPO_ROOT)/cluster/env/nixl-mori
 
