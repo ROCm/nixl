@@ -21,6 +21,11 @@
 #   shm      intra-node transfers.
 #   sockets  legacy fallback; cheap to build and useful for bring-up.
 #
+# rstream is no longer listed here because libfabric 2.x removed the provider;
+# passing --disable-rstream to 2.7.0 is an unrecognised option rather than an
+# error, which is exactly the kind of thing that survives a version bump
+# unnoticed.
+#
 # efa is deliberately absent: it needs the AWS EFA kernel driver and is
 # meaningless off EC2.
 set -euo pipefail
@@ -38,6 +43,33 @@ BUILD_JOBS="${BUILD_JOBS:-$(nproc)}"
 # real work -- so a benchmark image should not carry it. Build a second image
 # with LIBFABRIC_DEBUG=1 when a provider needs interrogating, and throw it
 # away afterwards.
+# ROCR (AMD GPU) memory support, which is what lets fi_mr_reg take a device
+# pointer.  Without it libfabric has no FI_HMEM_ROCR at all and a VRAM buffer
+# handed to fi_mr_reg is treated as host memory, failing EFAULT -- "Bad
+# address" -- which is exactly how VRAM over LIBFABRIC failed on this cluster.
+#
+# configure checks hsa/hsa_ext_amd.h and links hsa-runtime64 for
+# hsa_amd_pointer_info; the ROCm base image carries both under ${ROCM_PATH}.
+# It also probes hsa_amd_portable_export_dmabuf and
+# HSA_AMD_SYSTEM_INFO_DMABUF_SUPPORTED, which is how it decides whether dmabuf
+# export is available -- the mechanism a verbs NIC needs to pin device memory.
+#
+# Not optional here: this image exists to benchmark GPU transfers, so a
+# libfabric that cannot name AMD device memory is not useful. Set
+# LIBFABRIC_ROCR=0 to build without it.
+LIBFABRIC_ROCR="${LIBFABRIC_ROCR:-1}"
+ROCM_PATH="${ROCM_PATH:-/opt/rocm}"
+ROCR_ARGS=()
+if [[ "${LIBFABRIC_ROCR}" != "0" ]]; then
+	if [[ ! -f "${ROCM_PATH}/include/hsa/hsa_ext_amd.h" ]]; then
+		echo "ERROR: LIBFABRIC_ROCR=1 but ${ROCM_PATH}/include/hsa/hsa_ext_amd.h is missing" >&2
+		echo "       libfabric would silently configure without ROCR support" >&2
+		exit 1
+	fi
+	ROCR_ARGS+=(--with-rocr="${ROCM_PATH}")
+	echo "[libfabric] ROCR support on, from ${ROCM_PATH}"
+fi
+
 LIBFABRIC_DEBUG="${LIBFABRIC_DEBUG:-}"
 DEBUG_ARGS=()
 if [[ -n "${LIBFABRIC_DEBUG}" && "${LIBFABRIC_DEBUG}" != "0" ]]; then
@@ -62,6 +94,7 @@ cd build
 ../configure \
 	--prefix="${LIBFABRIC_PREFIX}" \
 	"${DEBUG_ARGS[@]}" \
+	"${ROCR_ARGS[@]}" \
 	--enable-shared \
 	--disable-static \
 	--enable-verbs \
@@ -72,8 +105,22 @@ cd build
 	--disable-psm2 \
 	--disable-psm3 \
 	--disable-opx \
-	--disable-usnic \
-	--disable-rstream
+	--disable-usnic
+
+# configure happily carries on with ROCR off if its header or symbol probe
+# fails, and the result is a libfabric that builds, installs, runs, and then
+# rejects every device pointer at fi_mr_reg.  That failure surfaces three
+# layers up as "Bad address" from NIXL, which is a long way to travel from a
+# configure probe, so assert it here where the answer is still local.
+if [[ "${LIBFABRIC_ROCR}" != "0" ]]; then
+	if ! grep -qE '^#define HAVE_ROCR 1' config.h; then
+		echo "ERROR: libfabric configured without ROCR despite --with-rocr" >&2
+		echo "       see config.log for the failing probe; HAVE_ROCR is not set" >&2
+		grep -iE 'rocr|hsa' config.log | tail -20 >&2 || true
+		exit 1
+	fi
+	echo "[libfabric] HAVE_ROCR confirmed in config.h"
+fi
 
 make -j"${BUILD_JOBS}"
 make install

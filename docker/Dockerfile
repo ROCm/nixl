@@ -197,13 +197,21 @@ RUN --mount=type=cache,target=/root/.cache,sharing=locked \
 # below the 1.21.0 floor the NIXL plugin requires.  See build-libfabric.sh for
 # which providers are compiled in and why.
 #
+# Pinned to the latest stable release rather than to NIXL's own CI pin.  Note
+# that upstream tests its ROCm lane against v1.21.0 and builds it
+# --disable-verbs --enable-efa, so verbs;ofi_rxm with ROCR -- what this image
+# runs -- is not a configuration NIXL exercises on any version.  Being current
+# is the better of two untested positions, and 2.x is where FI_HMEM_ROCR
+# carries a device handle (fi_mr_attr gained device.rocr in v2.3, which NIXL
+# v1.5.0 sets behind a FI_VERSION guard).
+#
 # LIBFABRIC_REF empty skips the stage and leaves /opt/libfabric empty, which
 # build-nixl.sh reads as "do not build the LIBFABRIC plugin" -- the escape hatch
 # if a libfabric bump regresses, and what keeps the COPY below unconditional.
 FROM base AS libfabric
 
 ARG LIBFABRIC_GIT_URL=https://github.com/ofiwg/libfabric.git
-ARG LIBFABRIC_REF=v1.22.0
+ARG LIBFABRIC_REF=v2.7.0
 # Empty for a benchmark image.  Set to 1 to compile in the providers' FI_DBG
 # calls and assertions, which is the only way FI_LOG_LEVEL=debug reports
 # anything from a provider rather than from the core.  See
