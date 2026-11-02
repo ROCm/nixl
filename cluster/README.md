@@ -24,6 +24,8 @@ profile. Nothing here duplicates that tooling.
 
 ```
 make cluster-up        # render the stack and bring it up
+make cluster-prep      # memlock, ionic queue count, fabric address per guest
+make cluster-gpu       # ip_discovery.bin + amdgpu-probe, once per boot
 make cluster-nvme      # ext4 + mount the local NVMe on every guest, once
 make cluster-status    # containers, guest reachability, RDMA device per guest
 make cluster-down      # tear it down, volumes included
@@ -32,6 +34,27 @@ make cluster-down      # tear it down, volumes included
 Guests are at `VM_SSH_PORT_BASE + n - 1` on localhost: VM 1 on 2400, VM 2 on
 2401. Their RDMA-side addresses are `ERNIC_GUEST_SUBNET.1n`, so
 `192.168.220.11` and `192.168.220.12`.
+
+**`cluster-prep` is not optional, and it is needed again after anything that
+reboots the guests** -- which `cluster-up` does whenever the render changes a
+`qemu-N` service. It sets three things, each of which fails in a way that
+points somewhere other than itself:
+
+* `memlock` unlimited. nixlbench registers its whole buffer, so the 8 MB
+  default is nowhere near enough. UCX says so plainly and NIXL then buries it
+  under "registration failed for the specified or all potential backends",
+  which reads like a missing plugin.
+* one combined queue on the ernic NIC. ionic sizes its interrupt pool from the
+  vCPU count and does not reliably fit four queues in it; the link then stays
+  down with `ip link set up` answering "No space left on device". It is not
+  deterministic -- one bring-up here left vm1 at four queues and stranded the
+  other three -- so the rule pins it rather than leaving it to chance.
+* the fabric address, as netplan config. Nothing in the compose stack assigns
+  it, so before this it was set by hand and lasted until the next reboot. The
+  `optional: true` in that config matters on its own: without it
+  `systemd-networkd-wait-online` blocks the boot while the link is down, which
+  is indefinitely if the queue count is wrong, and the guest never reaches
+  sshd.
 
 ## Getting NIXL onto the guests
 
@@ -50,10 +73,34 @@ come from apt rather than `/opt` -- `libgflags2.2` and `libhwloc15` -- and
 
 ## What works here, and what does not
 
-Measured on a two-guest instance; see `overnight-2026-10-20.md` for numbers.
+Measured 2026-11-02 on the four-guest cluster, after it moved to the
+`ernic-rocjitsu` guest image. DRAM segments, vm1 <-> vm2, single runs, GB/s:
 
-* **UCX between guests** works. Bandwidth is tens of MB/s: the ERNIC data path
-  is a TCP mesh between QEMU processes, so this measures the path, not a NIC.
+| Block | UCX | MORI_IO |
+|---|---|---|
+| 64 KiB | 0.195 | 0.078 |
+| 256 KiB | 0.756 | 0.305 |
+| 1 MiB | **2.139** | 1.078 |
+| 4 MiB | **4.427** | 2.964 |
+| 8 MiB | 3.882 | 3.387 |
+| 16 MiB | fails | fails |
+
+**These are roughly 10x what the same backends measured on the previous
+guest image**, where UCX reached 0.284 GB/s at 1 MiB and MORI_IO 0.278. Two
+things account for it and they are not separable from these numbers alone: the
+old guests ran with `memlock` at the 8 MB default, which throttled every
+registration, and they drove the ernic through the in-tree `ionic` rather than
+the `ionic-ernic` DKMS module the ernic-rocjitsu image ships. Anything in
+`overnight-2026-10-2*.md` comparing backend against backend was measured under
+the first of those and should be re-read with that in mind -- in particular
+MORI_IO was ahead of UCX there by 8x, and here UCX leads at every size.
+
+Both fail at 16 MiB, each in its own way: UCX with
+`NIXL_ERR_REMOTE_DISCONNECT`, MORI_IO with a CQ flush and
+`remote access error`. The MORI_IO ceiling is the one
+`overnight-2026-10-22.md` already recorded, so it has now survived a guest
+image change.
+
 * **POSIX against the local NVMe** works.
 * **MORI_IO between guests** works, but only with `--mori_host` set per
   process to that guest's fabric address:
@@ -73,26 +120,32 @@ Measured on a two-guest instance; see `overnight-2026-10-20.md` for numbers.
   registration and rendezvous before failing with
   `connect(10.0.2.15:<port>): Connection refused`. Any multi-homed host has
   this problem; these guests just make it certain.
-* **LIBFABRIC** does not. libfabric itself is healthy on the emulated port --
-  `fi_pingpong -e rdm` completes a full sweep -- and the plugin creates its
-  backend and both processes reach "All processes are ready to proceed", but
-  no transfer ever completes and the run dies on `ASIO Receive timeout`. Not
-  a large-message problem: capping `--max_block_size` to 65536, below the
-  rail manager's own 131072-byte striping threshold, fails identically, and
-  no result row is printed at any size. The rail manager is written around
-  EFA and says so in its own logs (`Could not find EFA devices connected to
-  any PCIe switch`).
-* **AIS and AIS_MT** reach the GPU but not past hipFile. With
-  `VM_VFIO_USER_ROOT_PORT=true` -- which this overlay sets, and which is
-  load-bearing, see `env/nixl-mori` -- `amdgpu` binds, `/dev/kfd` appears and
-  HIP sees a device. Registration needs `HIPFILE_ALLOW_COMPAT_MODE=true`, and
-  I/O then still fails (`hipFileWrite failed: Success`,
-  `hipFileBatchIOSubmit failed: err=5030`).
+* **LIBFABRIC** does not, and still does not after the guest image change and
+  after libfabric moved to 2.7.0 built `--with-rocr`. The plugin creates its
+  backend, both processes reach "All processes are ready to proceed", and then
+  no transfer ever completes: the initiator dies on `ASIO Receive timeout`.
+  No result row is printed at any size.
 
-GPU *memory* is not reachable over the emulated ERNIC at all: `ibv_reg_mr` on
-ROCm memory fails `-EFAULT` at every size tried, from 512 MB down to 64 MB, so
-this is not a BAR-window limit. Use `DRAM` segment types here; `VRAM` ones
-cannot register.
+  What is new is that the device is now clearly exonerated. UCX and MORI_IO
+  both move multiple GB/s over this same fabric, so whatever LIBFABRIC is
+  hitting is in the `verbs;ofi_rxm` path or in the plugin's rail manager, not
+  in the emulated port. (The rail manager is written around EFA and says so in
+  its own logs: `Could not find EFA devices connected to any PCIe switch`.)
+  Note that the earlier claim here that `fi_pingpong -e rdm` completes a full
+  sweep has NOT been reproduced on this cluster -- the attempt did not get
+  past fi_pingpong's own out-of-band connect, which is its control socket
+  rather than the fabric, so it settles nothing either way and wants redoing.
+* **AIS and AIS_MT** reach the GPU but not past hipFile. Registration needs
+  `HIPFILE_ALLOW_COMPAT_MODE=true`, and I/O then still fails
+  (`hipFileWrite failed: Success`, `hipFileBatchIOSubmit failed: err=5030`).
+  Not retested since the guest image moved.
+
+The GPU is driven by `make cluster-gpu`; `VM_VFIO_USER_ROOT_PORT=true` in
+`env/nixl-mori` is load-bearing for it. Whether GPU *memory* is reachable over
+the emulated ERNIC is **open**. It failed `ibv_reg_mr -EFAULT` at every size
+on the old image, but that was with a libfabric built without ROCR and on a
+guest with no amdgpu at all, so the result does not carry over. Retest VRAM
+segments before trusting either answer.
 
 `FI_UNIVERSE_SIZE` must be bounded for anything libfabric to initialise at
 all; the image sets it to 16, and `cluster.sh stack` writes it into

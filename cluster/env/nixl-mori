@@ -42,6 +42,61 @@
 VM_COUNT=4
 VM_NAME_PREFIX=nixl-mori
 
+# ---- Images -----------------------------------------------------------------
+#
+# All four moved together to 20261030.gadc94af. qemu-tool asserts that they
+# share one <date>.<ci-sha>, and that QEMU_IMAGE and ERNIC_IMAGE share one
+# vfu.* revision, because a guest driver and a host rocm-ernic from different
+# SHAs do not fail cleanly across the vfio-user boundary. Do not bump one.
+#
+# The backing image is the reason for the move. scale-out pins the
+# `ernic-rocjitsu` flavour and this cluster was running `ionic` instead --
+# the plain NIC guest, with `"dkms": []` and no ROCm. That image has only the
+# in-tree mainline amdgpu, which cannot bind the emulated gfx1250: it fails in
+# IP discovery at `Failed to add vcn/jpeg ip block(UVD_HWIP:0x0)` and probes
+# -EINVAL. No amdgpu-probe parameter reaches that -- the failure is upstream of
+# ip_block_mask -- and the firmware is not the problem either: the guest's
+# ip_discovery.bin is byte-identical to one regenerated from the rocjitsu build
+# serving the device. What the ernic-rocjitsu flavour has and the ionic one
+# does not is amdgpu-dkms 7.1.9, which is the driver that tolerates that table.
+#
+# Without a GPU, MORI_IO cannot run at all: mori::io builds its topology
+# through ROCm-SMI before any transport starts and calls exit(-1) on zero GPUs,
+# so even a DRAM-segment run aborts. The GPU is not optional here for the same
+# reason the benchmark exists.
+#
+# This flavour also carries ernic-p4 and ionic-ernic as DKMS modules rather
+# than relying on the in-tree ionic.
+# ...with two held back, and this is a real version skew, not caution. The
+# 20261030 rocm-ernic binds its mesh-manager port on tcp6 only -- `[::]:1978`,
+# nothing in /proc/net/tcp -- and gen-compose's manager healthcheck greps
+# /proc/net/tcp for a v4 LISTEN. It never passes, every worker gates on it,
+# and no qemu-N starts, so the whole stack fails to come up on an ernic that
+# is in fact running correctly. qemu-tool 1.4.1 still generates the v4-only
+# check, so this cannot be fixed by moving qemu-tool forward.
+#
+# QEMU_IMAGE comes back with it because the two must share a vfu.* revision.
+QEMU_IMAGE=docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user:20261021.g742e8e2-qemu11.1.2-vfu.8039244
+ERNIC_IMAGE=docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-ernic:20261021.g742e8e2-ernic.31d3114-vfu.8039244
+ROCJITSU_IMAGE=docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20261021.g742e8e2-rocjitsu.84fb06b
+
+# So the three vfio-user servers stay on one stamp and only the guest moves.
+# Safe for the GPU specifically: `vfio_guest_firmware.py --generation gfx1250`
+# emits a byte-identical ip_discovery.bin from rocjitsu.84fb06b and
+# rocjitsu.73c3cf3, so the table baked into the 20261030 guest matches what
+# the 20261021 server presents.
+#
+# Read the flag's own docstring before trusting it further than that. It
+# argues the guest is excusable because ubuntu-qcow2-gen installs no driver
+# and no rdma-core -- true of the `ionic` flavour, NOT of `ernic-rocjitsu`,
+# which ships amdgpu, ionic-ernic and ernic-p4 as DKMS modules. So this is a
+# real guest/server skew on the RDMA side, and it is also backwards from the
+# case the flag was written for: here the guest is newer than the servers.
+# If the fabric starts reporting DSR -ETIMEDOUT or "Failed to register ibdev",
+# this is the first thing to suspect.
+IMAGE_ALLOW_GUEST_LAG=true
+VM_BACKING_IMAGE=docker.io/sbates130272/batesste-ci-images-ubuntu-qcow2-gen-ernic-rocjitsu:20261030.gadc94af-vm.resolute-ernic-rocjitsu-qm.ae551b3-qcow2
+
 # Not qemu-minimal's own images directory. The fleet SSH key this cluster
 # reaches its guests with lives here, alongside the prepared backing image,
 # and gen-vm bakes that key into whatever it builds -- so pointing elsewhere
@@ -73,7 +128,7 @@ ERNIC_MAC_PREFIX=72:6f:63:6e
 # packet dropped by docker's FORWARD rules, which looks like a dead fabric
 # with a healthy link. Check `docker network inspect <stack>_l2` before
 # changing this.
-ERNIC_GUEST_SUBNET=192.168.224
+ERNIC_GUEST_SUBNET=192.168.80
 ERNIC_STATS_PORT=9870
 PROM_PORT=9290
 
@@ -87,6 +142,22 @@ PROM_PORT=9290
 # small, and the probe fails -EINVAL with no KFD device -- which takes the AIS
 # and AIS_MT backends with it.
 VM_VFIO_USER_ROOT_PORT=true
+
+# The scale-out profile's default, gfx1250_mi455x.json, is not drivable by the
+# guest's amdgpu. It carries no `ip_versions` table, so IP discovery hands the
+# driver UVD_HWIP 0x0, amdgpu logs "Failed to add vcn/jpeg ip block" and the
+# probe dies -EINVAL -- late enough to look like a firmware problem (the gfx
+# and sdma blocks are detected first) and early enough that no /dev/kfd node
+# for the device is ever created. rocm-smi then reports 0 GPUs, which takes
+# MORI_IO with it: mori::io builds its topology through ROCm-SMI before any
+# transport starts, so even a DRAM-segment run aborts at
+# RSMI_STATUS_INIT_ERROR.
+#
+# The `_kmd` configs are the ones meant to be driven by a kernel-mode driver
+# and do carry ip_versions. gfx942 rather than gfx950 or gfx1250 because the
+# guest kernel and the ROCm in the image both support CDNA3 without argument;
+# the point here is a GPU that probes, not a specific architecture.
+ROCJITSU_CONFIG=gfx1250_mi455x.json
 
 # Two local NVMe per guest, which is what the POSIX and AIS backends are
 # pointed at. They arrive unformatted: `make cluster-nvme` makes an ext4 on

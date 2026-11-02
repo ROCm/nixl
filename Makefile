@@ -164,7 +164,7 @@ DIST := $(REPO_ROOT)/.slurm/run-build.sh
         fio-sweep dist-build dist-load \
         dist-build-here dist-bench dist-bench-2node \
         cluster-tool cluster-gen cluster-up cluster-down cluster-status \
-        cluster-nvme cluster-stack \
+        cluster-prep cluster-gpu cluster-nvme cluster-stack \
         patch-check patch-list readme readme-check \
         print-tag print-config clean clean-images
 
@@ -544,6 +544,17 @@ cluster-down: cluster-tool
 
 cluster-status:
 	@"$(REPO_ROOT)/cluster/scripts/cluster.sh" status
+
+# memlock, ionic queue count and the fabric address on every guest, persisted.
+# Needed after any bring-up that reboots the guests -- without it the ernic
+# link stays down and nothing crosses the fabric. Idempotent.
+cluster-prep:
+	@"$(REPO_ROOT)/cluster/scripts/cluster.sh" prep
+
+# ip_discovery.bin + amdgpu-probe on every guest. Needed once per boot, and
+# MORI_IO cannot start without it. Idempotent.
+cluster-gpu:
+	@"$(REPO_ROOT)/cluster/scripts/cluster.sh" gpu
 
 # ext4 + mount the local NVMe on every guest. Idempotent.
 cluster-nvme:
