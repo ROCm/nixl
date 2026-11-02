@@ -164,7 +164,8 @@ DIST := $(REPO_ROOT)/.slurm/run-build.sh
         fio-sweep dist-build dist-load \
         dist-build-here dist-bench dist-bench-2node \
         cluster-tool cluster-gen cluster-up cluster-down cluster-status \
-        cluster-ansible cluster-prep cluster-gpu cluster-nvme cluster-stack \
+        cluster-images cluster-ansible cluster-prep cluster-gpu \
+        cluster-nvme cluster-stack \
         patch-check patch-list readme readme-check \
         print-tag print-config clean clean-images
 
@@ -522,6 +523,13 @@ QEMU_TOOL    ?= /tmp/qt/bin/qemu-tool
 CLUSTER_DIR  ?= /data/qemu-tool-stebates/stacks/nixl-mori
 CLUSTER_ENV  := --env-file $(QEMU_MINIMAL)/qemu/env/scale-out \
                 --env-file $(REPO_ROOT)/cluster/env/nixl-mori
+
+# Fetch VM_BACKING_IMAGE and build the guest disks and the fleet key from it.
+# Everything needed to turn the pins in cluster/env/nixl-mori back into a
+# running cluster; run this before the first cluster-up. Idempotent, keyed on
+# the image tag; FORCE=1 refetches.
+cluster-images:
+	@"$(REPO_ROOT)/cluster/scripts/cluster.sh" images
 
 cluster-tool:
 	@test -x "$(QEMU_TOOL)" || { \

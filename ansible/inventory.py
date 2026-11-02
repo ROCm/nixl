@@ -21,9 +21,17 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE = Path(os.environ.get("CLUSTER_ENV_FILE", REPO_ROOT / "cluster/env/nixl-mori"))
 
-# Same default as cluster.sh. This is the key baked into VM_BACKING_IMAGE, not
-# a key of ours -- see the comment on SSH_KEY there.
-DEFAULT_SSH_KEY = "/data/qemu-tool-stebates/artifacts/20261030/id_rsa"
+def default_ssh_key(images_dir: str, backing_image: str) -> str:
+    """Where `cluster.sh images` puts the fleet key, derived the same way.
+
+    The key is baked into VM_BACKING_IMAGE rather than being one of ours, so
+    it moves when that pin moves. Deriving the path from the pin keeps this in
+    step automatically; a literal path would go on resolving after a bump --
+    to the previous image's key -- so the failure would be every guest
+    refusing the key rather than a missing file.
+    """
+    stamp = backing_image.rsplit(":", 1)[-1].split(".", 1)[0] if backing_image else ""
+    return str(Path(images_dir).parent / "artifacts" / stamp / "id_rsa")
 
 
 def envget(key: str, default: str = "") -> str:
@@ -44,7 +52,10 @@ def build() -> dict:
     count = int(envget("VM_COUNT", "2"))
     base = int(envget("VM_SSH_PORT_BASE", "2400"))
     subnet = envget("ERNIC_GUEST_SUBNET", "192.168.220")
-    key = os.environ.get("SSH_KEY", DEFAULT_SSH_KEY)
+    key = os.environ.get("SSH_KEY") or default_ssh_key(
+        envget("VM_IMAGES_DIR", "/data/qemu-tool-stebates/images"),
+        envget("VM_BACKING_IMAGE", ""),
+    )
 
     hostvars = {}
     for n in range(1, count + 1):

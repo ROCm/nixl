@@ -18,7 +18,38 @@ profile. Nothing here duplicates that tooling.
   ```
   python3 -m venv /tmp/qt && /tmp/qt/bin/pip install $QEMU_MINIMAL/qemu
   ```
-* a VM image to boot, in `VM_IMAGES_DIR`, named `<VM_NAME_PREFIX>-<n>.qcow2`
+* `oras`, `zstd`, `qemu-img`, `docker` and `ansible-playbook` on the host
+* the guest disks, which `make cluster-images` fetches -- see below
+
+## From nothing to a running cluster
+
+Every pin needed is in `env/nixl-mori`, so this is the whole sequence:
+
+```
+make cluster-images    # fetch VM_BACKING_IMAGE -> backing qcow2, overlays, fleet key
+make cluster-up        # render the compose stack and boot the guests
+make cluster-ansible   # memlock, fabric address, ionic provider, GPU
+docker buildx bake slim
+make cluster-stack     # install /opt and its environment on every guest
+```
+
+`cluster-images` is the step that used to be missing. The image tags
+described the cluster exactly and still could not be turned back into one,
+because fetching the qcow2, extracting the fleet key and creating the per-VM
+overlays were all done by hand. It takes two tags of the same build: the
+`-qcow2` one is an OCI artifact holding the disk and needs `oras`, and the
+conventional one carries `/output/id_rsa` -- the key the guests trust, which is
+baked into the image rather than injected, since a published backing image gets
+no cloud-init pass.
+
+It is idempotent, keyed on `.artifact-tag` in the artifacts directory, so it
+re-fetches exactly when `VM_BACKING_IMAGE` moves. `FORCE=1 make cluster-images`
+refetches regardless and recreates the overlays, which discards all guest
+state.
+
+Note that `qemu-tool run-vm --backing-shared` does **not** create the overlays;
+that flag only turns off file locking so the guests can share one backing file.
+A missing overlay is a guest that will not boot.
 
 ## Use
 

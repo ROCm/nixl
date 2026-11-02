@@ -59,7 +59,12 @@ and VRAM measures the same with the patch and without the edit (0.643 vs
 
 ## Container image and compose changes
 
-These are in `cluster/env/nixl-mori`, with the full reasoning on each:
+These are in `cluster/env/nixl-mori`, with the full reasoning on each, and
+`make cluster-images` turns the `VM_BACKING_IMAGE` pin back into guest disks
+and the fleet key. Checked 2026-11-02: nothing newer than `20261030.gadc94af`
+is published for any of the four, so the guest image is current and the three
+held at `20261021` are held for the reason given, not for lack of a newer
+build.
 
 | Image | Moved to | Why |
 |---|---|---|

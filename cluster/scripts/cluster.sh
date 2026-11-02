@@ -37,15 +37,28 @@ SUBNET="$(envget ERNIC_GUEST_SUBNET 192.168.220)"
 IMAGE_NAME="${IMAGE_NAME:-nixl-mori-test}"
 SLIM_TAG="${SLIM_TAG:-${IMAGE_NAME}:latest-slim}"
 
+VM_IMAGES_DIR="$(envget VM_IMAGES_DIR /data/qemu-tool-stebates/images)"
+VM_PREFIX="$(envget VM_NAME_PREFIX nixl-mori)"
+BACKING_IMAGE="$(envget VM_BACKING_IMAGE)"
+
+# Everything fetched from VM_BACKING_IMAGE lands here, in a directory named for
+# that image's build stamp. Derived rather than written down: the SSH key below
+# comes out of this tree, and a hardcoded path would keep resolving -- to the
+# previous image's key -- after a pin bump, so the failure would be "every
+# guest refuses the key" rather than "that file is missing".
+BACKING_TAG="${BACKING_IMAGE##*:}"
+BACKING_STAMP="${BACKING_TAG%%.*}"
+ARTIFACTS_DIR="${ARTIFACTS_DIR:-$(dirname "${VM_IMAGES_DIR}")/artifacts/${BACKING_STAMP}}"
+
 # The guests are reached through the host that runs the stack. Local by
 # default; set CLUSTER_HOST to drive a remote one.
 CLUSTER_HOST="${CLUSTER_HOST:-}"
 # The key baked into VM_BACKING_IMAGE, not a key of ours: gen-vm does no
-# cloud-init pass over a published backing image, so the guests trust only
-# what the image shipped with. It comes out of the conventional (non -qcow2)
-# tag of the same artifact, under /output, which the oras pull of the -qcow2
-# tag does not carry. Move this whenever VM_BACKING_IMAGE moves.
-SSH_KEY="${SSH_KEY:-/data/qemu-tool-stebates/artifacts/20261030/id_rsa}"
+# cloud-init pass over a published backing image, so the guests trust only what
+# the image shipped with. `cluster.sh images` extracts it from the conventional
+# (non -qcow2) tag of the same artifact, under /output, which the oras pull of
+# the -qcow2 tag does not carry.
+SSH_KEY="${SSH_KEY:-${ARTIFACTS_DIR}/id_rsa}"
 SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
           -o LogLevel=ERROR -o ConnectTimeout=8 -o BatchMode=yes)
 
@@ -127,6 +140,107 @@ cmd_nvme() {
 # What stays here is what ansible is the wrong tool for: `stack` exports /opt
 # from a local docker image, and `status` and `nvme` are quick imperative
 # checks that predate the playbook.
+
+# Fetch VM_BACKING_IMAGE and build the guest disks from it. Everything this
+# does was done by hand the first time, which is the whole reason it is here:
+# the pins in cluster/env/nixl-mori describe the cluster exactly, and without
+# this they still could not be turned back into a running one.
+#
+# Two artifacts from two tags of the same build, because they carry different
+# things:
+#
+#   <tag>-qcow2  an OCI artifact (artifactType application/vnd.batesste.vm-image.v1),
+#                one zstd layer, pulled with oras. This is the disk.
+#   <tag>        a conventional image ~2 GiB larger carrying the same qcow2
+#                plus /output/id_rsa and /output/vm-info.json. The key is only
+#                here, and the guests trust no other -- a published backing
+#                image gets no cloud-init pass, so nothing of ours is injected.
+#
+# Idempotent by .artifact-tag: a fetched tree records what it came from, and a
+# re-run against the same pin does nothing. Bumping VM_BACKING_IMAGE therefore
+# re-fetches, and FORCE=1 re-fetches regardless.
+cmd_images() {
+	[[ -n "${BACKING_IMAGE}" ]] || {
+		echo "ERROR: VM_BACKING_IMAGE is not set in ${ENV_FILE}" >&2; exit 1; }
+	for tool in oras zstd qemu-img docker; do
+		command -v "${tool}" >/dev/null || {
+			echo "ERROR: ${tool} is needed and not on PATH" >&2; exit 1; }
+	done
+
+	local plain_tag="${BACKING_IMAGE%-qcow2}"
+	local backing="${VM_IMAGES_DIR}/${VM_PREFIX}-backing.qcow2"
+	local stamp_file="${ARTIFACTS_DIR}/.artifact-tag"
+
+	mkdir -p "${ARTIFACTS_DIR}" "${VM_IMAGES_DIR}"
+
+	if [[ "${FORCE:-0}" != "1" ]] && [[ -f "${stamp_file}" ]] &&
+	   [[ "$(cat "${stamp_file}")" == "${BACKING_TAG}" ]] &&
+	   [[ -f "${ARTIFACTS_DIR}/id_rsa" ]]; then
+		echo "artifacts already at ${BACKING_TAG} (FORCE=1 to refetch)"
+	else
+		echo "pulling ${BACKING_IMAGE}"
+		( cd "${ARTIFACTS_DIR}" && oras pull "${BACKING_IMAGE}" ) >/dev/null
+
+		# The key and vm-info come out of the conventional tag; `docker cp`
+		# rather than `docker export | tar` so this does not stream ~3 GiB of
+		# qcow2 through a pipe to reach two small files.
+		echo "extracting the fleet key from ${plain_tag##*:}"
+		local cid
+		cid="$(docker create "${plain_tag}")"
+		for f in id_rsa id_rsa.pub vm-info.json; do
+			docker cp "${cid}:/output/${f}" "${ARTIFACTS_DIR}/${f}" >/dev/null 2>&1 || true
+		done
+		docker rm -f "${cid}" >/dev/null
+		chmod 600 "${ARTIFACTS_DIR}/id_rsa" 2>/dev/null || true
+		[[ -s "${ARTIFACTS_DIR}/id_rsa" ]] || {
+			echo "ERROR: no /output/id_rsa in ${plain_tag}" >&2; exit 1; }
+
+		printf '%s\n' "${BACKING_TAG}" > "${stamp_file}"
+	fi
+
+	if [[ "${FORCE:-0}" == "1" || ! -f "${backing}" ]]; then
+		local zst
+		zst="$(ls "${ARTIFACTS_DIR}"/*.qcow2.zst 2>/dev/null | head -1)"
+		[[ -n "${zst}" ]] || { echo "ERROR: no qcow2.zst in ${ARTIFACTS_DIR}" >&2; exit 1; }
+		echo "decompressing $(basename "${zst}") -> $(basename "${backing}")"
+		# -o straight to the final name: no second full-size copy.
+		zstd -d -f "${zst}" -o "${backing}"
+	else
+		echo "backing image present: ${backing}"
+	fi
+
+	# One overlay per guest. run-vm does NOT create these -- --backing-shared
+	# only turns off file locking so the guests can share one backing file --
+	# so a missing overlay is a guest that will not boot.
+	for n in $(seq 1 "${VM_COUNT}"); do
+		local overlay="${VM_IMAGES_DIR}/${VM_PREFIX}-${n}.qcow2"
+		if [[ "${FORCE:-0}" == "1" || ! -f "${overlay}" ]]; then
+			rm -f "${overlay}"
+			qemu-img create -F qcow2 -b "${backing}" -f qcow2 "${overlay}" >/dev/null
+			echo "  created $(basename "${overlay}")"
+		else
+			echo "  $(basename "${overlay}") exists"
+		fi
+	done
+
+	# Scratch NVMe owned by root is left over from when the containers ran as
+	# root. QEMU opens every drive read-write and refuses to start rather than
+	# merely warning, so this is a boot failure with a confusing message.
+	local stale
+	stale="$(find "${VM_IMAGES_DIR}" -maxdepth 1 -name "${VM_PREFIX}-*-nvme*.qcow2" \
+	         ! -user "$(id -u)" 2>/dev/null || true)"
+	if [[ -n "${stale}" ]]; then
+		echo "removing NVMe scratch images owned by another user (recreated on boot):"
+		printf '  %s\n' ${stale}
+		rm -f ${stale}
+	fi
+
+	echo
+	echo "artifacts: ${ARTIFACTS_DIR}"
+	echo "ssh key:   ${SSH_KEY}"
+	grep -oE '"kernel_release": "[^"]+"|"flavour": "[^"]+"' \
+		"${ARTIFACTS_DIR}/vm-info.json" 2>/dev/null | sed 's/^/  /' || true
+}
 
 cmd_stack() {
 	command -v docker >/dev/null || { echo "docker is needed to export the slim image" >&2; exit 1; }
@@ -229,7 +343,8 @@ EOF
 
 case "${1-}" in
 	status) cmd_status ;;
+	images) cmd_images ;;
 	nvme)   cmd_nvme ;;
 	stack)  cmd_stack ;;
-	*)      echo "usage: $0 {status|nvme|stack}  (prep/gpu are now ansible/guest-setup.yml)" >&2; exit 2 ;;
+	*)      echo "usage: $0 {status|images|nvme|stack}  (prep/gpu are now ansible/guest-setup.yml)" >&2; exit 2 ;;
 esac
