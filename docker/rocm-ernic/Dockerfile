@@ -33,8 +33,13 @@
 #
 # Building newer rocm-ernic against the libvfio-user already installed in the
 # 20261021 image resolves it: new device, old wire protocol. That is the only
-# reason the base image is what it is, and why it must track ERNIC_IMAGE in
-# cluster/env/nixl-mori.
+# reason the base image is what it is.
+#
+# So the invariant is NOT that ERNIC_BASE_IMAGE tracks ERNIC_IMAGE in
+# cluster/env/nixl-mori -- that now names this image, built here. It is that
+# ERNIC_BASE_IMAGE carries the same vfu.* revision as QEMU_IMAGE, because the
+# server inherits its libvfio-user from the base and has to speak the same
+# wire protocol as the QEMU it serves. `make pins-check` enforces it.
 #
 #   docker buildx bake ernic
 #   make ernic-image

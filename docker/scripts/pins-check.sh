@@ -90,7 +90,70 @@ for name in ROCM_VERSION NIXL_REF MORI_REF UCX_REF LIBFABRIC_REF FIO_REF IMAGE_N
 	fi
 done
 
+# ---------------------------------------------------------------------------
+# The rocm-ernic image. Same class of bug, three more places to state a value,
+# plus one cross-file invariant that is the entire reason the image exists.
+# ---------------------------------------------------------------------------
+ERNIC_DOCKERFILE="${ROOT}/docker/rocm-ernic/Dockerfile"
+ENV_FILE="${ROOT}/cluster/env/nixl-mori"
+
+bake_var() {
+	sed -n "s/^variable[[:space:]]*\"$1\"[[:space:]]*{[[:space:]]*default[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" "${BAKE}" | head -1
+}
+dockerfile_arg() {
+	sed -n "s/^ARG[[:space:]]\+$1=\(.*\)$/\1/p" "${ERNIC_DOCKERFILE}" | head -1
+}
+env_var() { sed -n "s/^$1=//p" "${ENV_FILE}" | tail -1; }
+
+# A variable declared across multiple lines reads as absent to the single-line
+# regex both this script and the Makefile use, so a check against it silently
+# passes. Catch the shape rather than the symptom.
+multi="$(grep -nE '^variable[[:space:]]*"[A-Z_0-9]+"[[:space:]]*\{[[:space:]]*$' "${BAKE}" || true)"
+if [[ -n "${multi}" ]]; then
+	fail "docker-bake.hcl has multi-line variable declarations; they read as absent"
+	printf '           %s\n' "${multi}" >&2
+fi
+
+if [[ -f "${ERNIC_DOCKERFILE}" ]]; then
+	for name in ERNIC_REF ERNIC_BASE_IMAGE; do
+		b="$(bake_var "${name}")"
+		d="$(dockerfile_arg "${name}")"
+		if [[ -n "${b}" && -n "${d}" && "${b}" != "${d}" ]]; then
+			fail "${name}: docker-bake.hcl says '${b}', docker/rocm-ernic/Dockerfile ARG says '${d}'"
+		fi
+	done
+
+	# cluster/env/nixl-mori has to name the tag bake actually produces.
+	# Bumping ERNIC_REF changes the tag, and a stale ERNIC_IMAGE then points
+	# at an image that still exists locally -- so the cluster comes up on the
+	# OLD device and LIBFABRIC quietly stops working again.
+	ref="$(bake_var ERNIC_REF)"
+	iname="$(bake_var ERNIC_IMAGE_NAME)"
+	want="${iname}:${ref:0:7}"
+	have="$(env_var ERNIC_IMAGE)"
+	if [[ -n "${have}" && "${have}" != "${want}" ]]; then
+		fail "ERNIC_IMAGE in cluster/env/nixl-mori is '${have}', but bake builds '${want}'"
+	fi
+
+	# The invariant the image exists to satisfy: the server inherits its
+	# libvfio-user from ERNIC_BASE_IMAGE and must speak the same vfio-user
+	# wire protocol as the QEMU it serves. gen-compose checks QEMU against
+	# ERNIC_IMAGE, which is now ours and carries no stamp, so nothing else
+	# checks this at all.
+	base_vfu=""; qemu_vfu=""
+	for part in $(tr '-' ' ' <<< "$(bake_var ERNIC_BASE_IMAGE)"); do
+		[[ "${part}" == vfu.* ]] && base_vfu="${part}"
+	done
+	for part in $(tr '-' ' ' <<< "$(env_var QEMU_IMAGE)"); do
+		[[ "${part}" == vfu.* ]] && qemu_vfu="${part}"
+	done
+	if [[ -n "${base_vfu}" && -n "${qemu_vfu}" && "${base_vfu}" != "${qemu_vfu}" ]]; then
+		fail "libvfio-user mismatch: ERNIC_BASE_IMAGE is ${base_vfu}, QEMU_IMAGE is ${qemu_vfu}"
+		fail "  the vfio-user wire protocol is not compatible across revisions"
+	fi
+fi
+
 if [[ "${rc}" -eq 0 ]]; then
-	echo "pins-check: docker-bake.hcl, Makefile and Dockerfile agree"
+	echo "pins-check: bake, Makefile, Dockerfiles and cluster env agree"
 fi
 exit "${rc}"

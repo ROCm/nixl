@@ -131,17 +131,84 @@ come from apt rather than `/opt` -- `libgflags2.2` and `libhwloc15` -- and
 
 ## What works here, and what does not
 
-Measured 2026-11-02 on the four-guest cluster, after it moved to the
-`ernic-rocjitsu` guest image. DRAM segments, vm1 <-> vm2, single runs, GB/s:
+All three transports, measured 2026-11-02 on the four-guest cluster with two
+rails and two GPUs per guest, the `ernic-rocjitsu` guest image and the
+rocm-ernic from `docker/rocm-ernic/`. DRAM segments, vm1 <-> vm2, 16 MiB
+buffer, single runs, GB/s:
 
-| Block | UCX | MORI_IO |
-|---|---|---|
-| 64 KiB | 0.195 | 0.078 |
-| 256 KiB | 0.756 | 0.305 |
-| 1 MiB | **2.139** | 1.078 |
-| 4 MiB | **4.427** | 2.964 |
-| 8 MiB | 3.882 | 3.387 |
-| 16 MiB | fails | fails |
+| Block | LIBFABRIC | UCX | MORI_IO |
+|---|---|---|---|
+| 64 KiB | 0.196 | 0.154 | 0.075 |
+| 128 KiB | 0.338 | 0.291 | 0.146 |
+| 256 KiB | 0.639 | 0.674 | 0.289 |
+| 512 KiB | 1.119 | 1.270 | 0.489 |
+| 1 MiB | 1.778 | 1.624 | 0.805 |
+
+**LIBFABRIC and UCX are the same speed; MORI_IO is half.** Three runs at
+1 MiB, because a single run cannot separate the first two:
+
+| Backend | runs | mean | spread |
+|---|---|---|---|
+| UCX | 1.624, 1.888, 1.843 | 1.785 | ±7.4% |
+| LIBFABRIC | 1.778, 1.676, 1.835 | 1.763 | ±4.5% |
+| MORI_IO | 0.805, 0.818, 0.814 | 0.812 | ±0.8% |
+
+The two leaders' ranges overlap, so **do not read an ordering between them
+from these numbers**; each is well inside the other's run-to-run variance on
+a host whose 32 cores are 2x oversubscribed before the emulators are counted.
+MORI_IO is 2.2x behind both, which is larger than any variance here, and it
+is also by far the steadiest of the three.
+
+This supersedes the ranking in `overnight-2026-10-22.md`, which had LIBFABRIC
+ahead of UCX by 11.8x. That was measured with UCX crippled by the 8 MB
+`memlock` default; with that fixed the two are level.
+
+Large blocks, same cluster, 256 MiB buffer:
+
+| Block | UCX | LIBFABRIC | MORI_IO |
+|---|---|---|---|
+| 2 MiB | 2.620 | 1.857 | 1.382 |
+| 4 MiB | 3.620 | 2.179 | 2.028 |
+| 8 MiB | **4.466** | 2.416 | 1.420 |
+| 16 MiB | 2.549 | 2.344 | **fails** |
+
+The ordering changes above 1 MiB: **UCX pulls clearly ahead of LIBFABRIC**,
+by 1.8x at 8 MiB, where at 1 MiB and below the two are level. UCX peaks at
+8 MiB and falls off at 16; LIBFABRIC is flatter.
+
+**The 16 MiB ceiling is gone for UCX and LIBFABRIC, and remains for
+MORI_IO.** It used to take all three down with `NIXL_ERR_REMOTE_DISCONNECT`.
+The rocm-ernic in `docker/rocm-ernic/` is what changed: ROCm/rocm-ernic#315
+also makes a QP entering the Error state flush its queues, where before
+outstanding work requests were never completed. Checked against the obvious
+alternative explanation -- that the old failures were just a buffer equal to
+the block size -- by running 16 MiB blocks at 16, 32 and 256 MiB buffers:
+2.547, 2.537 and 2.670, so buffer size is not the variable. MORI_IO still
+fails at 16 MiB, with `NIXL_ERR_BACKEND`.
+
+## Two rails aggregate
+
+Both rails between the same pair of guests, driven as two independent jobs,
+1 MiB blocks:
+
+| | GB/s |
+|---|---|
+| rail 1 alone | 2.114 |
+| rail 1, both running | 1.936 |
+| rail 2, both running | 1.946 |
+| **aggregate** | **3.881** |
+
+1.84x for the second rail, each giving up about 8%. So the emulated fabric is
+not serialising across rails, which is the property worth having: a second
+rail buys close to a second rail's worth of bandwidth.
+
+A method note, because it cost a wrong answer here and in
+`overnight-2026-10-22.md` before that. Two concurrent runs writing to one log
+path produce two *identical* numbers -- the second reader gets the first
+run's rows -- and the result looks plausible rather than broken. The first
+attempt at the table above reported both rails at 1.928965 GB/s, to six
+decimal places. Give each run its own log, and treat identical concurrent
+figures as a harness fault until proven otherwise.
 
 **These are roughly 10x what the same backends measured on the previous
 guest image**, where UCX reached 0.284 GB/s at 1 MiB and MORI_IO 0.278. Two
