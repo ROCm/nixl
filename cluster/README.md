@@ -24,12 +24,20 @@ profile. Nothing here duplicates that tooling.
 
 ```
 make cluster-up        # render the stack and bring it up
-make cluster-prep      # memlock, ionic queue count, fabric address per guest
-make cluster-gpu       # ip_discovery.bin + amdgpu-probe, once per boot
+make cluster-ansible   # everything the guests need that the image lacks
+make cluster-prep      # just the memlock / queue / fabric-address tags
+make cluster-gpu       # just ip_discovery.bin + amdgpu-probe, once per boot
 make cluster-nvme      # ext4 + mount the local NVMe on every guest, once
 make cluster-status    # containers, guest reachability, RDMA device per guest
 make cluster-down      # tear it down, volumes included
 ```
+
+The guest configuration lives in `ansible/guest-setup.yml`, and
+[ansible/README.md](../ansible/README.md) is the single list of everything this
+repo changes outside its own image -- guests, container images and compose
+settings alike, with what each failure looks like when the change is missing.
+`cluster-prep` and `cluster-gpu` are shorthands for two of that playbook's tag
+sets.
 
 Guests are at `VM_SSH_PORT_BASE + n - 1` on localhost: VM 1 on 2400, VM 2 on
 2401. Their RDMA-side addresses are `ERNIC_GUEST_SUBNET.1n`, so

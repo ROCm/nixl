@@ -1,0 +1,261 @@
+# Everything the cluster guests need that their image does not ship.
+#
+#   ansible-playbook ansible/guest-setup.yml
+#   ansible-playbook ansible/guest-setup.yml --tags gpu
+#   ansible-playbook ansible/guest-setup.yml --limit vm1
+#
+# or `make cluster-ansible [TAGS=...]`.
+#
+# Every task here was first done by hand, and each one was found by losing time
+# to the failure it prevents. The failures share a shape: none of them says
+# what is actually wrong. A missing memlock limit surfaces as NIXL reporting
+# that no backend could register memory; a provider that drops send completions
+# surfaces as libfabric stalling above 255 bytes with nothing logged; a missing
+# firmware blob surfaces as a GPU that never appears. The comments say what
+# each one looks like when it is absent, because that is the part that is hard
+# to recover.
+#
+# Idempotent and safe to re-run. `--tags gpu` is needed after every guest
+# reboot; the rest persist in the image overlay.
+---
+- name: Configure the NIXL/MORI test cluster guests
+  hosts: cluster
+  gather_facts: true
+
+  vars:
+    # Built on the controller in a container, not in the guest: the guests have
+    # no compiler and no reason to grow one.
+    rdma_build_dir: "{{ playbook_dir }}/../build/guest-artifacts"
+    ionic_target: /usr/lib/x86_64-linux-gnu/libionic.so.1.0.61.0
+
+  tasks:
+
+    # ---- Locked memory ---------------------------------------------------
+    # nixlbench registers its whole buffer in one call, so ibv_reg_mr asks for
+    # far more locked memory than the 8 MB default allows. UCX reports this
+    # accurately -- "Please set max locked memory (ulimit -l) to 'unlimited'"
+    # -- and NIXL then buries it under "registration failed for the specified
+    # or all potential backends", which reads like a missing or broken plugin.
+    - name: memlock is unlimited for RDMA registration
+      become: true
+      ansible.builtin.copy:
+        dest: /etc/security/limits.d/90-rdma-memlock.conf
+        mode: "0644"
+        content: |
+          * soft memlock unlimited
+          * hard memlock unlimited
+      tags: [net, prep]
+
+    # ---- Fabric address --------------------------------------------------
+    # Nothing in the compose stack assigns the guests their fabric address, so
+    # before this it was set by hand and lasted until the next reboot.
+    #
+    # `optional: true` is load-bearing on its own: without it
+    # systemd-networkd-wait-online blocks the boot for as long as the link is
+    # down, which is indefinitely if the NIC cannot allocate its queues, and
+    # the guest never reaches sshd -- so the symptom of a link problem is a
+    # guest you cannot log into to diagnose it.
+    - name: Fabric address is configured and survives a reboot
+      become: true
+      ansible.builtin.copy:
+        dest: /etc/netplan/60-ernic.yaml
+        mode: "0600"
+        content: |
+          network:
+            version: 2
+            ethernets:
+              enp1s0np0:
+                addresses: [{{ ernic_ip }}/20]
+                optional: true
+      register: ernic_netplan
+      tags: [net, prep]
+
+    - name: Apply netplan when the address changed
+      become: true
+      ansible.builtin.command: netplan apply
+      when: ernic_netplan.changed
+      changed_when: true
+      tags: [net, prep]
+
+    # ---- ionic interrupt pool -------------------------------------------
+    # Only a fallback, and only when the link is actually down. ionic sizes its
+    # interrupt pool from the vCPU count and asks for a vector per queue pair
+    # plus an admin vector; on the in-tree driver four combined queues did not
+    # reliably fit, and the link stayed down with `ip link set up` answering
+    # "No space left on device" after `qcq alloc of rx0 -28`. It was not
+    # deterministic -- one bring-up left vm1 at four queues and stranded the
+    # other three.
+    #
+    # The ernic-rocjitsu image ships ionic-ernic as a DKMS module and brings
+    # all four guests up at four queues, so dropping to one is now a throughput
+    # cut for no reason. Hence the guard: repair it if it is broken, otherwise
+    # leave it alone.
+    - name: Check the fabric link state
+      ansible.builtin.command: ip -br link show enp1s0np0
+      register: ernic_link
+      changed_when: false
+      failed_when: false
+      tags: [net, prep]
+
+    - name: Recover a link that cannot allocate its queues
+      become: true
+      # The unbind/rebind is not ceremony: once ionic has failed to allocate
+      # its queues it does not release the vectors it already took, so ethtool
+      # alone still cannot bring the link up.
+      ansible.builtin.shell: |
+        set -e
+        echo 0000:01:00.0 > /sys/bus/pci/drivers/ionic/unbind || true
+        sleep 4
+        echo 0000:01:00.0 > /sys/bus/pci/drivers/ionic/bind || true
+        sleep 6
+        ethtool -L enp1s0np0 combined 1 || true
+        ip link set enp1s0np0 up || true
+        netplan apply
+      when: "'UP' not in ernic_link.stdout"
+      changed_when: true
+      tags: [net, prep]
+
+    # ---- rdma-core ionic provider ---------------------------------------
+    # The stock Ubuntu 61.0 provider accepts sq_sig_all, stores it nowhere and
+    # consults it never. libfabric's verbs provider never sets
+    # IBV_SEND_SIGNALED and relies entirely on sq_sig_all for its completions,
+    # so the device completes the send and the provider discards the completion
+    # in ionic_poll_send.
+    #
+    # The visible effect is a cutoff at the inject limit, not an error: 255
+    # bytes and under go through fi_inject, need no completion and work
+    # forever; at 256 bytes rxm takes a tx-pool buffer it can only return on a
+    # completion that never comes, and every send after that is -FI_EAGAIN with
+    # nothing logging it.
+    #
+    # See patches/rdma-core/ for the patch and why it is built against v61.0
+    # rather than upstream master.
+    - name: Build the patched ionic provider on the controller
+      delegate_to: localhost
+      run_once: true
+      become: false
+      ansible.builtin.shell: |
+        set -euo pipefail
+        mkdir -p "{{ rdma_build_dir }}"
+        docker run --rm \
+          -v "{{ playbook_dir }}/../patches/rdma-core:/patches:ro" \
+          -v "{{ rdma_build_dir }}:/out" \
+          ubuntu:26.04 bash /patches/build-ionic-provider.sh
+      args:
+        creates: "{{ rdma_build_dir }}/libionic.so.1.0.61.0"
+        executable: /bin/bash
+      tags: [rdma]
+
+    - name: Keep the distro provider alongside the patched one
+      become: true
+      ansible.builtin.copy:
+        src: "{{ ionic_target }}"
+        dest: "{{ ionic_target }}.orig"
+        remote_src: true
+        force: false
+        mode: "0644"
+      tags: [rdma]
+
+    - name: Install the patched ionic provider
+      become: true
+      ansible.builtin.copy:
+        src: "{{ rdma_build_dir }}/libionic.so.1.0.61.0"
+        dest: "{{ ionic_target }}"
+        mode: "0644"
+      tags: [rdma]
+
+    # ---- GPU -------------------------------------------------------------
+    # Needed once per boot. Without it MORI_IO cannot start at all: mori::io
+    # builds its topology through ROCm-SMI before any transport and calls
+    # exit(-1) on zero GPUs, so even a DRAM-segment run aborts at
+    # RSMI_STATUS_INIT_ERROR.
+    #
+    # ip_discovery.bin is per-rocjitsu-build, which is exactly why a published
+    # guest image must not carry one -- a baked copy would be wrong for every
+    # consumer serving the device from a different build. So it is generated
+    # here from the image this cluster actually serves.
+    - name: Generate ip_discovery.bin from the serving rocjitsu image
+      delegate_to: localhost
+      run_once: true
+      become: false
+      ansible.builtin.shell: |
+        set -euo pipefail
+        mkdir -p "{{ rdma_build_dir }}"
+        docker run --rm --entrypoint /bin/sh "{{ rocjitsu_image }}" -c \
+          'python3 /usr/local/bin/vfio_guest_firmware.py --generation gfx1250 \
+             --set full --output /out >/dev/null 2>&1 && tar -cf - -C /out .' \
+          | tar -xf - -C "{{ rdma_build_dir }}" ./ip_discovery.bin
+      args:
+        creates: "{{ rdma_build_dir }}/ip_discovery.bin"
+        executable: /bin/bash
+      tags: [gpu]
+
+    # /lib/firmware/amdgpu, NOT /lib/firmware/updates/amdgpu: the kernel
+    # searches updates/ first and that is where amdgpu-dkms-firmware 31.60 puts
+    # the real gc_12_1_0 and sdma_7_1_0 blobs. Only ip_discovery.bin is missing
+    # from the set, so this adds exactly that and shadows nothing.
+    - name: Install ip_discovery.bin
+      become: true
+      ansible.builtin.copy:
+        src: "{{ rdma_build_dir }}/ip_discovery.bin"
+        dest: /lib/firmware/amdgpu/ip_discovery.bin
+        mode: "0644"
+      tags: [gpu]
+
+    # /dev/kfd is NOT the test -- it appears as soon as the module loads, GPU
+    # behind it or not. A KFD topology node with a non-empty name is.
+    - name: Check whether the GPU is already up
+      ansible.builtin.shell: >
+        cat /sys/class/kfd/kfd/topology/nodes/*/name 2>/dev/null
+        | grep -v '^$' | head -1
+      register: kfd_node
+      changed_when: false
+      failed_when: false
+      tags: [gpu]
+
+    # modprobe is a no-op on a resident module -- it returns 0 without
+    # re-inserting, so every parameter is discarded in silence. A driver
+    # already loaded against a missing blob therefore has to be re-bound at the
+    # PCI layer rather than reloaded. amdgpu-probe covers the cold case; it
+    # loads amdgpu with the gfx1250 emulation parameters the guest blacklists
+    # it for, and a bare modprobe gets emu_mode=0 and finds no GPU.
+    - name: Bring the GPU up
+      become: true
+      ansible.builtin.shell: |
+        if [ -d /sys/bus/pci/drivers/amdgpu ]; then
+          echo 0000:02:00.0 > /sys/bus/pci/drivers/amdgpu/bind 2>/dev/null || true
+        else
+          /usr/local/bin/amdgpu-probe >/dev/null 2>&1 || true
+        fi
+        sleep 14
+      when: kfd_node.stdout | trim == ''
+      changed_when: true
+      tags: [gpu]
+
+    - name: Confirm a KFD topology node exists
+      ansible.builtin.shell: >
+        cat /sys/class/kfd/kfd/topology/nodes/*/name 2>/dev/null
+        | grep -v '^$' | head -1
+      register: kfd_check
+      changed_when: false
+      failed_when: kfd_check.stdout | trim == ''
+      tags: [gpu]
+
+    # ---- Report ----------------------------------------------------------
+    # The stock provider is 55688 bytes and the patched one about 67416, which
+    # is the quickest way to tell which is installed.
+    - name: Collect guest state
+      ansible.builtin.shell: |
+        printf 'kfd=%s memlock=%s ip=%s ionic=%s' \
+          "$(cat /sys/class/kfd/kfd/topology/nodes/*/name 2>/dev/null | grep -v '^$' | head -1)" \
+          "$(ulimit -l)" \
+          "$(ip -br addr show enp1s0np0 | awk '{print $2, $3}')" \
+          "$(stat -c%s {{ ionic_target }} 2>/dev/null)"
+      register: guest_state
+      changed_when: false
+      tags: [gpu, net, prep, rdma]
+
+    - name: Report guest state
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: {{ guest_state.stdout }}"
+      tags: [gpu, net, prep, rdma]
