@@ -120,32 +120,81 @@ image change.
   registration and rendezvous before failing with
   `connect(10.0.2.15:<port>): Connection refused`. Any multi-homed host has
   this problem; these guests just make it certain.
-* **LIBFABRIC** does not, and still does not after the guest image change and
-  after libfabric moved to 2.7.0 built `--with-rocr`. The plugin creates its
-  backend, both processes reach "All processes are ready to proceed", and then
-  no transfer ever completes: the initiator dies on `ASIO Receive timeout`.
-  No result row is printed at any size.
+* **LIBFABRIC** does not, and the cause is now identified: **RDMA CM does not
+  work on this fabric.** `rping`, which is nothing but RDMA CM, hangs on both
+  sides with no output in either direction. libfabric's `verbs;ofi_rxm` sets
+  its connections up through RDMA CM, so the plugin gets as far as creating
+  its backend, both ranks reach "All processes are ready to proceed" -- that
+  is the ASIO rendezvous, which is ordinary TCP and unaffected -- and then no
+  fabric connection is ever established and the initiator dies on `ASIO
+  Receive timeout`. UCX and MORI_IO are unaffected because they do their own
+  out-of-band setup over TCP and use raw verbs QPs.
 
-  What is new is that the device is now clearly exonerated. UCX and MORI_IO
-  both move multiple GB/s over this same fabric, so whatever LIBFABRIC is
-  hitting is in the `verbs;ofi_rxm` path or in the plugin's rail manager, not
-  in the emulated port. (The rail manager is written around EFA and says so in
-  its own logs: `Could not find EFA devices connected to any PCIe switch`.)
-  Note that the earlier claim here that `fi_pingpong -e rdm` completes a full
-  sweep has NOT been reproduced on this cluster -- the attempt did not get
-  past fi_pingpong's own out-of-band connect, which is its control socket
-  rather than the fabric, so it settles nothing either way and wants redoing.
+  This matches what `overnight-2026-10-22.md` recorded independently: of the
+  three things LIBFABRIC needs, the published rocm-ernic image is not one of
+  them. The other two are now in place --- `--enable_pt`, and the rdma-core
+  ionic `sq_sig_all` fix, which the stock Ubuntu 61.0 provider lacks and
+  without which libfabric gets no send completions at all above the 255-byte
+  inject limit (see `patches/rdma-core/`). Neither is sufficient alone.
+
+  Two corrections to what this file used to say. The device is not at fault
+  in the way claimed --- UCX and MORI_IO move multiple GB/s over it. And the
+  claim that `fi_pingpong -e rdm` completes a full sweep is **not reproduced
+  here**; the attempt never got past fi_pingpong's own out-of-band control
+  socket, so it settles nothing either way.
 * **AIS and AIS_MT** reach the GPU but not past hipFile. Registration needs
   `HIPFILE_ALLOW_COMPAT_MODE=true`, and I/O then still fails
   (`hipFileWrite failed: Success`, `hipFileBatchIOSubmit failed: err=5030`).
   Not retested since the guest image moved.
 
 The GPU is driven by `make cluster-gpu`; `VM_VFIO_USER_ROOT_PORT=true` in
-`env/nixl-mori` is load-bearing for it. Whether GPU *memory* is reachable over
-the emulated ERNIC is **open**. It failed `ibv_reg_mr -EFAULT` at every size
-on the old image, but that was with a libfabric built without ROCR and on a
-guest with no amdgpu at all, so the result does not carry over. Retest VRAM
-segments before trusting either answer.
+`env/nixl-mori` is load-bearing for it.
+
+## VRAM over the fabric works
+
+It did not before, and the old note here -- "`ibv_reg_mr` fails `-EFAULT` at
+every size, so the limitation is in the device" -- was wrong twice over. The
+device was never the constraint, and the EFAULT was a symptom of asking the
+wrong question of it. Measured vm1 <-> vm2, 16 MiB buffer, GB/s:
+
+| Block | UCX VRAM | UCX DRAM | MORI_IO VRAM | MORI_IO DRAM |
+|---|---|---|---|---|
+| 64 KiB | 0.176 | 0.170 | 0.072 | 0.070 |
+| 128 KiB | 0.345 | 0.325 | 0.139 | 0.138 |
+| 256 KiB | **0.643** | 0.589 | 0.274 | 0.269 |
+
+All four columns are one 16 MiB buffer so they compare directly; the DRAM
+figures elsewhere in this file use a 1 GiB buffer and are not interchangeable
+with these.
+
+**VRAM costs nothing against DRAM here** -- the two are within run-to-run
+variance of each other for both backends, and VRAM is nominally ahead in this
+pair of runs. Once the registration path is right the GPU memory is not the
+expensive part; the fabric is. That also means the ordering between backends
+is the same on VRAM as on DRAM, with UCX roughly 2.3x MORI_IO.
+
+Three things had to be true at once, and each failed silently:
+
+1. **UCX has to ask for a dma-buf fd.** It decides whether dmabuf is
+   supported by grepping `/boot/config-$(uname -r)` for
+   `CONFIG_DMABUF_MOVE_NOTIFY=y` and `CONFIG_PCI_P2PDMA=y`. The 7.2.6 kernel
+   has the second and never mentions the first, while exporting
+   `dma_buf_move_notify` in `/proc/kallsyms` -- so the capability is there and
+   the probe cannot see it. `patches/ucx/03-rocm-dmabuf-kallsyms-fallback.patch`
+   adds the symbol fallback upstream ROCm/ucx already has. Without it UCX calls
+   plain `ibv_reg_mr` on a device pointer and gets EFAULT, which reads like a
+   NIC that cannot take GPU memory.
+2. **`UCX_ROCM_COPY_DMABUF=y` must be set.** The default is `n`, so even a UCX
+   that knows dmabuf works will not export. This is a runtime setting, not
+   something the patch covers.
+3. **QEMU must do vfio-user P2P DMA.** An RDMA write into VRAM is one
+   vfio-user device DMAing into another's BAR. Stock QEMU never advertises the
+   BAR window and does not say so; `QEMU_IMAGE` therefore points at the
+   sbates fork. See `env/nixl-mori`.
+
+With 1 and 2 but not 3, registration succeeds and every transfer fails
+`NIXL_ERR_REMOTE_DISCONNECT` -- which is the same error DRAM gives at the
+16 MiB mesh ceiling, so it is easy to misread as a size limit.
 
 `FI_UNIVERSE_SIZE` must be bounded for anything libfabric to initialise at
 all; the image sets it to 16, and `cluster.sh stack` writes it into

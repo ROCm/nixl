@@ -76,7 +76,22 @@ VM_NAME_PREFIX=nixl-mori
 # check, so this cannot be fixed by moving qemu-tool forward.
 #
 # QEMU_IMAGE comes back with it because the two must share a vfu.* revision.
-QEMU_IMAGE=docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user:20261021.g742e8e2-qemu11.1.2-vfu.8039244
+# The FORK, not stock QEMU, and this is what makes VRAM work over the fabric.
+# An RDMA write into GPU memory is one vfio-user device (the ernic) DMAing
+# into another's BAR (the rocjitsu GPU). Stock QEMU cannot do vfio-user P2P
+# DMA: vfio_user_dma_map skips sending an fd in DMA_MAP when
+# memory_region_get_fd() returns -1, and for vfio-user mmap regions the
+# backing fd arrives from GET_REGION_INFO but is never propagated to the
+# RAMBlock, so the GPU BAR window is never advertised to peer vfio-user
+# servers. It does not report this -- the registration succeeds and the
+# transfer simply fails.
+#
+# qemu.aa4344e carries the fix (hw/vfio/region.c, "enabling peer P2P DMA").
+# scale-out's comment that NO published image contains it is out of date; it
+# was written against qemu.d757fa6, which does not. aa4344e shares both the
+# 20261021.g742e8e2 build stamp and the vfu.8039244 revision with ERNIC_IMAGE,
+# so the coherence check still passes.
+QEMU_IMAGE=docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20261021.g742e8e2-qemu.aa4344e-vfu.8039244
 ERNIC_IMAGE=docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-ernic:20261021.g742e8e2-ernic.31d3114-vfu.8039244
 ROCJITSU_IMAGE=docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20261021.g742e8e2-rocjitsu.84fb06b
 

@@ -277,14 +277,33 @@ sudo -n rm -rf /opt/nixl-stack
 sudo -n mkdir -p /opt/nixl-stack
 sudo -n tar -xzf /tmp/nixl-stack.tgz -C /opt/nixl-stack
 S=/opt/nixl-stack/opt
-# The image sets this with ENV, which a tarball of /opt cannot carry, so it
-# has to be re-established here. Without it libfabric takes its default
-# universe of 256, ofi_rxm sizes the MSG completion queue from that, the
-# device cannot accommodate the result, and every LIBFABRIC run dies at
-# `fi_enable failed for rail 0: Invalid argument` -- before any transfer, and
-# with nothing in the message pointing at a universe size.
-printf 'FI_UNIVERSE_SIZE=16\n' | sudo -n tee /etc/environment.d/90-nixl-stack.conf >/dev/null 2>&1 || true
-printf 'export FI_UNIVERSE_SIZE=16\n' | sudo -n tee /etc/profile.d/nixl-stack.sh >/dev/null
+# The image sets both of these with ENV, which a tarball of /opt cannot carry,
+# so they have to be re-established here.
+#
+# Without FI_UNIVERSE_SIZE libfabric takes its default universe of 256, ofi_rxm
+# sizes the MSG completion queue from that, the device cannot accommodate the
+# result, and every LIBFABRIC run dies at `fi_enable failed for rail 0: Invalid
+# argument` -- before any transfer, and with nothing in the message pointing at
+# a universe size.
+#
+# Without UCX_ROCM_COPY_DMABUF, UCX never exports a dma-buf fd for ROCm memory
+# and hands a device pointer to plain ibv_reg_mr instead, so every VRAM segment
+# fails registration with EFAULT -- which reads like a NIC that cannot take GPU
+# memory. `try` rather than `y` so a guest without dmabuf falls back instead of
+# refusing to start. See cluster/README.md.
+printf 'FI_UNIVERSE_SIZE=16\nUCX_ROCM_COPY_DMABUF=try\n' | sudo -n tee /etc/environment.d/90-nixl-stack.conf >/dev/null 2>&1 || true
+printf 'export FI_UNIVERSE_SIZE=16\nexport UCX_ROCM_COPY_DMABUF=try\n' | sudo -n tee /etc/profile.d/nixl-stack.sh >/dev/null
+# /etc/environment is the one that actually reaches a benchmark. profile.d is
+# only sourced by a login shell and environment.d only by a systemd user
+# session, so neither applies to `ssh guest 'nixlbench ...'` -- which is how
+# every run here is driven. pam_env reads this file on any PAM session,
+# interactive or not. Written key-by-key so an existing file is updated rather
+# than replaced.
+for kv in 'FI_UNIVERSE_SIZE=16' 'UCX_ROCM_COPY_DMABUF=try'; do
+	k="${kv%%=*}"
+	sudo -n sed -i "/^${k}=/d" /etc/environment
+	printf '%s\n' "${kv}" | sudo -n tee -a /etc/environment >/dev/null
+done
 printf '%s\n' $S/rocm/lib $S/rocm/lib/rocm_sysdeps/lib $S/rocnixl-ucx/lib \
 	$S/libfabric/lib $S/mori/lib $S/hipfile/lib $S/nixl/lib/x86_64-linux-gnu \
 	| sudo -n tee /etc/ld.so.conf.d/nixl-stack.conf >/dev/null
@@ -313,7 +332,7 @@ INSTALL
 Installed under /opt/nixl-stack/opt. To run nixlbench there:
 
   export NIXL_PLUGIN_DIR=/opt/nixl-stack/opt/nixl/lib/x86_64-linux-gnu/plugins
-  export FI_UNIVERSE_SIZE=16   # only needed if your shell predates the install
+  export FI_UNIVERSE_SIZE=16 UCX_ROCM_COPY_DMABUF=try   # if your shell predates the install
   /opt/nixl-stack/opt/nixlbench/bin/nixlbench --backend UCX \\
       --runtime_type ASIO --asio_address ${SUBNET}.11 --asio_port 9500 \\
       --initiator_seg_type DRAM --target_seg_type DRAM \\

@@ -375,7 +375,7 @@ RUN --mount=type=cache,target=/root/.cache,sharing=locked \
 FROM ucx AS nixl
 
 ARG NIXL_GIT_URL=https://github.com/ai-dynamo/nixl.git
-ARG NIXL_REF=v1.5.0
+ARG NIXL_REF=v1.5.2
 # Plugins excluded from the build: CUDA-only (GDS/GDS_MT/GPUNETIO) or needing
 # vendor SDKs / cloud object stores we do not test here.
 ARG NIXL_DISABLE_PLUGINS=GDS,GDS_MT,GPUNETIO,OBJ,AZURE_BLOB,INFINIA
@@ -537,6 +537,23 @@ ENV NIXL_PREFIX=/opt/nixl \
 # Raise it for a fabric with more peers than this, on hardware whose max_cqe
 # can take it; it costs only the CQ depth rxm reserves per endpoint.
 ENV FI_UNIVERSE_SIZE=16
+
+# Let UCX export a dma-buf fd for ROCm memory, which is what makes a VRAM
+# segment registrable with an RDMA NIC at all: without it UCX hands a device
+# pointer to plain ibv_reg_mr and gets EFAULT, which reads like a NIC that
+# cannot take GPU memory rather than a disabled code path.
+#
+# `try`, not `y`.  With `y` UCX treats a platform where dmabuf is genuinely
+# unavailable as a hard error -- "ROCm dmabuf support requested but not found"
+# -- and the whole worker fails to come up, so an image that defaulted to `y`
+# would refuse to run anywhere dmabuf is missing.  `try` uses it when it is
+# there and falls back silently when it is not, which is the right default for
+# an image that runs on both.
+#
+# Separate from patches/ucx/03, which fixes UCX's *detection* of dmabuf on
+# kernels that no longer advertise CONFIG_DMABUF_MOVE_NOTIFY.  Both are needed:
+# the patch makes the answer correct, this makes UCX ask the question.
+ENV UCX_ROCM_COPY_DMABUF=try
 
 # /opt/mori/lib holds the same libmori_*.so the amd_mori wheel bundles under its
 # package dir.  Both are on the search path, which is fine as long as one
@@ -746,6 +763,7 @@ ENV ROCM_PATH=/opt/rocm \
     LIBFABRIC_PREFIX=/opt/libfabric \
     FIO_PREFIX=/opt/fio \
     FI_UNIVERSE_SIZE=16 \
+    UCX_ROCM_COPY_DMABUF=try \
     PATH=/opt/nixlbench/bin:/opt/hsa-snoop/bin:/opt/fio/bin:/opt/rocnixl-ucx/bin:/opt/libfabric/bin:/opt/rocm/bin:${PATH}
 
 RUN set -eux; \

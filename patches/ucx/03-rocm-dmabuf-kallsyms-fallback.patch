@@ -1,0 +1,109 @@
+# uct/rocm: fall back to /proc/kallsyms when deciding whether dmabuf works
+#
+# THE PROBLEM
+#
+# A VRAM segment cannot be registered with an RDMA NIC, so every NIXL backend
+# that crosses the fabric fails at registration:
+#
+#   ibv_reg_mr(address=0x7dae86800000, length=268435456, access=0xf)
+#       failed: Bad address
+#   failed to register address ... (rocm) ... on md[4]=rocep1s0:
+#       Input/output error (md supports: host|rocm)
+#
+# That EFAULT is what a device pointer handed to the host-memory registration
+# path looks like. The ib memory domain is willing -- `ucx_info -d` reports
+# `register: unlimited, dmabuf` and `memory types: host, rocm` -- but UCX never
+# reaches ibv_reg_dmabuf_mr, because it has already decided the platform has no
+# dmabuf support and so never asks ROCr for an fd.
+#
+# THE CAUSE
+#
+# uct_rocm_base_is_dmabuf_supported() decides by reading the kernel's own
+# config file, /boot/config-$(uname -r), and requires BOTH of:
+#
+#   CONFIG_DMABUF_MOVE_NOTIFY=y
+#   CONFIG_PCI_P2PDMA=y
+#
+# The guests run a mainline 7.2.6 kernel that has PCI_P2PDMA=y and does not
+# mention DMABUF_MOVE_NOTIFY at all -- not as `=y`, not as `is not set`. The
+# capability is nonetheless present: `dma_buf_move_notify` is in
+# /proc/kallsyms, which it would not be if the code were compiled out. So the
+# probe is reading a signal that this kernel no longer publishes, and
+# concluding "unsupported" about a kernel that supports it.
+#
+# THE FIX
+#
+# Fall back to /proc/kallsyms when the config file does not settle it, looking
+# for the symbols rather than the config options. This is exactly what upstream
+# ROCm/ucx does -- uct_rocm_base_kernel_symbols_supports_dmabuf() in
+# src/uct/rocm/base/rocm_base.c on master -- and the change here is that code
+# restructured onto v1.22.0, which has the config-file check inline in
+# uct_rocm_base_is_dmabuf_supported() and no fallback.
+#
+# Note that this only gets UCX as far as asking for an fd. Whether the transfer
+# then works depends on the NIC being able to DMA into the GPU's BAR, which on
+# this cluster additionally needs a QEMU with vfio-user P2P DMA -- see
+# cluster/env/nixl-mori. With both in place, VRAM over the emulated ERNIC
+# reaches 0.645 GB/s at 256 KiB against 0.756 for DRAM.
+#
+# Still needed on top: UCX_ROCM_COPY_DMABUF=y. The default is `n`, so the
+# export path is off even where it is known to work.
+#
+--- a/src/uct/rocm/base/rocm_base.c
++++ b/src/uct/rocm/base/rocm_base.c
+@@ -313,7 +313,7 @@
+ 
+     if (uname(&utsname) == -1) {
+         ucs_trace("could not get kernel name");
+-        goto out;
++        goto kallsyms;
+     }
+ 
+     ucs_snprintf_safe(kernel_conf_file, sizeof(kernel_conf_file),
+@@ -322,7 +322,7 @@
+     if (fp == NULL) {
+         ucs_trace("could not open kernel conf file %s error: %m",
+                   kernel_conf_file);
+-        goto out;
++        goto kallsyms;
+     }
+ 
+     while (fgets(buf, sizeof(buf), fp) != NULL) {
+@@ -338,6 +338,37 @@
+         }
+     }
+     fclose(fp);
++
++kallsyms:
++    /*
++     * A kernel can support dmabuf without saying so in its config file: 7.2.x
++     * has CONFIG_PCI_P2PDMA=y and no CONFIG_DMABUF_MOVE_NOTIFY line at all,
++     * yet exports dma_buf_move_notify, which it would not if the code were
++     * compiled out. Checking the symbols directly settles those kernels.
++     */
++    if (!dmabuf_supported) {
++        found_opt1 = 0;
++        found_opt2 = 0;
++        fp         = fopen("/proc/kallsyms", "r");
++        if (fp == NULL) {
++            ucs_trace("could not open /proc/kallsyms error: %m");
++            goto out;
++        }
++
++        while (fgets(buf, sizeof(buf), fp) != NULL) {
++            if (strstr(buf, "dma_buf_move_notify") != NULL) {
++                found_opt1 = 1;
++            }
++            if (strstr(buf, "pci_p2pdma") != NULL) {
++                found_opt2 = 1;
++            }
++            if (found_opt1 && found_opt2) {
++                dmabuf_supported = 1;
++                break;
++            }
++        }
++        fclose(fp);
++    }
+ #endif
+ out:
+     return dmabuf_supported;
