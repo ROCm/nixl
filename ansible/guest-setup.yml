@@ -64,9 +64,13 @@
           network:
             version: 2
             ethernets:
-              enp1s0np0:
-                addresses: [{{ ernic_ip }}/20]
+          {% for r in ernic_rails %}
+              ernic{{ r.rail }}:
+                match:
+                  macaddress: "{{ r.mac }}"
+                addresses: [{{ r.ip }}/20]
                 optional: true
+          {% endfor %}
       register: ernic_netplan
       tags: [net, prep]
 
@@ -91,7 +95,18 @@
     # cut for no reason. Hence the guard: repair it if it is broken, otherwise
     # leave it alone.
     - name: Check the fabric link state
-      ansible.builtin.command: ip -br link show enp1s0np0
+      # By driver, not by name: adding GPUs shifts the PCI slots and with them
+      # enpXs0np0. Counts interfaces bound to ionic that are not UP.
+      ansible.builtin.shell: |
+        down=0
+        for d in /sys/bus/pci/drivers/ionic/0000:*; do
+          [ -e "$d" ] || continue
+          for n in "$d"/net/*; do
+            [ -e "$n" ] || continue
+            ip -br link show "$(basename "$n")" | grep -q ' UP ' || down=$((down+1))
+          done
+        done
+        echo "$down"
       register: ernic_link
       changed_when: false
       failed_when: false
@@ -104,14 +119,22 @@
       # alone still cannot bring the link up.
       ansible.builtin.shell: |
         set -e
-        echo 0000:01:00.0 > /sys/bus/pci/drivers/ionic/unbind || true
+        devs=$(for d in /sys/bus/pci/drivers/ionic/0000:*; do
+                 [ -e "$d" ] && basename "$d"; done)
+        for b in $devs; do echo "$b" > /sys/bus/pci/drivers/ionic/unbind || true; done
         sleep 4
-        echo 0000:01:00.0 > /sys/bus/pci/drivers/ionic/bind || true
+        for b in $devs; do echo "$b" > /sys/bus/pci/drivers/ionic/bind || true; done
         sleep 6
-        ethtool -L enp1s0np0 combined 1 || true
-        ip link set enp1s0np0 up || true
+        for d in /sys/bus/pci/drivers/ionic/0000:*; do
+          for n in "$d"/net/*; do
+            [ -e "$n" ] || continue
+            i=$(basename "$n")
+            ethtool -L "$i" combined 1 || true
+            ip link set "$i" up || true
+          done
+        done
         netplan apply
-      when: "'UP' not in ernic_link.stdout"
+      when: ernic_link.stdout | trim | int > 0
       changed_when: true
       tags: [net, prep]
 
@@ -223,7 +246,16 @@
       become: true
       ansible.builtin.shell: |
         if [ -d /sys/bus/pci/drivers/amdgpu ]; then
-          echo 0000:02:00.0 > /sys/bus/pci/drivers/amdgpu/bind 2>/dev/null || true
+          # Every AMD processing accelerator that is not already bound, not
+          # one hardcoded function: ROCJITSU_PER_VM > 1 puts more than one on
+          # the bus, and binding only the first leaves the rest invisible to
+          # ROCm with no error anywhere.
+          for d in /sys/bus/pci/devices/0000:*; do
+            [ "$(cat "$d/vendor" 2>/dev/null)" = "0x1002" ] || continue
+            [ "$(cat "$d/class" 2>/dev/null)" = "0x120000" ] || continue
+            [ -e "$d/driver" ] && continue
+            echo "$(basename "$d")" > /sys/bus/pci/drivers/amdgpu/bind 2>/dev/null || true
+          done
         else
           /usr/local/bin/amdgpu-probe >/dev/null 2>&1 || true
         fi
@@ -241,15 +273,53 @@
       failed_when: kfd_check.stdout | trim == ''
       tags: [gpu]
 
+    # ---- Local NVMe ------------------------------------------------------
+    # What the POSIX and AIS/AIS_MT backends are pointed at. Both drives, at
+    # /mnt/nvme0 and /mnt/nvme1 -- which is what env/nixl-mori has always said
+    # VM_NVME=2 gives you, while cluster.sh only ever formatted nvme0n1 and
+    # mounted it at /mnt/nvme. Two rather than one so a storage run can be
+    # driven across separate devices instead of contending on a single queue.
+    #
+    # Guarded on a filesystem already being present: this formats, and a
+    # re-run that reformatted would silently destroy a run in progress.
+    - name: Find the local NVMe drives
+      ansible.builtin.shell: lsblk -dno NAME /dev/nvme*n1 2>/dev/null | sort
+      register: nvme_list
+      changed_when: false
+      failed_when: false
+      tags: [nvme]
+
+    - name: Make an ext4 on each NVMe that has no filesystem
+      become: true
+      ansible.builtin.shell: |
+        set -e
+        dev=/dev/{{ item }}
+        mnt=/mnt/nvme{{ ansible_loop.index0 }}
+        if ! blkid "$dev" >/dev/null 2>&1; then
+          wipefs -a "$dev" >/dev/null 2>&1 || true
+          mkfs.ext4 -q -F -L "nvme-scratch{{ ansible_loop.index0 }}" "$dev"
+          echo formatted
+        fi
+        mkdir -p "$mnt"
+        findmnt -n "$mnt" >/dev/null 2>&1 || mount "$dev" "$mnt"
+        chown {{ ansible_user_uid }}:{{ ansible_user_gid }} "$mnt"
+      loop: "{{ nvme_list.stdout_lines }}"
+      loop_control:
+        extended: true
+      register: nvme_setup
+      changed_when: "'formatted' in nvme_setup.stdout"
+      when: nvme_list.stdout_lines | length > 0
+      tags: [nvme]
+
     # ---- Report ----------------------------------------------------------
     # The stock provider is 55688 bytes and the patched one about 67416, which
     # is the quickest way to tell which is installed.
     - name: Collect guest state
       ansible.builtin.shell: |
-        printf 'kfd=%s memlock=%s ip=%s ionic=%s' \
-          "$(cat /sys/class/kfd/kfd/topology/nodes/*/name 2>/dev/null | grep -v '^$' | head -1)" \
+        printf 'gpus=%s memlock=%s rails=%s ionic=%s' \
+          "$(cat /sys/class/kfd/kfd/topology/nodes/*/name 2>/dev/null | grep -cv '^$')" \
           "$(ulimit -l)" \
-          "$(ip -br addr show enp1s0np0 | awk '{print $2, $3}')" \
+          "$(ip -br addr show | awk '/192\.168\./ {printf "%s ", $3}')" \
           "$(stat -c%s {{ ionic_target }} 2>/dev/null)"
       register: guest_state
       changed_when: false

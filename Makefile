@@ -18,14 +18,14 @@ ROCM_VERSION ?= 7.14.0
 NIXL_GIT_URL ?= https://github.com/ai-dynamo/nixl.git
 NIXL_REF     ?= v1.5.2
 MORI_GIT_URL ?= https://github.com/ROCm/mori.git
-MORI_REF     ?= v1.2.3.post1
+MORI_REF     ?= v1.2.4
 UCX_GIT_URL  ?= https://github.com/openucx/ucx.git
 UCX_REF      ?= v1.22.0
 # libfabric (OFI), for NIXL's LIBFABRIC backend -- a second RDMA transport to
 # put beside UCX.  Source-built because Ubuntu 24.04 ships 1.17 and the NIXL
 # plugin's floor is 1.21.0.  Empty leaves the plugin out of the image.
 LIBFABRIC_GIT_URL ?= https://github.com/ofiwg/libfabric.git
-LIBFABRIC_REF     ?= v1.22.0
+LIBFABRIC_REF     ?= v2.7.0
 # hipFile is the odd one out: ROCm/hipFile publishes no releases, its `nightly`
 # git tag has been frozen since 2026-01-22 and the .deb assets on the "Nightly"
 # GitHub release since 2026-06-08 -- all three older than the 0.3.0 the ROCm

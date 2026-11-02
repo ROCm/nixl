@@ -99,16 +99,16 @@ nodelist, backends, segment type).
 |---|---|---|---|
 | ROCm base | `7.14.0` | `rocm/dev-ubuntu-24.04:7.14.0-full` | — |
 | NIXL | [`v1.5.2`](https://github.com/ai-dynamo/nixl/tree/v1.5.2) | [`ai-dynamo/nixl`](https://github.com/ai-dynamo/nixl) | 6 patches |
-| MORI | [`v1.2.3.post1`](https://github.com/ROCm/mori/tree/v1.2.3.post1) | [`ROCm/mori`](https://github.com/ROCm/mori) | pristine |
+| MORI | [`v1.2.4`](https://github.com/ROCm/mori/tree/v1.2.4) | [`ROCm/mori`](https://github.com/ROCm/mori) | pristine |
 | UCX | [`v1.22.0`](https://github.com/openucx/ucx/tree/v1.22.0) | [`openucx/ucx`](https://github.com/openucx/ucx) | 3 patches |
-| libfabric | [`v1.22.0`](https://github.com/ofiwg/libfabric/tree/v1.22.0) | [`ofiwg/libfabric`](https://github.com/ofiwg/libfabric) | pristine |
+| libfabric | [`v2.7.0`](https://github.com/ofiwg/libfabric/tree/v2.7.0) | [`ofiwg/libfabric`](https://github.com/ofiwg/libfabric) | pristine |
 | hipFile | [`bd0bc23`](https://github.com/ROCm/hipFile/commit/bd0bc2330a1573223209b9899055d1d6188b9113) | [`ROCm/hipFile`](https://github.com/ROCm/hipFile) | 1 patch |
 | fio | [`c322617`](https://github.com/ROCm/fio/commit/c32261752c88b3f7aadfde4d011a028ae954f869) | [`ROCm/fio`](https://github.com/ROCm/fio) | pristine |
 
 Resulting image tag:
 
 ```
-nixl-mori-test:0.1.0-rocm7.14.0-nixl1.5.2-mori1.2.3.post1-hipfilebd0bc23-fioc322617
+nixl-mori-test:0.1.0-rocm7.14.0-nixl1.5.2-mori1.2.4-hipfilebd0bc23-fioc322617
 ```
 <!-- END GENERATED PINS -->
 

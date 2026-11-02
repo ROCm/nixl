@@ -16,7 +16,7 @@
 variable "ROCM_VERSION"   { default = "7.14.0" }
 variable "ROCM_BASE_IMAGE" { default = "" }
 variable "NIXL_REF"       { default = "v1.5.2" }
-variable "MORI_REF"       { default = "v1.2.3.post1" }
+variable "MORI_REF"       { default = "v1.2.4" }
 variable "UCX_REF"        { default = "v1.22.0" }
 variable "LIBFABRIC_REF"  { default = "v2.7.0" }
 variable "HIPFILE_REF"    { default = "bd0bc2330a1573223209b9899055d1d6188b9113" }

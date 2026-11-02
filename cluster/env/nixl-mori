@@ -158,6 +158,18 @@ PROM_PORT=9290
 # and AIS_MT backends with it.
 VM_VFIO_USER_ROOT_PORT=true
 
+# Two NICs and two GPUs per guest, so there is more than one path to test:
+# a second rail to stripe or fail over to, and a second device to move memory
+# between without crossing the fabric at all.
+#
+# ERNIC_PER_VM multiplies MESH NODES, not just containers -- each rocm-ernic
+# is its own node. 4 VMs x 2 is 8, comfortably under the ~40 the mesh has been
+# measured to register, but it does double the emulator processes competing
+# for this host's 32 cores, which are already 2x oversubscribed by the guests
+# alone. Expect per-pair throughput to fall even where nothing is wrong.
+ERNIC_PER_VM=2
+ROCJITSU_PER_VM=2
+
 # The scale-out profile's default, gfx1250_mi455x.json, is not drivable by the
 # guest's amdgpu. It carries no `ip_versions` table, so IP discovery hands the
 # driver UVD_HWIP 0x0, amdgpu logs "Failed to add vcn/jpeg ip block" and the

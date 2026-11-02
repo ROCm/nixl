@@ -57,9 +57,29 @@ def build() -> dict:
         envget("VM_BACKING_IMAGE", ""),
     )
 
+    per_vm = int(envget("ERNIC_PER_VM", "1"))
+    mac_prefix = envget("ERNIC_MAC_PREFIX", "72:6f:63:6e")
+
     hostvars = {}
     for n in range(1, count + 1):
-        hostvars[f"vm{n}"] = {
+        # Addresses and MACs are keyed on the GLOBAL nic ordinal, not the VM
+        # index, so at ERNIC_PER_VM=2 vm2's first rail is .13 rather than .12.
+        # Getting this wrong points a benchmark at another guest's rail, which
+        # works -- it is a real address on a real fabric -- and quietly
+        # measures the wrong path.
+        rails = []
+        for r in range(1, per_vm + 1):
+            g = (n - 1) * per_vm + r
+            rails.append({
+                "ip": f"{subnet}.{10 + g}",
+                # Matching netplan on the MAC rather than the interface name:
+                # adding GPUs shifts the PCI slots, and with them enpXs0np0.
+                "mac": f"{mac_prefix}:00:{g:02x}",
+                "rail": r,
+            })
+
+        hostvars[f"vm{n}"] = {}
+        hostvars[f"vm{n}"].update({
             "ansible_host": "localhost",
             "ansible_port": base + n - 1,
             "ansible_user": "ubuntu",
@@ -69,10 +89,12 @@ def build() -> dict:
                 "-o LogLevel=ERROR",
             "ansible_python_interpreter": "/usr/bin/python3",
             "vm_index": n,
-            # Guests get .1n, so vm1 is .11. Not .1: the mesh manager claims
-            # that as its DHCP server_ip and intercepts ARP for it.
-            "ernic_ip": f"{subnet}.1{n}",
-        }
+            "ernic_rails": rails,
+            # The first rail, for everything that wants one address. Not .1:
+            # the mesh manager claims that as its DHCP server_ip and
+            # intercepts ARP for it.
+            "ernic_ip": rails[0]["ip"],
+        })
 
     return {
         "cluster": {"hosts": sorted(hostvars, key=lambda h: int(h[2:]))},
