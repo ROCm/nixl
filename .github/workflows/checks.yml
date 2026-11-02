@@ -1,0 +1,41 @@
+# The checks that need neither a GPU, a cluster, nor an image build.
+#
+# pins-check is the reason this exists. Every pin is reachable from three
+# files, docker-bake.hcl is the only one that may state it, and the one time
+# they drifted nothing failed -- `docker buildx bake` and `make build` simply
+# compiled different libfabrics from the same tree for a day.
+name: checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pins:
+    name: pins and generated docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: docker-bake.hcl, Makefile and Dockerfile agree
+        run: make pins-check
+
+      # Reads the pins and rewrites nothing; fails if README.md's generated
+      # table is stale. Catches a bump that moved the pin but not the docs.
+      - name: README pin table is current
+        run: make readme-check
+
+  patches:
+    name: patches apply to the pinned refs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Separate job because this one clones NIXL, UCX and hipFile at their
+      # pinned refs: it needs network and minutes, where the pins job needs
+      # neither. Keeping them apart means a drifted pin reports in seconds
+      # rather than behind a clone.
+      - name: Every patchset applies cleanly
+        run: make patch-check

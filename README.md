@@ -119,14 +119,27 @@ make build NIXL_REF=v1.3.1 MORI_REF=v1.2.1
 make print-tag        # nixl-mori-test:0.1.0-rocm7.14.0-nixl1.3.1-mori1.2.1
 ```
 
-The defaults live in **two** places that must agree: the `Makefile` (which
-passes them as build args) and the `ARG` lines in `docker/Dockerfile` (the
-fallback when the Dockerfile is built directly, and the source `image-tag.sh`
-reads). Bump both, then regenerate the table above so the README follows:
+**`docker-bake.hcl` is the source of truth for every pin.** Bump it there and
+nowhere else: the `Makefile` reads the bake file rather than restating the
+values, so `make build` and `docker buildx bake` cannot disagree.
+
+One copy does remain, and has to: the `ARG` lines in `docker/Dockerfile` are
+the fallback when the Dockerfile is built directly, and are what
+`image-tag.sh` reads when a pin is unset. Those must match bake, and
+`make pins-check` fails if they do not.
+
+This used to be "two places that must agree", and they stopped agreeing:
+`LIBFABRIC_REF` was bumped to `v2.7.0` in the bake file and the Dockerfile and
+left at `v1.22.0` in the Makefile, so `docker buildx bake` and `make build`
+compiled different libfabrics from the same tree and the generated table below
+advertised the version nothing was running. Nothing failed; the builds just
+quietly diverged.
 
 ```bash
+make pins-check    # bake / Makefile / Dockerfile agree about every pin
 make readme        # rewrite the generated block from the current pins
 make readme-check  # fail if it is stale (no write)
+make check         # all three, plus patch-check
 ```
 
 ## Patches

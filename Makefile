@@ -10,43 +10,56 @@
 REPO_ROOT := $(CURDIR)
 
 # ---- Component pins ---------------------------------------------------------
-# Each ref is a tagged upstream release; local changes go in patches/<name>/ and
-# are applied to the fresh checkout in lexical order.  Keep these in sync with
-# the ARG defaults in docker/Dockerfile -- the values here are passed as build
-# args, and docker/scripts/image-tag.sh reads the Dockerfile when they are not.
-ROCM_VERSION ?= 7.14.0
+# THE DEFAULTS LIVE IN docker-bake.hcl, NOT HERE. This file reads them.
+#
+# They used to be written out in both places, and they drifted: LIBFABRIC_REF
+# was bumped to v2.7.0 in docker-bake.hcl and the Dockerfile and left at
+# v1.22.0 here, so `docker buildx bake` and `make build` compiled different
+# libfabrics from the same tree, and the generated pin table -- which reads
+# this file -- advertised the version nothing was running. Nothing failed; the
+# two builds just quietly disagreed.
+#
+# `make pins-check` enforces it. Each ref is a tagged upstream release; local
+# changes go in patches/<name>/ and are applied to the fresh checkout in
+# lexical order.
+DOCKER_BAKE := $(REPO_ROOT)/docker-bake.hcl
+
+# One pass over the bake file into NAME=value words, so a pin costs no extra
+# process. Values with whitespace would break the word split; none have any,
+# and pins-check fails if that changes.
+_BAKE_DEFAULTS := $(shell sed -n 's/^variable[[:space:]]*"\([A-Z_0-9]*\)"[[:space:]]*{[[:space:]]*default[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1=\2/p' $(DOCKER_BAKE))
+bake_default = $(patsubst $(1)=%,%,$(filter $(1)=%,$(_BAKE_DEFAULTS)))
+
+# ?= so the command line still wins: `make build NIXL_REF=v1.5.0` is unchanged.
+$(foreach _v,ROCM_VERSION NIXL_REF MORI_REF UCX_REF LIBFABRIC_REF HIPFILE_REF FIO_REF IMAGE_NAME,\
+  $(eval $(_v) ?= $(call bake_default,$(_v))))
+
+# Not in bake: it builds from a context, and these only matter to the clone
+# step. They stay here.
 NIXL_GIT_URL ?= https://github.com/ai-dynamo/nixl.git
-NIXL_REF     ?= v1.5.2
 MORI_GIT_URL ?= https://github.com/ROCm/mori.git
-MORI_REF     ?= v1.2.4
 UCX_GIT_URL  ?= https://github.com/openucx/ucx.git
-UCX_REF      ?= v1.22.0
 # libfabric (OFI), for NIXL's LIBFABRIC backend -- a second RDMA transport to
 # put beside UCX.  Source-built because Ubuntu 24.04 ships 1.17 and the NIXL
 # plugin's floor is 1.21.0.  Empty leaves the plugin out of the image.
 LIBFABRIC_GIT_URL ?= https://github.com/ofiwg/libfabric.git
-LIBFABRIC_REF     ?= v2.7.0
 # hipFile is the odd one out: ROCm/hipFile publishes no releases, its `nightly`
 # git tag has been frozen since 2026-01-22 and the .deb assets on the "Nightly"
 # GitHub release since 2026-06-08 -- all three older than the 0.3.0 the ROCm
-# base image packages.  The live stream is the develop branch, so this is a SHA
-# on it (develop HEAD as of 2026-09-01) rather than a tag.  Set it empty to fall
-# back to the packaged libhipfile; the AIS backend then drops out of the build.
+# base image packages.  The live stream is the develop branch, so the pin is a
+# SHA on it rather than a tag.  Set it empty to fall back to the packaged
+# libhipfile; the AIS backend then drops out of the build.
 HIPFILE_GIT_URL ?= https://github.com/ROCm/hipFile.git
-HIPFILE_REF     ?= bd0bc2330a1573223209b9899055d1d6188b9113
 # fio, for a hipFile number with no NIXL in it.  The ROCm fork rather than
 # axboe/fio: its libhipfile engine takes hipfile_mode=sync|stream|batch, which
 # is the same three submission paths AIS_MT, AIS and hipFile's stubbed batch
 # API use, so it can say whether a plateau is NIXL's or the library's.  The
-# branch publishes no tags, hence a SHA (head of zbyrne/async_hipfile_engine as
-# of 2026-09-02).  Empty leaves fio out of the image entirely.
+# branch publishes no tags, hence a SHA.  Empty leaves fio out of the image.
 FIO_GIT_URL ?= https://github.com/ROCm/fio.git
-FIO_REF     ?= c32261752c88b3f7aadfde4d011a028ae954f869
 
 override VERSION := $(strip $(file <$(REPO_ROOT)/VERSION))
 
 # ---- Image naming -----------------------------------------------------------
-IMAGE_NAME ?= nixl-mori-test
 DOCKERFILE := $(REPO_ROOT)/docker/Dockerfile
 
 # The tag encodes every component version, so two builds that differ in any pin
@@ -167,6 +180,7 @@ DIST := $(REPO_ROOT)/.slurm/run-build.sh
         cluster-images cluster-ansible cluster-prep cluster-gpu \
         cluster-nvme cluster-stack \
         patch-check patch-list readme readme-check \
+        check pins-check print-pin \
         print-tag print-config clean clean-images
 
 .DEFAULT_GOAL := help
@@ -491,6 +505,20 @@ readme:
 
 readme-check:
 	@$(_README_ENV) "$(REPO_ROOT)/docker/scripts/readme-pins.sh" --check
+
+# Print one pin's resolved value. For pins-check, which has to see what the
+# Makefile actually derived rather than what the bake file says.
+print-pin:
+	@echo "$($(PIN))"
+
+# Fail if the Makefile or the Dockerfile disagrees with docker-bake.hcl about
+# a pin. See the script for why all three can hold a value and only one is the
+# source of truth.
+pins-check:
+	@"$(REPO_ROOT)/docker/scripts/pins-check.sh"
+
+# Everything that can be checked without building or a cluster. What CI runs.
+check: pins-check readme-check patch-check
 
 print-config:
 	@echo "VERSION        = $(VERSION)"
