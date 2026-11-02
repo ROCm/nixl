@@ -87,3 +87,32 @@ target "wheels" {
   target   = "wheels"
   output   = ["type=local,dest=dist"]
 }
+
+// ---- rocm-ernic -------------------------------------------------------------
+// Not part of `default`: this builds a device server for the test cluster, not
+// a NIXL image, and `docker buildx bake` should not drag it in. See
+// docker/rocm-ernic/Dockerfile for why it exists.
+//
+// ERNIC_BASE_IMAGE must track ERNIC_IMAGE in cluster/env/nixl-mori: the whole
+// point is to inherit that image's libvfio-user, so the server still pairs
+// with the QEMU the stack runs.
+variable "ERNIC_BASE_IMAGE" {
+  default = "docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-ernic:20261021.g742e8e2-ernic.31d3114-vfu.8039244"
+}
+
+// A SHA, not a branch. Contains daa7d94 (ROCm/rocm-ernic#315), which is what
+// makes guest-to-guest rdma_cm work and therefore what makes NIXL's LIBFABRIC
+// backend work at all on this cluster.
+variable "ERNIC_REF" { default = "051ff6d540e095021553fe59913e0c4039ee0972" }
+
+variable "ERNIC_IMAGE_NAME" { default = "nixl-mori-ernic" }
+
+target "ernic" {
+  context    = "docker/rocm-ernic"
+  dockerfile = "Dockerfile"
+  tags       = ["${ERNIC_IMAGE_NAME}:${substr(ERNIC_REF, 0, 7)}"]
+  args = {
+    ERNIC_BASE_IMAGE = ERNIC_BASE_IMAGE
+    ERNIC_REF        = ERNIC_REF
+  }
+}

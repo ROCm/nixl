@@ -177,7 +177,7 @@ DIST := $(REPO_ROOT)/.slurm/run-build.sh
         fio-sweep dist-build dist-load \
         dist-build-here dist-bench dist-bench-2node \
         cluster-tool cluster-gen cluster-up cluster-down cluster-status \
-        cluster-images cluster-ansible cluster-prep cluster-gpu \
+        cluster-images cluster-boot cluster-ansible cluster-prep cluster-gpu ernic-image \
         cluster-nvme cluster-stack \
         patch-check patch-list readme readme-check \
         check pins-check print-pin \
@@ -559,6 +559,12 @@ CLUSTER_ENV  := --env-file $(QEMU_MINIMAL)/qemu/env/scale-out \
 cluster-images:
 	@"$(REPO_ROOT)/cluster/scripts/cluster.sh" images
 
+# Build the rocm-ernic image whose RDMA CM works. Needed for LIBFABRIC: the
+# published ernic this cluster pins predates ROCm/rocm-ernic#315. See
+# docker/rocm-ernic/Dockerfile.
+ernic-image:
+	docker buildx bake ernic
+
 cluster-tool:
 	@test -x "$(QEMU_TOOL)" || { \
 	    echo "Installing qemu-tool from $(QEMU_MINIMAL) into /tmp/qt"; \
@@ -571,9 +577,17 @@ cluster-gen: cluster-tool
 	@mkdir -p "$(CLUSTER_DIR)"
 	"$(QEMU_TOOL)" gen-compose $(CLUSTER_ENV) --output-dir "$(CLUSTER_DIR)"
 
+# `-` on the compose step: it creates every container and then refuses to
+# start anything gated on the mesh manager's healthcheck, which cannot pass
+# against our ernic image. cluster-boot starts them in dependency order
+# instead. See cmd_boot in cluster/scripts/cluster.sh.
 cluster-up: cluster-gen
-	"$(QEMU_TOOL)" compose --stack-dir "$(CLUSTER_DIR)" $(CLUSTER_ENV) up -d
-	@echo "guests will take a few minutes to boot; 'make cluster-status' to watch"
+	-"$(QEMU_TOOL)" compose --stack-dir "$(CLUSTER_DIR)" $(CLUSTER_ENV) up -d
+	@$(MAKE) --no-print-directory cluster-boot
+
+# Start an already-created stack in dependency order.
+cluster-boot:
+	@"$(REPO_ROOT)/cluster/scripts/cluster.sh" boot
 
 cluster-down: cluster-tool
 	-"$(QEMU_TOOL)" compose --stack-dir "$(CLUSTER_DIR)" $(CLUSTER_ENV) down -v

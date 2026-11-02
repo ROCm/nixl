@@ -26,12 +26,31 @@ profile. Nothing here duplicates that tooling.
 Every pin needed is in `env/nixl-mori`, so this is the whole sequence:
 
 ```
+make ernic-image       # build the rocm-ernic whose RDMA CM works
 make cluster-images    # fetch VM_BACKING_IMAGE -> backing qcow2, overlays, fleet key
 make cluster-up        # render the compose stack and boot the guests
-make cluster-ansible   # memlock, fabric address, ionic provider, GPU
+make cluster-ansible   # memlock, fabric addresses, ionic provider, GPU
 docker buildx bake slim
 make cluster-stack     # install /opt and its environment on every guest
 ```
+
+`ernic-image` is first because `ERNIC_IMAGE` points at it. The published
+ernic at this build stamp predates ROCm/rocm-ernic#315, so guest-to-guest
+`rdma_cm` does not work on it and **LIBFABRIC hangs rather than transfers**.
+Every published build that does carry the fix is at a libvfio-user revision
+the forked QEMU is not, and the vfio-user wire protocol is not compatible
+across revisions -- so no published pair gives both a working CM and a working
+VRAM path. `docker/rocm-ernic/Dockerfile` resolves that by building a newer
+server against the published image's own libvfio-user.
+
+One consequence to know about: that server binds its mesh-manager port on
+tcp6 only -- a dual-stack socket, which Linux reports in `/proc/net/tcp6` and
+not `/proc/net/tcp`. `gen-compose`'s manager healthcheck greps the latter, so
+it never passes and `compose up` refuses to start anything gated on it. The
+mesh itself is fine; v4 clients connect through the dual-stack socket. It
+cannot be fixed from the image, so `cluster-up` ignores the compose failure
+and `cluster-boot` starts the containers in dependency order instead. The
+real fix belongs in `gen-compose`, which should check both files.
 
 `cluster-images` is the step that used to be missing. The image tags
 described the cluster exactly and still could not be turned back into one,

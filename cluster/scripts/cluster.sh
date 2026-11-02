@@ -242,6 +242,45 @@ cmd_images() {
 		"${ARTIFACTS_DIR}/vm-info.json" 2>/dev/null | sed 's/^/  /' || true
 }
 
+# Start the stack in dependency order, ignoring compose's healthcheck gate.
+#
+# Needed because ERNIC_IMAGE is our own build (see docker/rocm-ernic/
+# Dockerfile) and that server binds its mesh-manager port on tcp6 only -- a
+# dual-stack socket, which Linux reports in /proc/net/tcp6 and not
+# /proc/net/tcp. gen-compose's manager healthcheck greps /proc/net/tcp for a
+# v4 LISTEN, so it never passes and `compose up` refuses to start anything
+# that depends on it. The mesh is fine; v4 clients connect through the
+# dual-stack socket. Only the check is wrong, and it is generated, so it
+# cannot be fixed from our side.
+#
+# compose still CREATES every container before it gives up, so this only has
+# to start them. The order is the one the traps in this file describe:
+#
+#   ernic     serves the vfio-user socket; waits for tap0 before it execs
+#   tapsetup  joins ernic's netns, creates tap0, exits. Restarting ernic
+#             gives it a fresh namespace with no tap0, so this follows it
+#             every time, not just the first
+#   rocjitsu  stops serving when its client disconnects and cannot rebind a
+#             stale socket, so it starts after a clean socket directory
+#   qemu      last, once every vfio-user socket it opens exists
+cmd_boot() {
+	local names
+	for kind in ernic tapsetup rocjitsu qemu; do
+		names="$(on_host "docker ps -a --filter name=nixl-mori-${kind}- --format '{{.Names}}' | sort")"
+		[[ -n "${names}" ]] || continue
+		printf '%-9s' "${kind}:"
+		for c in ${names}; do
+			on_host "docker start ${c}" >/dev/null 2>&1 && printf ' %s' "${c##*-${kind}-}" || printf ' %s!' "${c##*-${kind}-}"
+		done
+		echo
+		# ernic has to be serving before tapsetup joins its namespace, and
+		# every socket has to exist before qemu opens them.
+		case "${kind}" in ernic) sleep 4 ;; tapsetup|rocjitsu) sleep 8 ;; esac
+	done
+	echo
+	echo "guests will take a few minutes to boot; 'make cluster-status' to watch"
+}
+
 cmd_stack() {
 	command -v docker >/dev/null || { echo "docker is needed to export the slim image" >&2; exit 1; }
 	docker image inspect "${SLIM_TAG}" >/dev/null 2>&1 || {
@@ -344,7 +383,8 @@ EOF
 case "${1-}" in
 	status) cmd_status ;;
 	images) cmd_images ;;
+	boot)   cmd_boot ;;
 	nvme)   cmd_nvme ;;
 	stack)  cmd_stack ;;
-	*)      echo "usage: $0 {status|images|nvme|stack}  (prep/gpu are now ansible/guest-setup.yml)" >&2; exit 2 ;;
+	*)      echo "usage: $0 {status|images|boot|nvme|stack}  (prep/gpu are now ansible/guest-setup.yml)" >&2; exit 2 ;;
 esac

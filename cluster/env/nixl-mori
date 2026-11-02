@@ -92,7 +92,19 @@ VM_NAME_PREFIX=nixl-mori
 # 20261021.g742e8e2 build stamp and the vfu.8039244 revision with ERNIC_IMAGE,
 # so the coherence check still passes.
 QEMU_IMAGE=docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20261021.g742e8e2-qemu.aa4344e-vfu.8039244
-ERNIC_IMAGE=docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-ernic:20261021.g742e8e2-ernic.31d3114-vfu.8039244
+# Our own build, not a published one. The published ernic at this build stamp
+# predates ROCm/rocm-ernic#315, so guest-to-guest rdma_cm does not work on it
+# and NIXL's LIBFABRIC backend hangs rather than transfers. Every published
+# build that DOES carry the fix is at a libvfio-user revision the forked QEMU
+# is not, and the vfio-user wire protocol is not compatible across revisions.
+#
+# docker/rocm-ernic/Dockerfile resolves that by building a newer server
+# against this image's own libvfio-user. Build it with `make ernic-image`.
+#
+# It has no build stamp, so gen-compose's coherence check warns and excludes
+# it rather than refusing -- which is the behaviour that check documents for a
+# locally built image carrying a fix under test.
+ERNIC_IMAGE=nixl-mori-ernic:051ff6d
 ROCJITSU_IMAGE=docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20261021.g742e8e2-rocjitsu.84fb06b
 
 # So the three vfio-user servers stay on one stamp and only the guest moves.
