@@ -98,7 +98,7 @@ nodelist, backends, segment type).
 | Component | Pinned ref | Source | Local patches |
 |---|---|---|---|
 | ROCm base | `7.14.0` | `rocm/dev-ubuntu-24.04:7.14.0-full` | — |
-| NIXL | [`v1.5.2`](https://github.com/ai-dynamo/nixl/tree/v1.5.2) | [`ai-dynamo/nixl`](https://github.com/ai-dynamo/nixl) | 8 patches |
+| NIXL | [`v1.5.2`](https://github.com/ai-dynamo/nixl/tree/v1.5.2) | [`ai-dynamo/nixl`](https://github.com/ai-dynamo/nixl) | 9 patches |
 | MORI | [`v1.2.4`](https://github.com/ROCm/mori/tree/v1.2.4) | [`ROCm/mori`](https://github.com/ROCm/mori) | pristine |
 | UCX | [`v1.22.0`](https://github.com/openucx/ucx/tree/v1.22.0) | [`openucx/ucx`](https://github.com/openucx/ucx) | 3 patches |
 | libfabric | [`v2.7.0`](https://github.com/ofiwg/libfabric/tree/v2.7.0) | [`ofiwg/libfabric`](https://github.com/ofiwg/libfabric) | 1 patch |

@@ -1,0 +1,1538 @@
+# Add an NVMe Key Value backend to NIXL: the vendor-neutral half of DOCA MEMOS.
+#
+# NIXL's DOCA_MEMOS plugin (ai-dynamo/nixl#1717, still open) is a KV-cache
+# backend whose store the host sees as an NVMe KV namespace. It reaches that
+# namespace through NVIDIA's doca-kv library and needs DOCA 4.4 and a
+# BlueField-3, so on a ROCm image it cannot be built, let alone run.
+#
+# But its own README gives the game away: `device_name` is `/dev/nvme0n1` -- a
+# KERNEL device. The NVM Express Key Value Command Set is ratified, Linux
+# attaches a KV namespace, and the commands are the same commands whoever
+# issues them. So this plugin keeps DOCA_MEMOS's NIXL-facing semantics exactly
+# and replaces the vendor library with io_uring NVMe passthrough.
+#
+# WHAT LINUX ACTUALLY DOES WITH A KV NAMESPACE
+#
+# This was the one assumption worth checking before writing anything, because
+# everything depends on it. In nvme_update_ns_info() an unrecognised Command
+# Set Identifier takes the default arm:
+#
+#   dev_info(... "block device for nsid %u not supported (csi %u)\n" ...);
+#   ret = nvme_update_ns_info_generic(ns, info);     /* returns -ENODEV */
+#   ...
+#   /* If probing fails due an unsupported feature, hide the block device,
+#    * but still allow other access. */
+#   if (ret == -ENODEV) { ns->disk->flags |= GENHD_FL_HIDDEN; ... ret = 0; }
+#
+# The namespace is attached, only the BLOCK device is hidden, and /dev/ngXnY
+# is there and takes passthrough. Confirmed on the cluster against SPDK's KV
+# target: `nvme nvme2: block device for nsid 1 not supported (csi 1)`, and
+# /dev/ng2n1 appears. No DOCA anywhere.
+#
+# THE NIXL MAPPING, WHICH IS DOCA_MEMOS'S
+#
+# One descriptor pair is one value: the local DRAM_SEG buffer is the value and
+# the remote OBJ_SEG descriptor names the key. NIXL_WRITE is Store, NIXL_READ
+# is Retrieve, queryMem() is one Exist per descriptor. The key is the devId
+# bytes when metaInfo is empty, otherwise metaInfo as hex of up to 16 bytes,
+# or any string hashed to 128 bits with convert_key_to_128bit. A Retrieve
+# whose stored length differs from the buffer fails. All of that is
+# DOCA_MEMOS's contract, so an application written against one can move to the
+# other.
+#
+# One difference, stated because it is the kind that bites silently:
+# DOCA_MEMOS hashes with unkeyed Blake2b and this uses FNV-1a over two halves,
+# to avoid pulling libb2 in for a single call. A local KV namespace is not a
+# security boundary and a collision costs an overwrite rather than a
+# vulnerability -- but two clients sharing one namespace MUST agree, so
+# interoperating with a DOCA_MEMOS client means making this Blake2b. That is
+# the one thing the two could disagree on and still both appear to work.
+#
+# THE OPCODES OVERLAP THE BLOCK COMMAND SET, AND THAT IS THE DANGER
+#
+# KV Store is 01h and Retrieve is 02h -- the same values as Write and Read in
+# the NVM command set. Pointed at an LBA namespace by a typo in `device_name`,
+# a Store does not fail: it executes as a block write and destroys the start of
+# the device. So openDevice() reads the Command Set Identifier out of the
+# namespace's Identify data (CNS 03h, descriptor NIDT 04h) and refuses anything
+# that is not KV, before a command can be built. That check is the single most
+# important line in the plugin.
+#
+# WHY io_uring AND NOT ioctl
+#
+# NVME_IOCTL_IO_CMD is synchronous: every value would block a thread for a
+# fabric round trip, and NIXL's prepare/post/check interface exists precisely
+# so that it need not. IORING_OP_URING_CMD carrying NVME_URING_CMD_IO is the
+# same command submitted asynchronously, so postXfer() returns NIXL_IN_PROG
+# with everything in flight. The ring needs SQE128 and CQE32, and neither is
+# tuning: a passthrough command does not fit a 64-byte SQE, and the NVMe
+# completion result -- which is how a Retrieve reports the stored value length
+# -- does not fit a 16-byte CQE.
+#
+# VRAM_SEG IS DELIBERATELY ABSENT. NVMe passthrough hands the kernel a user
+# virtual address to pin, and a device pointer is not that; it would need
+# p2pdma, which neither the emulated device here nor a stock KV namespace
+# offers. DOCA_MEMOS makes the same choice, and additionally requires
+# hugepages for the same underlying reason.
+#
+# NIXLBENCH
+#
+# --backend=NVME_KV with --nvme_kv_device=/dev/ngXnY. A READ run has to seed
+# its value first, and nixlbench seeds through an external CLI rather than
+# through NIXL -- `aws` for S3, `nvme` here. There is no nvme-cli subcommand
+# for the KV command set, so the seeding builds the raw passthrough itself,
+# with the key split across CDW2/3 and CDW14/15 exactly as the plugin does it.
+# For this backend the object name IS the key, written as 32 hex characters,
+# so no hash has to agree between the benchmark and the plugin -- and
+# --nvme_kv_convert_key refuses to seed rather than seeding the wrong key.
+diff --git a/benchmark/nixlbench/src/utils/utils.cpp b/benchmark/nixlbench/src/utils/utils.cpp
+index 0b02fb7..08f60a7 100644
+--- a/benchmark/nixlbench/src/utils/utils.cpp
++++ b/benchmark/nixlbench/src/utils/utils.cpp
+@@ -58,7 +58,7 @@ NB_ARG_STRING(worker_type, XFERBENCH_WORKER_NIXL, "Type of worker [nixl, nvshmem
+ NB_ARG_STRING(backend,
+               XFERBENCH_BACKEND_UCX,
+               "Name of NIXL backend [UCX, GDS, GDS_MT, POSIX, GPUNETIO, Mooncake, HF3FS, OBJ, "
+-              "GUSLI, AZURE_BLOB, MORI_IO, AIS, AIS_MT] (only used with nixl worker)");
++              "GUSLI, AZURE_BLOB, MORI_IO, NVME_KV, AIS, AIS_MT] (only used with nixl worker)");
+ NB_ARG_STRING(initiator_seg_type,
+               XFERBENCH_SEG_TYPE_DRAM,
+               "Type of memory segment for initiator [DRAM, VRAM]. Note: Storage backends always "
+@@ -222,6 +222,14 @@ NB_ARG_STRING(obj_hipobj_nic,
+               "",
+               "RDMA device hipObject should open, by ibv name (e.g. rocep3s0). Empty lets it "
+               "choose the NIC closest to the GPU. Only used with obj_accelerated_type=hipobj");
++NB_ARG_STRING(nvme_kv_device,
++              "",
++              "Path to the NVMe Key Value namespace character device, e.g. /dev/ng2n1. "
++              "Required for --backend=NVME_KV");
++NB_ARG_BOOL(nvme_kv_convert_key,
++            false,
++            "Hash the object name to a 128-bit key instead of parsing it as hex "
++            "(NVME_KV backend only)");
+ NB_ARG_INT32(obj_hipobj_gpu,
+              -1,
+              "HIP device index hipObject should pick its NIC closest to, or -1 for the current "
+@@ -346,6 +354,8 @@ size_t xferBenchConfig::obj_crt_min_limit = 0;
+ bool xferBenchConfig::obj_accelerated_enable = false;
+ std::string xferBenchConfig::obj_accelerated_type = "";
+ std::string xferBenchConfig::obj_hipobj_nic = "";
++std::string xferBenchConfig::nvme_kv_device = "";
++bool xferBenchConfig::nvme_kv_convert_key = false;
+ int xferBenchConfig::obj_hipobj_gpu = -1;
+ std::string xferBenchConfig::azure_blob_account_url = "";
+ std::string xferBenchConfig::azure_blob_container_name = "";
+@@ -530,6 +540,11 @@ xferBenchConfig::loadParams(void) {
+         }
+ 
+         // Load OBJ-specific configurations if backend is OBJ
++        if (backend == XFERBENCH_BACKEND_NVME_KV) {
++            nvme_kv_device = NB_ARG(nvme_kv_device);
++            nvme_kv_convert_key = NB_ARG(nvme_kv_convert_key);
++        }
++
+         if (backend == XFERBENCH_BACKEND_OBJ) {
+             obj_access_key = NB_ARG(obj_access_key);
+             obj_secret_key = NB_ARG(obj_secret_key);
+@@ -1006,14 +1021,16 @@ xferBenchConfig::isStorageBackend() {
+             XFERBENCH_BACKEND_OBJ == xferBenchConfig::backend ||
+             XFERBENCH_BACKEND_GUSLI == xferBenchConfig::backend ||
+             XFERBENCH_BACKEND_AZURE_BLOB == xferBenchConfig::backend ||
+-            XFERBENCH_BACKEND_INFINIA == xferBenchConfig::backend);
++            XFERBENCH_BACKEND_INFINIA == xferBenchConfig::backend ||
++            XFERBENCH_BACKEND_NVME_KV == xferBenchConfig::backend);
+ }
+ 
+ bool
+ xferBenchConfig::isObjStorageBackend() {
+     return (XFERBENCH_BACKEND_OBJ == xferBenchConfig::backend ||
+             XFERBENCH_BACKEND_AZURE_BLOB == xferBenchConfig::backend ||
+-            XFERBENCH_BACKEND_INFINIA == xferBenchConfig::backend);
++            XFERBENCH_BACKEND_INFINIA == xferBenchConfig::backend ||
++            XFERBENCH_BACKEND_NVME_KV == xferBenchConfig::backend);
+ };
+ 
+ 
+@@ -1492,6 +1509,9 @@ xferBenchUtils::putObj(size_t buffer_size, const std::string &name) {
+         // INFINIA backends don't need external CLI put
+         return true;
+     }
++    if (xferBenchConfig::backend == XFERBENCH_BACKEND_NVME_KV) {
++        return putObjNvmeKv(buffer_size, name);
++    }
+     if (xferBenchConfig::backend == XFERBENCH_BACKEND_OBJ) {
+         return putObjS3(buffer_size, name);
+     } else if (xferBenchConfig::backend == XFERBENCH_BACKEND_AZURE_BLOB) {
+@@ -1509,6 +1529,9 @@ xferBenchUtils::getObj(const std::string &name) {
+         // INFINIA backends don't need external CLI get
+         return true;
+     }
++    if (xferBenchConfig::backend == XFERBENCH_BACKEND_NVME_KV) {
++        return getObjNvmeKv(name);
++    }
+     if (xferBenchConfig::backend == XFERBENCH_BACKEND_OBJ) {
+         return getObjS3(name);
+     } else if (xferBenchConfig::backend == XFERBENCH_BACKEND_AZURE_BLOB) {
+@@ -1525,6 +1548,9 @@ xferBenchUtils::rmObj(const std::string &name) {
+     if (xferBenchConfig::backend == XFERBENCH_BACKEND_INFINIA) {
+         return true;
+     }
++    if (xferBenchConfig::backend == XFERBENCH_BACKEND_NVME_KV) {
++        return rmObjNvmeKv(name);
++    }
+     if (xferBenchConfig::backend == XFERBENCH_BACKEND_OBJ) {
+         return rmObjS3(name);
+     } else if (xferBenchConfig::backend == XFERBENCH_BACKEND_AZURE_BLOB) {
+@@ -1536,6 +1562,118 @@ xferBenchUtils::rmObj(const std::string &name) {
+     }
+ }
+ 
++/*
++ * Seeding for the NVME_KV backend.
++ *
++ * A READ run needs its value to exist before the benchmark retrieves it, and
++ * nixlbench seeds through an external CLI rather than through NIXL -- `aws` for
++ * S3, and `nvme` here. The NVMe Key Value command set has no nvme-cli
++ * subcommand, so these build the raw passthrough: Store is opcode 01h,
++ * Retrieve 02h, Delete 10h, with the key split across CDW2/3 and CDW14/15 and
++ * its length in CDW11, exactly as the plugin does it.
++ *
++ * The object name is 32 hex characters for this backend (see nixl_worker.cpp),
++ * so it IS the 16-byte key and no hashing has to agree between here and the
++ * plugin. With --nvme_kv_convert_key the plugin hashes instead, and seeding
++ * cannot predict the result -- which is why that path refuses rather than
++ * silently seeding the wrong key.
++ */
++static bool
++nvmeKvKeyCdws(const std::string &name, std::string &cdws, uint32_t &key_len) {
++    if (xferBenchConfig::nvme_kv_convert_key) {
++        std::cerr << "Error: --nvme_kv_convert_key hashes the key inside the plugin, so this "
++                     "seeding path cannot compute it. Seed by hand, or drop the flag and use "
++                     "hex keys."
++                  << std::endl;
++        return false;
++    }
++    if (name.size() > 32 || (name.size() & 1) != 0) {
++        std::cerr << "Error: NVME_KV object name '" << name
++                  << "' is not an even-length hex string of at most 32 characters" << std::endl;
++        return false;
++    }
++    uint8_t key[16] = {};
++    key_len = static_cast<uint32_t>(name.size() / 2);
++    for (uint32_t i = 0; i < key_len; i++) {
++        unsigned int byte = 0;
++        if (std::sscanf(name.c_str() + i * 2, "%2x", &byte) != 1) {
++            std::cerr << "Error: NVME_KV object name '" << name << "' is not hex" << std::endl;
++            return false;
++        }
++        key[i] = static_cast<uint8_t>(byte);
++    }
++    uint32_t w[4] = {};
++    std::memcpy(&w[0], key, 4);
++    std::memcpy(&w[1], key + 4, 4);
++    std::memcpy(&w[2], key + 8, 4);
++    std::memcpy(&w[3], key + 12, 4);
++    cdws = " --cdw2=" + std::to_string(w[0]) + " --cdw3=" + std::to_string(w[1]) +
++        " --cdw14=" + std::to_string(w[2]) + " --cdw15=" + std::to_string(w[3]) +
++        " --cdw11=" + std::to_string(key_len);
++    return true;
++}
++
++static bool
++nvmeKvRun(const std::string &cmd) {
++    int rc = std::system(cmd.c_str());
++    return rc == 0;
++}
++
++bool
++xferBenchUtils::putObjNvmeKv(size_t buffer_size, const std::string &name) {
++    if (xferBenchConfig::nvme_kv_device.empty()) {
++        std::cerr << "Error: --nvme_kv_device is required for NVME_KV" << std::endl;
++        return false;
++    }
++    std::string cdws;
++    uint32_t key_len = 0;
++    if (!nvmeKvKeyCdws(name, cdws, key_len)) {
++        return false;
++    }
++    std::string filename = "/tmp/" + name;
++    int fd = createFile(buffer_size, filename);
++    if (fd < 0) {
++        return false;
++    }
++    close(fd);
++
++    std::string cmd = "nvme io-passthru " + xferBenchConfig::nvme_kv_device +
++        " --opcode=0x01 --namespace-id=1" + cdws + " --cdw10=" + std::to_string(buffer_size) +
++        " --data-len=" + std::to_string(buffer_size) + " --write --input-file=" + filename +
++        " >/dev/null 2>&1";
++    std::cout << "Storing NVMe KV key: " << name << " (" << buffer_size << " bytes)" << std::endl;
++    bool ok = nvmeKvRun(cmd);
++    unlink(filename.c_str());
++    if (!ok) {
++        std::cerr << "Failed to store NVMe KV key " << name << std::endl;
++    }
++    return ok;
++}
++
++bool
++xferBenchUtils::getObjNvmeKv(const std::string &name) {
++    // Nothing to fetch to the local filesystem: the benchmark reads the value
++    // through NIXL, which is the thing being measured.
++    (void)name;
++    return true;
++}
++
++bool
++xferBenchUtils::rmObjNvmeKv(const std::string &name) {
++    if (xferBenchConfig::nvme_kv_device.empty()) {
++        return false;
++    }
++    std::string cdws;
++    uint32_t key_len = 0;
++    if (!nvmeKvKeyCdws(name, cdws, key_len)) {
++        return false;
++    }
++    std::string cmd = "nvme io-passthru " + xferBenchConfig::nvme_kv_device +
++        " --opcode=0x10 --namespace-id=1" + cdws + " >/dev/null 2>&1";
++    return nvmeKvRun(cmd);
++}
++
++
+ bool
+ xferBenchUtils::putObjS3(size_t buffer_size, const std::string &name) {
+     std::string filename = "/tmp/" + name;
+diff --git a/benchmark/nixlbench/src/utils/utils.h b/benchmark/nixlbench/src/utils/utils.h
+index ca90087..1862f0d 100644
+--- a/benchmark/nixlbench/src/utils/utils.h
++++ b/benchmark/nixlbench/src/utils/utils.h
+@@ -114,6 +114,7 @@
+ #define XFERBENCH_BACKEND_AZURE_BLOB "AZURE_BLOB"
+ #define XFERBENCH_BACKEND_INFINIA "INFINIA"
+ #define XFERBENCH_BACKEND_MORI_IO "MORI_IO"
++#define XFERBENCH_BACKEND_NVME_KV "NVME_KV"
+ #define XFERBENCH_BACKEND_AIS "AIS"
+ #define XFERBENCH_BACKEND_AIS_MT "AIS_MT"
+ 
+@@ -238,6 +239,8 @@ public:
+     static bool obj_accelerated_enable;
+     static std::string obj_accelerated_type;
+     static std::string obj_hipobj_nic;
++    static std::string nvme_kv_device;
++    static bool nvme_kv_convert_key;
+     static int obj_hipobj_gpu;
+     static std::string azure_blob_account_url;
+     static std::string azure_blob_container_name;
+@@ -415,6 +418,12 @@ public:
+     static bool
+     rmObj(const std::string &name);
+     static bool
++    putObjNvmeKv(size_t buffer_size, const std::string &name);
++    static bool
++    getObjNvmeKv(const std::string &name);
++    static bool
++    rmObjNvmeKv(const std::string &name);
++    static bool
+     putObjS3(size_t buffer_size, const std::string &name);
+     static bool
+     getObjS3(const std::string &name);
+diff --git a/benchmark/nixlbench/src/worker/nixl/nixl_worker.cpp b/benchmark/nixlbench/src/worker/nixl/nixl_worker.cpp
+index e3b14b1..6910d59 100644
+--- a/benchmark/nixlbench/src/worker/nixl/nixl_worker.cpp
++++ b/benchmark/nixlbench/src/worker/nixl/nixl_worker.cpp
+@@ -326,6 +326,15 @@ xferBenchNixlWorker::xferBenchNixlWorker(const std::vector<std::string> &devices
+         } else {
+             std::cout << "OBJ backend with standard S3 enabled" << std::endl;
+         }
++    } else if (0 == xferBenchConfig::backend.compare(XFERBENCH_BACKEND_NVME_KV)) {
++        if (xferBenchConfig::nvme_kv_device.empty()) {
++            std::cerr << "Error: --nvme_kv_device is required for the NVME_KV backend"
++                      << std::endl;
++        }
++        backend_params["device_name"] = xferBenchConfig::nvme_kv_device;
++        backend_params["convert_key_to_128bit"] =
++            xferBenchConfig::nvme_kv_convert_key ? "true" : "false";
++        std::cout << "NVMe KV backend on " << xferBenchConfig::nvme_kv_device << std::endl;
+     } else if (0 == xferBenchConfig::backend.compare(XFERBENCH_BACKEND_GUSLI)) {
+         // GUSLI backend requires direct I/O - enable it automatically
+         if (!xferBenchConfig::storage_enable_direct) {
+@@ -1092,6 +1101,24 @@ xferBenchNixlWorker::allocateMemory(int num_threads) {
+                 std::string unique_name = "nixlbench_obj" + std::to_string(list_idx) + "_" +
+                     std::to_string(i) + "_" + std::to_string(timestamp);
+ 
++                // An NVMe KV key is at most 16 bytes, and the plugin reads a
++                // non-empty metaInfo as hex. The descriptive name above is
++                // neither, so for this backend the name IS the key, written as
++                // 32 hex characters: list, device and timestamp packed into
++                // the 16 bytes the specification allows. Keeping it derived
++                // from the same three values means two concurrent runs still
++                // do not collide.
++                if (xferBenchConfig::backend == XFERBENCH_BACKEND_NVME_KV) {
++                    char keybuf[33];
++                    std::snprintf(keybuf,
++                                  sizeof(keybuf),
++                                  "%08x%08x%016llx",
++                                  static_cast<unsigned>(list_idx),
++                                  static_cast<unsigned>(i),
++                                  static_cast<unsigned long long>(timestamp));
++                    unique_name = keybuf;
++                }
++
+                 if (xferBenchConfig::op_type == XFERBENCH_OP_READ) {
+                     if (!xferBenchUtils::putObj(buffer_size, unique_name)) {
+                         std::cerr << "Failed to put object: " << unique_name << std::endl;
+diff --git a/meson.build b/meson.build
+index 5254d93..53730da 100644
+--- a/meson.build
++++ b/meson.build
+@@ -29,7 +29,7 @@ if enable_plugins_opt != '' and disable_plugins_opt != ''
+     error('Cannot specify both enable_plugins and disable_plugins options')
+ endif
+ 
+-all_plugins = ['UCX', 'LIBFABRIC', 'POSIX', 'OBJ', 'GDS', 'GDS_MT', 'AIS', 'AIS_MT', 'MOONCAKE', 'HF3FS', 'GUSLI', 'GPUNETIO', 'UCCL', 'AZURE_BLOB', 'INFINIA', 'TELEMETRY_DOCA', 'MORI_IO']
++all_plugins = ['UCX', 'LIBFABRIC', 'POSIX', 'OBJ', 'GDS', 'GDS_MT', 'AIS', 'AIS_MT', 'MOONCAKE', 'HF3FS', 'GUSLI', 'GPUNETIO', 'UCCL', 'AZURE_BLOB', 'INFINIA', 'TELEMETRY_DOCA', 'MORI_IO', 'NVME_KV']
+ 
+ enabled_plugins = {}
+ 
+diff --git a/src/plugins/meson.build b/src/plugins/meson.build
+index 5ed4835..ad3f753 100644
+--- a/src/plugins/meson.build
++++ b/src/plugins/meson.build
+@@ -175,6 +175,17 @@ if enabled_plugins.get('MORI_IO')
+     endif
+ endif
+ 
++# NVMe Key Value, over io_uring passthrough. The only thing it needs beyond
++# the kernel's own UAPI headers is liburing, so it builds anywhere the POSIX
++# plugin's io_uring queue does -- no vendor SDK and no particular hardware.
++if enabled_plugins.get('NVME_KV')
++    if not has_io_uring and is_explicit_enable
++        error('NVME_KV plugin requested but liburing was not found')
++    elif has_io_uring
++        subdir('nvme_kv')
++    endif
++endif
++
+ subdir('telemetry')
+ 
+ if nixl_trace_enabled
+diff --git a/src/plugins/nvme_kv/meson.build b/src/plugins/nvme_kv/meson.build
+new file mode 100644
+index 0000000..20f56e8
+--- /dev/null
++++ b/src/plugins/nvme_kv/meson.build
+@@ -0,0 +1,42 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++
++nvme_kv_sources = [
++    'nvme_kv_backend.cpp',
++    'nvme_kv_backend.h',
++    'nvme_kv_cmd.h',
++    'nvme_kv_plugin.cpp',
++]
++
++# liburing is the whole external dependency. The NVMe side is UAPI headers --
++# linux/nvme_ioctl.h, which every kernel ships -- so there is no vendor library
++# anywhere in this plugin. That is the point of it.
++nvme_kv_plugin_deps = [nixl_infra, nixl_common_dep, io_uring_dep]
++
++if 'NVME_KV' in static_plugins
++    nvme_kv_backend_lib = static_library('NVME_KV',
++        nvme_kv_sources,
++        dependencies: nvme_kv_plugin_deps,
++        cpp_args: ['-DSTATIC_PLUGIN_NVME_KV'] + compile_flags,
++        include_directories: [nixl_inc_dirs, utils_inc_dirs],
++        install: false,
++        name_prefix: 'libplugin_')
++else
++    nvme_kv_backend_lib = shared_library('NVME_KV',
++        nvme_kv_sources,
++        dependencies: nvme_kv_plugin_deps,
++        cpp_args: ['-fPIC'],
++        include_directories: [nixl_inc_dirs, utils_inc_dirs],
++        install: true,
++        name_prefix: 'libplugin_',
++        install_dir: plugin_install_dir,
++        install_rpath: '$ORIGIN/..')
++    if get_option('buildtype') == 'debug'
++        run_command('sh', '-c',
++            'echo "NVME_KV=' + nvme_kv_backend_lib.full_path() + '" >> ' + plugin_build_dir + '/pluginlist',
++            check: true
++        )
++    endif
++endif
++
++nvme_kv_backend_interface = declare_dependency(link_with: nvme_kv_backend_lib)
+diff --git a/src/plugins/nvme_kv/nvme_kv_backend.cpp b/src/plugins/nvme_kv/nvme_kv_backend.cpp
+new file mode 100644
+index 0000000..b9b198d
+--- /dev/null
++++ b/src/plugins/nvme_kv/nvme_kv_backend.cpp
+@@ -0,0 +1,643 @@
++/*
++ * SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include "nvme_kv_backend.h"
++#include "common/backend.h"
++#include "common/nixl_log.h"
++#include <absl/strings/str_format.h>
++#include <fcntl.h>
++#include <sys/ioctl.h>
++#include <unistd.h>
++#include <algorithm>
++#include <cctype>
++#include <cerrno>
++#include <cstring>
++#include <vector>
++
++namespace {
++
++/// One value in flight: the command, and what we need to judge its completion.
++struct nvmeKvTask {
++    struct nvme_uring_cmd cmd;
++    /// What the caller asked to move. A Retrieve that returns a different
++    /// stored length has not produced the value the caller wanted.
++    uint32_t requestedLen = 0;
++    bool isRetrieve = false;
++    nixl_status_t status = NIXL_IN_PROG;
++};
++
++} // namespace
++
++class nvmeKvBackendReqH : public nixlBackendReqH {
++public:
++    std::vector<nvmeKvTask> tasks_;
++    size_t completed_ = 0;
++    /// First error wins and is what checkXfer() keeps returning.
++    nixl_status_t overall_ = NIXL_IN_PROG;
++    bool posted_ = false;
++};
++
++namespace {
++
++/**
++ * Turn an io_uring completion into a NIXL status.
++ *
++ * cqe->res carries three different things and they have to be told apart:
++ * a negative value is -errno from the submission path, zero is success, and a
++ * positive value is the NVMe status field itself. Only the low 11 bits of that
++ * are the status code; the rest is phase, CRD and the Do Not Retry bit.
++ */
++nixl_status_t
++statusFromCqe(int res, uint8_t opcode) {
++    if (res < 0) {
++        NIXL_ERROR << "NVMe KV command failed before the device saw it: " << strerror(-res);
++        return NIXL_ERR_BACKEND;
++    }
++    if (res == 0) {
++        return NIXL_SUCCESS;
++    }
++
++    const uint16_t sc = static_cast<uint16_t>(res) & 0x7ff;
++    if (sc == nvme_kv::SC_KEY_DOES_NOT_EXIST) {
++        // Not an error for Exist, which is asking the question. For a
++        // Retrieve it is a genuine miss, and NIXL_ERR_NOT_FOUND says which.
++        NIXL_DEBUG << "NVMe KV: key does not exist";
++        return NIXL_ERR_NOT_FOUND;
++    }
++    NIXL_ERROR << absl::StrFormat("NVMe KV opcode 0x%02x failed with status 0x%04x", opcode, sc);
++    return NIXL_ERR_BACKEND;
++}
++
++} // namespace
++
++bool
++nvmeKvEngine::resolveKey(uint64_t dev_id,
++                         const std::string &meta_info,
++                         bool hash_long_keys,
++                         uint8_t (&key)[nvme_kv::MAX_KEY_LEN],
++                         uint8_t &key_len) {
++    // Empty metaInfo: the devId bytes are the key. Same rule DOCA_MEMOS uses,
++    // and what makes a bare `registerMem(desc, OBJ_SEG)` with only a devId
++    // work without the caller inventing a naming scheme.
++    if (meta_info.empty()) {
++        key_len = sizeof(dev_id);
++        memcpy(key, &dev_id, key_len);
++        return true;
++    }
++
++    if (hash_long_keys) {
++        // A 128-bit digest of an arbitrary string, so an application key of
++        // any length and shape fits the specification's 16 bytes.
++        //
++        // DOCA_MEMOS uses unkeyed Blake2b here. This uses FNV-1a over two
++        // halves rather than pulling libb2 in for one call: the keyspace is a
++        // local KV namespace, not a security boundary, and a collision costs
++        // an overwrite rather than a vulnerability. If this ever has to
++        // interoperate with a DOCA_MEMOS client over the same namespace, it
++        // must become Blake2b -- that is the one thing the two could disagree
++        // on and still both appear to work.
++        auto fnv1a = [](const char *p, size_t n, uint64_t seed) {
++            uint64_t h = seed;
++            for (size_t i = 0; i < n; ++i) {
++                h ^= static_cast<uint8_t>(p[i]);
++                h *= 0x100000001b3ULL;
++            }
++            return h;
++        };
++        const uint64_t lo = fnv1a(meta_info.data(), meta_info.size(), 0xcbf29ce484222325ULL);
++        const uint64_t hi = fnv1a(meta_info.data(), meta_info.size(), lo ^ 0x9e3779b97f4a7c15ULL);
++        memcpy(key, &lo, 8);
++        memcpy(key + 8, &hi, 8);
++        key_len = nvme_kv::MAX_KEY_LEN;
++        return true;
++    }
++
++    // Otherwise metaInfo is the key in hex, at most 16 bytes of it.
++    if (meta_info.size() > nvme_kv::MAX_KEY_LEN * 2 || (meta_info.size() & 1) != 0) {
++        return false;
++    }
++    key_len = static_cast<uint8_t>(meta_info.size() / 2);
++    for (uint8_t i = 0; i < key_len; ++i) {
++        const auto hexval = [](char c) -> int {
++            if (c >= '0' && c <= '9') return c - '0';
++            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
++            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
++            return -1;
++        };
++        const int h = hexval(meta_info[i * 2]);
++        const int l = hexval(meta_info[i * 2 + 1]);
++        if (h < 0 || l < 0) {
++            return false;
++        }
++        key[i] = static_cast<uint8_t>((h << 4) | l);
++    }
++    return key_len > 0;
++}
++
++nixl_status_t
++nvmeKvEngine::openDevice(const std::string &path) {
++    deviceFd_ = open(path.c_str(), O_RDWR);
++    if (deviceFd_ < 0) {
++        NIXL_ERROR << "NVMe KV: cannot open " << path << ": " << strerror(errno);
++        return NIXL_ERR_BACKEND;
++    }
++
++    // NVME_IOCTL_ID returns the namespace id for a namespace character or
++    // block device. It is also the cheapest proof that this is an NVMe
++    // namespace at all rather than, say, a regular file.
++    const int nsid = ioctl(deviceFd_, NVME_IOCTL_ID);
++    if (nsid < 0) {
++        NIXL_ERROR << "NVMe KV: " << path << " is not an NVMe namespace: " << strerror(errno);
++        return NIXL_ERR_BACKEND;
++    }
++    nsid_ = static_cast<uint32_t>(nsid);
++
++    // THE CHECK THAT MATTERS. See the comment on openDevice() in the header:
++    // Store is opcode 01h, which an LBA namespace would execute as Write.
++    //
++    // CNS 03h is the Namespace Identification Descriptor list: a sequence of
++    // {NIDT, NIDL, reserved[2], value[NIDL]} structures. NIDT 04h is the
++    // Command Set Identifier, one byte.
++    std::vector<uint8_t> desc(4096, 0);
++    struct nvme_passthru_cmd id = {};
++    id.opcode = 0x06; // Identify
++    id.nsid = nsid_;
++    id.addr = reinterpret_cast<uint64_t>(desc.data());
++    id.data_len = static_cast<uint32_t>(desc.size());
++    id.cdw10 = 0x03;
++    if (ioctl(deviceFd_, NVME_IOCTL_ADMIN_CMD, &id) != 0) {
++        NIXL_ERROR << "NVMe KV: Identify (CNS 03h) failed on " << path << ": " << strerror(errno);
++        return NIXL_ERR_BACKEND;
++    }
++
++    uint8_t csi = 0;
++    bool csi_found = false;
++    for (size_t off = 0; off + 4 <= desc.size();) {
++        const uint8_t nidt = desc[off];
++        const uint8_t nidl = desc[off + 1];
++        if (nidt == 0 || nidl == 0) {
++            break; // End of the list.
++        }
++        if (nidt == 0x04 && nidl >= 1 && off + 4 + nidl <= desc.size()) {
++            csi = desc[off + 4];
++            csi_found = true;
++            break;
++        }
++        off += 4 + nidl;
++    }
++
++    if (!csi_found) {
++        NIXL_ERROR << "NVMe KV: " << path
++                   << " reports no Command Set Identifier, so it cannot be shown to be a KV "
++                      "namespace. Refusing: a Store sent to an LBA namespace executes as a Write.";
++        return NIXL_ERR_NOT_SUPPORTED;
++    }
++    if (csi != nvme_kv::CSI_KV) {
++        NIXL_ERROR << absl::StrFormat(
++            "NVMe KV: %s is csi %u, not Key Value (csi %u). Refusing: Store is opcode 0x01, "
++            "which this namespace would execute as a block Write.",
++            path.c_str(),
++            csi,
++            nvme_kv::CSI_KV);
++        return NIXL_ERR_NOT_SUPPORTED;
++    }
++
++    // Maximum Data Transfer Size. Identify Controller (CNS 01h) byte 77 holds
++    // it as a power of two of the minimum page size, and zero means "no
++    // limit". Without this a value larger than the controller accepts comes
++    // back from io_uring as a bare EINVAL with nothing to say which limit was
++    // hit -- the kernel rejects it before the device ever sees it, so there is
++    // no NVMe status to report either.
++    std::vector<uint8_t> ctrl(4096, 0);
++    struct nvme_passthru_cmd idc = {};
++    idc.opcode = 0x06; // Identify
++    idc.addr = reinterpret_cast<uint64_t>(ctrl.data());
++    idc.data_len = static_cast<uint32_t>(ctrl.size());
++    idc.cdw10 = 0x01; // CNS 01h, Identify Controller
++    if (ioctl(deviceFd_, NVME_IOCTL_ADMIN_CMD, &idc) == 0) {
++        const uint8_t mdts = ctrl[77];
++        if (mdts != 0 && mdts < 32) {
++            // MPSMIN is in CAP[55:52] and is almost always 0, meaning 4 KiB.
++            // Reading CAP needs the controller's sysfs or a register map that
++            // passthrough does not offer, so 4 KiB is assumed and said so in
++            // the message rather than silently.
++            maxValueLen_ = 4096u << mdts;
++            NIXL_INFO << absl::StrFormat(
++                "NVMe KV: MDTS %u caps a single value at %u bytes (assuming 4 KiB pages)",
++                mdts,
++                maxValueLen_);
++        }
++    } else {
++        NIXL_WARN << "NVMe KV: Identify Controller failed, so the transfer-size limit is "
++                     "unknown; an oversized value will fail with EINVAL";
++    }
++
++    NIXL_INFO << "NVMe KV: " << path << " nsid " << nsid_ << " is a Key Value namespace";
++    return NIXL_SUCCESS;
++}
++
++nvmeKvEngine::nvmeKvEngine(const nixlBackendInitParams *init_params)
++    : nixlBackendEngine(init_params) {
++    nixl_b_params_t *params = init_params->customParams;
++
++    devicePath_ = nixl::getBackendParamDefaulted<std::string>(params, "device_name", "");
++    if (devicePath_.empty()) {
++        NIXL_ERROR << "NVMe KV: device_name is required (e.g. /dev/ng0n1)";
++        return;
++    }
++    hashLongKeys_ = nixl::getBackendParamDefaulted<bool>(params, "convert_key_to_128bit", false);
++    queueDepth_ = nixl::getBackendParamDefaulted<uint32_t>(params, "queue_depth", 256);
++
++    if (openDevice(devicePath_) != NIXL_SUCCESS) {
++        return;
++    }
++
++    // SQE128 and CQE32 are not tuning. A passthrough command does not fit in a
++    // 64-byte SQE, and the NVMe completion result -- which is how a Retrieve
++    // reports the stored value length -- does not fit in a 16-byte CQE.
++    struct io_uring_params p = {};
++    p.flags = IORING_SETUP_SQE128 | IORING_SETUP_CQE32;
++    const int ret = io_uring_queue_init_params(queueDepth_, &ring_, &p);
++    if (ret < 0) {
++        NIXL_ERROR << "NVMe KV: io_uring_queue_init_params failed: " << strerror(-ret);
++        return;
++    }
++    ringReady_ = true;
++
++    NIXL_INFO << absl::StrFormat(
++        "NVMe KV backend ready on %s (nsid %u, queue_depth %u, convert_key_to_128bit %s)",
++        devicePath_.c_str(),
++        nsid_,
++        queueDepth_,
++        hashLongKeys_ ? "true" : "false");
++}
++
++nvmeKvEngine::~nvmeKvEngine() {
++    if (ringReady_) {
++        io_uring_queue_exit(&ring_);
++    }
++    if (deviceFd_ >= 0) {
++        close(deviceFd_);
++    }
++}
++
++nixl_status_t
++nvmeKvEngine::registerMem(const nixlBlobDesc &mem,
++                          const nixl_mem_t &nixl_mem,
++                          nixlBackendMD *&out) {
++    if (!ringReady_) {
++        NIXL_ERROR << "NVMe KV: backend did not initialise";
++        return NIXL_ERR_BACKEND;
++    }
++
++    if (nixl_mem == OBJ_SEG) {
++        // Validate now rather than at prepXfer: a key that cannot be resolved
++        // is a caller mistake, and saying so at registration points at the
++        // descriptor that is wrong.
++        uint8_t key[nvme_kv::MAX_KEY_LEN];
++        uint8_t key_len = 0;
++        if (!resolveKey(mem.devId, mem.metaInfo, hashLongKeys_, key, key_len)) {
++            NIXL_ERROR << "NVMe KV: metaInfo '" << mem.metaInfo
++                       << "' is not a hex key of 1..16 bytes; set convert_key_to_128bit=true to "
++                          "hash arbitrary strings instead";
++            return NIXL_ERR_INVALID_PARAM;
++        }
++        devIdToMetaInfo_[mem.devId] = mem.metaInfo;
++        out = new nixlBackendMD(true);
++        return NIXL_SUCCESS;
++    }
++
++    if (nixl_mem == DRAM_SEG) {
++        // Nothing to pin. NVMe passthrough takes a user virtual address and
++        // the kernel pins it for the duration of each command, so there is no
++        // registration to hold between transfers.
++        out = new nixlBackendMD(true);
++        return NIXL_SUCCESS;
++    }
++
++    return NIXL_ERR_NOT_SUPPORTED;
++}
++
++nixl_status_t
++nvmeKvEngine::deregisterMem(nixlBackendMD *meta) {
++    delete meta;
++    return NIXL_SUCCESS;
++}
++
++nixl_status_t
++nvmeKvEngine::submitSync(struct nvme_uring_cmd &cmd, uint32_t *result_out) const {
++    const std::lock_guard<std::mutex> lock(ringLock_);
++
++    struct io_uring_sqe *sqe = io_uring_get_sqe(&ring_);
++    if (sqe == nullptr) {
++        NIXL_ERROR << "NVMe KV: submission queue full";
++        return NIXL_ERR_BACKEND;
++    }
++    const uint64_t token = nextToken_++;
++    io_uring_prep_rw(IORING_OP_URING_CMD, sqe, deviceFd_, nullptr, 0, 0);
++    sqe->cmd_op = NVME_URING_CMD_IO;
++    memcpy(sqe->cmd, &cmd, sizeof(cmd));
++    io_uring_sqe_set_data64(sqe, token);
++
++    if (io_uring_submit(&ring_) < 0) {
++        NIXL_ERROR << "NVMe KV: io_uring_submit failed";
++        return NIXL_ERR_BACKEND;
++    }
++
++    // Other requests' completions may arrive first; reapCompletions() files
++    // them with their owners rather than discarding them.
++    int res = 0;
++    uint32_t result = 0;
++    if (!reapCompletions(token, &res, &result)) {
++        NIXL_ERROR << "NVMe KV: no completion for the submitted command";
++        return NIXL_ERR_BACKEND;
++    }
++    if (result_out != nullptr) {
++        *result_out = result;
++    }
++    return statusFromCqe(res, cmd.opcode);
++}
++
++
++bool
++nvmeKvEngine::reapCompletions(uint64_t wanted, int *wanted_res, uint32_t *wanted_result) const {
++    bool saw_wanted = false;
++    struct io_uring_cqe *cqe = nullptr;
++
++    while (true) {
++        int ret;
++        if (wanted != 0 && !saw_wanted) {
++            // queryMem() has nothing else to do until its answer arrives.
++            ret = io_uring_wait_cqe(&ring_, &cqe);
++        } else {
++            ret = io_uring_peek_cqe(&ring_, &cqe);
++        }
++        if (ret != 0 || cqe == nullptr) {
++            break;
++        }
++
++        const uint64_t token = io_uring_cqe_get_data64(cqe);
++        const int res = cqe->res;
++        const uint32_t result = static_cast<uint32_t>(cqe->big_cqe[0]);
++        io_uring_cqe_seen(&ring_, cqe);
++        cqe = nullptr;
++
++        if (token == wanted) {
++            if (wanted_res != nullptr) *wanted_res = res;
++            if (wanted_result != nullptr) *wanted_result = result;
++            saw_wanted = true;
++            continue;
++        }
++
++        // A completion for a request that has already been released. Its
++        // handle is gone, so there is nothing to record -- but the token had
++        // to be kept until now so this could be told from a stray one.
++        if (orphaned_.erase(token) != 0) {
++            continue;
++        }
++
++        const auto it = inflight_.find(token);
++        if (it == inflight_.end()) {
++            NIXL_ERROR << "NVMe KV: completion with unknown token " << token;
++            continue;
++        }
++        nvmeKvBackendReqH *req = it->second.first;
++        const size_t idx = it->second.second;
++        inflight_.erase(it);
++
++        auto &task = req->tasks_[idx];
++        if (task.status != NIXL_IN_PROG) {
++            continue;
++        }
++
++        nixl_status_t status = statusFromCqe(res, task.cmd.opcode);
++
++        // A Retrieve that succeeded still has to have produced the value the
++        // caller asked for. The device reports the stored length in the
++        // completion result, so a value shorter or longer than the buffer is
++        // caught here rather than handed back as a partly-stale buffer.
++        // DOCA_MEMOS makes the same check for the same reason.
++        if (status == NIXL_SUCCESS && task.isRetrieve && result != task.requestedLen) {
++            NIXL_ERROR << absl::StrFormat(
++                "NVMe KV: Retrieve returned a %u-byte value into a %u-byte buffer",
++                result,
++                task.requestedLen);
++            status = NIXL_ERR_BACKEND;
++        }
++
++        task.status = status;
++        req->completed_++;
++        if (status != NIXL_SUCCESS && req->overall_ == NIXL_IN_PROG) {
++            req->overall_ = status;
++        }
++    }
++
++    return saw_wanted;
++}
++
++nixl_status_t
++nvmeKvEngine::queryMem(const nixl_reg_dlist_t &descs, std::vector<nixl_query_resp_t> &resp) const {
++    resp.assign(descs.descCount(), std::nullopt);
++    if (!ringReady_) {
++        return NIXL_ERR_BACKEND;
++    }
++
++    for (int i = 0; i < descs.descCount(); ++i) {
++        uint8_t key[nvme_kv::MAX_KEY_LEN];
++        uint8_t key_len = 0;
++        if (!resolveKey(descs[i].devId, descs[i].metaInfo, hashLongKeys_, key, key_len)) {
++            continue; // Leave nullopt: the descriptor names no usable key.
++        }
++
++        struct nvme_uring_cmd cmd =
++            nvme_kv::makeKeyOnlyCmd(nvme_kv::OPC_EXIST, nsid_, key, key_len);
++        const nixl_status_t status = submitSync(cmd, nullptr);
++        if (status == NIXL_SUCCESS) {
++            // Present. An empty param map is a value, so has_value() is the
++            // "exists" answer and the map is room for attributes later.
++            resp[i] = nixl_b_params_t{};
++        }
++        // NIXL_ERR_NOT_FOUND leaves nullopt, which is the "absent" answer.
++        // A real error does too -- queryMem has no way to distinguish them in
++        // its return type, so the log above is where that shows up.
++    }
++    return NIXL_SUCCESS;
++}
++
++nixl_status_t
++nvmeKvEngine::prepXfer(const nixl_xfer_op_t &operation,
++                       const nixl_meta_dlist_t &local,
++                       const nixl_meta_dlist_t &remote,
++                       const std::string &remote_agent,
++                       nixlBackendReqH *&handle,
++                       const nixl_opt_b_args_t *opt_args) const {
++    if (!ringReady_) {
++        return NIXL_ERR_BACKEND;
++    }
++    if (operation != NIXL_WRITE && operation != NIXL_READ) {
++        NIXL_ERROR << "NVMe KV: invalid operation " << operation;
++        return NIXL_ERR_INVALID_PARAM;
++    }
++    if (local.getType() != DRAM_SEG) {
++        NIXL_ERROR << "NVMe KV: the value must be DRAM_SEG, got " << local.getType();
++        return NIXL_ERR_INVALID_PARAM;
++    }
++    if (remote.getType() != OBJ_SEG) {
++        NIXL_ERROR << "NVMe KV: the key must be OBJ_SEG, got " << remote.getType();
++        return NIXL_ERR_INVALID_PARAM;
++    }
++    if (local.descCount() != remote.descCount()) {
++        NIXL_ERROR << absl::StrFormat("NVMe KV: %d values against %d keys",
++                                      local.descCount(),
++                                      remote.descCount());
++        return NIXL_ERR_INVALID_PARAM;
++    }
++
++    auto req = std::make_unique<nvmeKvBackendReqH>();
++    req->tasks_.reserve(local.descCount());
++
++    for (int i = 0; i < local.descCount(); ++i) {
++        // The key comes from what registerMem() recorded, not from the
++        // transfer descriptor: nixlMetaDesc carries no metaInfo, only
++        // nixlBlobDesc does. So an OBJ_SEG must be registered before it can
++        // be transferred to, and its devId is the handle for it -- the same
++        // devIdToObjKey_ arrangement the OBJ plugin's engines use.
++        std::string meta;
++        const auto it = devIdToMetaInfo_.find(remote[i].devId);
++        if (it != devIdToMetaInfo_.end()) {
++            meta = it->second;
++        } else {
++            NIXL_ERROR << "NVMe KV: OBJ_SEG devId " << remote[i].devId
++                       << " is not registered with this backend";
++            return NIXL_ERR_INVALID_PARAM;
++        }
++
++        uint8_t key[nvme_kv::MAX_KEY_LEN];
++        uint8_t key_len = 0;
++        if (!resolveKey(remote[i].devId, meta, hashLongKeys_, key, key_len)) {
++            NIXL_ERROR << "NVMe KV: descriptor " << i << " names no usable key";
++            return NIXL_ERR_INVALID_PARAM;
++        }
++
++        nvmeKvTask task;
++        task.isRetrieve = (operation == NIXL_READ);
++        task.requestedLen = static_cast<uint32_t>(local[i].len);
++        if (maxValueLen_ != 0 && task.requestedLen > maxValueLen_) {
++            NIXL_ERROR << absl::StrFormat(
++                "NVMe KV: descriptor %d is %u bytes, over the controller's %u-byte maximum "
++                "transfer (MDTS). Split the value, or use a controller with a larger MDTS.",
++                i,
++                task.requestedLen,
++                maxValueLen_);
++            return NIXL_ERR_INVALID_PARAM;
++        }
++        task.cmd = nvme_kv::makeDataCmd(
++            task.isRetrieve ? nvme_kv::OPC_RETRIEVE : nvme_kv::OPC_STORE,
++            nsid_,
++            key,
++            key_len,
++            reinterpret_cast<void *>(local[i].addr),
++            task.requestedLen);
++        req->tasks_.push_back(task);
++    }
++
++    handle = req.release();
++    return NIXL_SUCCESS;
++}
++
++nixl_status_t
++nvmeKvEngine::postXfer(const nixl_xfer_op_t &operation,
++                       const nixl_meta_dlist_t &local,
++                       const nixl_meta_dlist_t &remote,
++                       const std::string &remote_agent,
++                       nixlBackendReqH *&handle,
++                       const nixl_opt_b_args_t *opt_args) const {
++    if (handle == nullptr) {
++        return NIXL_ERR_INVALID_PARAM;
++    }
++    auto *req = static_cast<nvmeKvBackendReqH *>(handle);
++
++    const std::lock_guard<std::mutex> lock(ringLock_);
++
++    for (size_t i = 0; i < req->tasks_.size(); ++i) {
++        struct io_uring_sqe *sqe = io_uring_get_sqe(&ring_);
++        if (sqe == nullptr) {
++            // The ring is full. Everything already queued is submitted below
++            // and the rest would need a second pass; rather than half-post a
++            // transfer silently, say so and fail it.
++            NIXL_ERROR << "NVMe KV: submission queue exhausted at descriptor " << i << " of "
++                       << req->tasks_.size() << "; raise queue_depth (currently " << queueDepth_
++                       << ")";
++            req->overall_ = NIXL_ERR_BACKEND;
++            return NIXL_ERR_BACKEND;
++        }
++        io_uring_prep_rw(IORING_OP_URING_CMD, sqe, deviceFd_, nullptr, 0, 0);
++        sqe->cmd_op = NVME_URING_CMD_IO;
++        memcpy(sqe->cmd, &req->tasks_[i].cmd, sizeof(req->tasks_[i].cmd));
++        // A token unique for the engine's lifetime, not the task's index:
++        // see reapCompletions() for why the index is not enough.
++        const uint64_t token = nextToken_++;
++        inflight_[token] = {req, i};
++        io_uring_sqe_set_data64(sqe, token);
++    }
++
++    const int submitted = io_uring_submit(&ring_);
++    if (submitted < 0) {
++        NIXL_ERROR << "NVMe KV: io_uring_submit failed: " << strerror(-submitted);
++        req->overall_ = NIXL_ERR_BACKEND;
++        return NIXL_ERR_BACKEND;
++    }
++
++    req->posted_ = true;
++    return NIXL_IN_PROG;
++}
++
++nixl_status_t
++nvmeKvEngine::checkXfer(nixlBackendReqH *handle) const {
++    if (handle == nullptr) {
++        return NIXL_ERR_INVALID_PARAM;
++    }
++    auto *req = static_cast<nvmeKvBackendReqH *>(handle);
++    if (!req->posted_) {
++        return req->overall_;
++    }
++
++    {
++        const std::lock_guard<std::mutex> lock(ringLock_);
++        // Drain without blocking and let every completion find its owner;
++        // NIXL polls, so returning NIXL_IN_PROG is the normal answer.
++        reapCompletions(0, nullptr, nullptr);
++    }
++
++    if (req->completed_ < req->tasks_.size()) {
++        return NIXL_IN_PROG;
++    }
++    return req->overall_ == NIXL_IN_PROG ? NIXL_SUCCESS : req->overall_;
++}
++
++nixl_status_t
++nvmeKvEngine::releaseReqH(nixlBackendReqH *handle) const {
++    if (handle == nullptr) {
++        return NIXL_ERR_INVALID_PARAM;
++    }
++    auto *req = static_cast<nvmeKvBackendReqH *>(handle);
++    {
++        const std::lock_guard<std::mutex> lock(ringLock_);
++        // Releasing a handle whose commands are still in flight is legal --
++        // NIXL may abandon a transfer -- but their completions will still
++        // arrive, and following a stale pointer then would be a use-after-free.
++        // Move the tokens aside so reapCompletions() drops them instead.
++        for (auto it = inflight_.begin(); it != inflight_.end();) {
++            if (it->second.first == req) {
++                orphaned_.insert(it->first);
++                it = inflight_.erase(it);
++            } else {
++                ++it;
++            }
++        }
++    }
++    delete req;
++    return NIXL_SUCCESS;
++}
+diff --git a/src/plugins/nvme_kv/nvme_kv_backend.h b/src/plugins/nvme_kv/nvme_kv_backend.h
+new file mode 100644
+index 0000000..6f8b90b
+--- /dev/null
++++ b/src/plugins/nvme_kv/nvme_kv_backend.h
+@@ -0,0 +1,244 @@
++/*
++ * SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#ifndef NIXL_SRC_PLUGINS_NVME_KV_NVME_KV_BACKEND_H
++#define NIXL_SRC_PLUGINS_NVME_KV_NVME_KV_BACKEND_H
++
++#include <liburing.h>
++#include <cstdint>
++#include <memory>
++#include <mutex>
++#include <string>
++#include <unordered_map>
++#include <unordered_set>
++#include <vector>
++#include "backend/backend_engine.h"
++#include "nvme_kv_cmd.h"
++
++/**
++ * A NIXL backend over the NVMe Key Value command set.
++ *
++ * WHAT IT IS, AND WHAT IT IS MODELLED ON
++ *
++ * NIXL's DOCA_MEMOS plugin (ai-dynamo/nixl#1717) is a KV-cache backend whose
++ * store the host sees as an NVMe KV namespace. It reaches that namespace
++ * through NVIDIA's doca-kv library, needs DOCA 4.4 and a BlueField-3, and so
++ * cannot run here at all.
++ *
++ * But its own README gives the game away: `device_name` is `/dev/nvme0n1` -- a
++ * kernel device. The NVMe KV command set is ratified, Linux attaches a KV
++ * namespace (hiding only the block device: "block device for nsid %u not
++ * supported (csi %u)") and exposes it for passthrough, and the commands are
++ * the same commands whoever issues them. So this plugin keeps the DOCA
++ * plugin's NIXL-facing semantics exactly and replaces the vendor library with
++ * io_uring NVMe passthrough -- which works against any KV namespace, from any
++ * vendor, over any fabric.
++ *
++ * THE NIXL MAPPING, WHICH IS DOCA_MEMOS'S
++ *
++ * One descriptor pair is one value. The local DRAM_SEG buffer is the value;
++ * the remote OBJ_SEG descriptor names the key. NIXL_WRITE is Store, NIXL_READ
++ * is Retrieve, and queryMem() is one Exist per descriptor. The key comes from
++ * the OBJ_SEG descriptor: the devId bytes when metaInfo is empty, otherwise
++ * metaInfo parsed as a hex string of up to 16 bytes, or -- with
++ * `convert_key_to_128bit` -- any string hashed to 128 bits.
++ *
++ * A Retrieve whose stored value length differs from the buffer fails, as it
++ * does in DOCA_MEMOS. The device reports the true length in the completion
++ * even when it did not overrun the buffer, so a short read is detected rather
++ * than silently handing back a partly-stale buffer.
++ *
++ * WHY io_uring AND NOT ioctl
++ *
++ * NVME_IOCTL_IO_CMD is synchronous: every value would block a thread for a
++ * fabric round trip, and NIXL's interface is prepare/post/check precisely so
++ * that it does not have to. IORING_OP_URING_CMD carrying NVME_URING_CMD_IO is
++ * the same command, submitted and reaped asynchronously, so postXfer() returns
++ * NIXL_IN_PROG with everything in flight and checkXfer() reaps whatever has
++ * completed. The ring needs SQE128 and CQE32: a passthrough command does not
++ * fit a 64-byte SQE, and the NVMe completion result does not fit a 16-byte CQE.
++ */
++/// Defined in the .cpp; the engine only ever holds pointers to it.
++class nvmeKvBackendReqH;
++
++class nvmeKvEngine : public nixlBackendEngine {
++public:
++    explicit nvmeKvEngine(const nixlBackendInitParams *init_params);
++    ~nvmeKvEngine() override;
++
++    bool
++    supportsRemote() const override {
++        return false;
++    }
++
++    bool
++    supportsLocal() const override {
++        return true;
++    }
++
++    bool
++    supportsNotif() const override {
++        return false;
++    }
++
++    /**
++     * OBJ_SEG names keys; DRAM_SEG holds values.
++     *
++     * VRAM_SEG is deliberately absent. NVMe passthrough hands the kernel a
++     * user virtual address to pin, and a device pointer is not that -- it
++     * would need p2pdma, which neither the emulated device here nor a stock
++     * KV namespace offers. DOCA_MEMOS makes the same choice and additionally
++     * requires hugepages for the same underlying reason.
++     */
++    nixl_mem_list_t
++    getSupportedMems() const override {
++        return {OBJ_SEG, DRAM_SEG};
++    }
++
++    nixl_status_t
++    registerMem(const nixlBlobDesc &mem, const nixl_mem_t &nixl_mem, nixlBackendMD *&out) override;
++
++    nixl_status_t
++    deregisterMem(nixlBackendMD *meta) override;
++
++    nixl_status_t
++    queryMem(const nixl_reg_dlist_t &descs, std::vector<nixl_query_resp_t> &resp) const override;
++
++    nixl_status_t
++    connect(const std::string &remote_agent) override {
++        return NIXL_SUCCESS;
++    }
++
++    nixl_status_t
++    disconnect(const std::string &remote_agent) override {
++        return NIXL_SUCCESS;
++    }
++
++    nixl_status_t
++    unloadMD(nixlBackendMD *input) override {
++        return NIXL_SUCCESS;
++    }
++
++    nixl_status_t
++    loadLocalMD(nixlBackendMD *input, nixlBackendMD *&output) override {
++        output = input;
++        return NIXL_SUCCESS;
++    }
++
++    nixl_status_t
++    prepXfer(const nixl_xfer_op_t &operation,
++             const nixl_meta_dlist_t &local,
++             const nixl_meta_dlist_t &remote,
++             const std::string &remote_agent,
++             nixlBackendReqH *&handle,
++             const nixl_opt_b_args_t *opt_args = nullptr) const override;
++
++    nixl_status_t
++    postXfer(const nixl_xfer_op_t &operation,
++             const nixl_meta_dlist_t &local,
++             const nixl_meta_dlist_t &remote,
++             const std::string &remote_agent,
++             nixlBackendReqH *&handle,
++             const nixl_opt_b_args_t *opt_args = nullptr) const override;
++
++    nixl_status_t
++    checkXfer(nixlBackendReqH *handle) const override;
++
++    nixl_status_t
++    releaseReqH(nixlBackendReqH *handle) const override;
++
++    /**
++     * Resolve an OBJ_SEG descriptor to a key, by DOCA_MEMOS's rules.
++     *
++     * Public and static so the unit test can exercise the three paths without
++     * a device.
++     *
++     * @param dev_id devId, used as the key when meta_info is empty
++     * @param meta_info metaInfo: hex, or any string when hash_long_keys
++     * @param hash_long_keys The `convert_key_to_128bit` parameter
++     * @param key Out: the key bytes
++     * @param key_len Out: the key length, 1..16
++     * @return false when meta_info is neither valid hex nor hashable
++     */
++    static bool
++    resolveKey(uint64_t dev_id,
++               const std::string &meta_info,
++               bool hash_long_keys,
++               uint8_t (&key)[nvme_kv::MAX_KEY_LEN],
++               uint8_t &key_len);
++
++private:
++    /**
++     * Open the namespace and refuse anything that is not a KV one.
++     *
++     * This check is the plugin's single most important line. Store is opcode
++     * 01h, which is Write in the NVM command set: pointed at an LBA namespace
++     * by a typo in `device_name`, a Store would not fail, it would overwrite
++     * the start of a block device. So the CSI is read from the namespace's
++     * Identify data and anything but KV is refused before a command can be
++     * built.
++     */
++    nixl_status_t
++    openDevice(const std::string &path);
++
++    /// Submit one command and wait for its completion. Used by queryMem(),
++    /// which is synchronous in the NIXL interface.
++    nixl_status_t
++    submitSync(struct nvme_uring_cmd &cmd, uint32_t *result_out) const;
++
++    /**
++     * Drain every completion the ring has and give each to the request that
++     * submitted it.
++     *
++     * One ring serves every request, so a completion has to carry enough to
++     * find its owner. Tagging an SQE with the task's index within its request
++     * is not enough -- every request numbers its tasks from zero, so a
++     * straggler from an earlier transfer is indistinguishable from this one's
++     * first task, and checkXfer() counts it as progress it did not make. The
++     * symptom is a transfer that reports completion before the device has
++     * answered, which looks like extraordinary bandwidth rather than like a
++     * bug.
++     *
++     * So the tag is a token unique for the lifetime of the engine, and
++     * inflight_ maps it back to the request and task it belongs to.
++     *
++     * @param wanted A token to stop after, or 0 to drain without blocking
++     * @param wanted_res Out: cqe->res for @p wanted
++     * @param wanted_result Out: the NVMe result dword for @p wanted
++     * @return true when @p wanted was seen (always false when it is 0)
++     */
++    bool
++    reapCompletions(uint64_t wanted, int *wanted_res, uint32_t *wanted_result) const;
++
++    std::string devicePath_;
++    int deviceFd_ = -1;
++    uint32_t nsid_ = 0;
++    bool hashLongKeys_ = false;
++    uint32_t queueDepth_ = 0;
++    /// Controller maximum transfer, from MDTS. 0 means unlimited.
++    uint32_t maxValueLen_ = 0;
++
++    /// One ring for the engine. io_uring is not thread-safe for concurrent
++    /// submission, and NIXL may call postXfer() and checkXfer() from different
++    /// threads, so every touch of the ring takes this.
++    mutable struct io_uring ring_ = {};
++    bool ringReady_ = false;
++    mutable std::mutex ringLock_;
++
++    /// Monotonic, so no two commands in this engine's lifetime share a tag.
++    mutable uint64_t nextToken_ = 1;
++    /// Token -> the request that submitted it and which of its tasks it is.
++    mutable std::unordered_map<uint64_t, std::pair<nvmeKvBackendReqH *, size_t>> inflight_;
++    /// Tokens whose request was released before the device answered. Their
++    /// completions still arrive and must be dropped rather than followed to a
++    /// freed request handle.
++    mutable std::unordered_set<uint64_t> orphaned_;
++
++    /// OBJ_SEG devId -> key, filled by registerMem() and read by prepXfer(),
++    /// mirroring the devIdToObjKey_ map the OBJ plugin's engines keep.
++    std::unordered_map<uint64_t, std::string> devIdToMetaInfo_;
++};
++
++#endif // NIXL_SRC_PLUGINS_NVME_KV_NVME_KV_BACKEND_H
+diff --git a/src/plugins/nvme_kv/nvme_kv_cmd.h b/src/plugins/nvme_kv/nvme_kv_cmd.h
+new file mode 100644
+index 0000000..2fccd54
+--- /dev/null
++++ b/src/plugins/nvme_kv/nvme_kv_cmd.h
+@@ -0,0 +1,126 @@
++/*
++ * SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#ifndef NIXL_SRC_PLUGINS_NVME_KV_NVME_KV_CMD_H
++#define NIXL_SRC_PLUGINS_NVME_KV_NVME_KV_CMD_H
++
++#include <linux/nvme_ioctl.h>
++#include <cstdint>
++#include <cstring>
++
++/**
++ * The NVMe Key Value command set, as it goes on the wire.
++ *
++ * This is the whole vendor-independent core of the plugin. The NVM Express Key
++ * Value Command Set is a ratified specification, Linux attaches a KV namespace
++ * and exposes it for passthrough, and the commands below are therefore the
++ * only thing standing between NIXL and any KV device -- no vendor library in
++ * the path, which is the difference between this and the DOCA_MEMOS plugin it
++ * is modelled on.
++ *
++ * THE OPCODES OVERLAP WITH THE BLOCK COMMAND SET, AND THAT IS DANGEROUS.
++ *
++ * Store is 01h and Retrieve is 02h -- the same values as Write and Read in the
++ * NVM command set. Sent to an LBA namespace by mistake, a Store does not fail:
++ * it executes as a block write and destroys data. The engine therefore refuses
++ * to open a namespace whose CSI is not KV (see nvmeKvEngine::openDevice), and
++ * nothing here is reachable until that check has passed.
++ */
++namespace nvme_kv {
++
++/// Store a value under a key. Host-to-device data.
++inline constexpr uint8_t OPC_STORE = 0x01;
++/// Retrieve a value by key. Device-to-host data.
++inline constexpr uint8_t OPC_RETRIEVE = 0x02;
++/// List keys from a starting key. Device-to-host data.
++inline constexpr uint8_t OPC_LIST = 0x06;
++/// Delete a key. No data.
++inline constexpr uint8_t OPC_DELETE = 0x10;
++/// Test whether a key exists. No data.
++inline constexpr uint8_t OPC_EXIST = 0x14;
++
++/// The specification's maximum key length. A key is 1..16 bytes.
++inline constexpr uint32_t MAX_KEY_LEN = 16;
++
++/// Command Set Identifier for Key Value. The value Linux reports in
++/// "block device for nsid %u not supported (csi %u)" when it attaches one.
++inline constexpr uint8_t CSI_KV = 1;
++
++/// Status code the device returns for a key that is not present. Delivered to
++/// the caller as the low 11 bits of the NVMe status field.
++inline constexpr uint16_t SC_KEY_DOES_NOT_EXIST = 0x87;
++
++/**
++ * Place a key into a command's data words.
++ *
++ * The split is not an invention here -- it is where the specification puts a
++ * key, and where SPDK's nvme_kv_cmd_set_key() reads it from:
++ *
++ *   key[0..7]   -> CDW2, CDW3
++ *   key[8..15]  -> CDW14, CDW15
++ *   CDW11[07:00] = key length
++ *
++ * The bytes go in as they are. A key is an opaque octet string, so no byte
++ * order applies to it; the CDWs are just where those octets are carried.
++ */
++inline void
++setKey(struct nvme_uring_cmd &cmd, const uint8_t *key, uint8_t key_len) {
++    uint8_t lo[8] = {};
++    uint8_t hi[8] = {};
++    const uint8_t n_lo = key_len < 8 ? key_len : 8;
++    memcpy(lo, key, n_lo);
++    if (key_len > 8) {
++        memcpy(hi, key + 8, static_cast<size_t>(key_len) - 8);
++    }
++    memcpy(&cmd.cdw2, lo, 4);
++    memcpy(&cmd.cdw3, lo + 4, 4);
++    memcpy(&cmd.cdw14, hi, 4);
++    memcpy(&cmd.cdw15, hi + 4, 4);
++    // kl in [07:00], request options in [15:08] -- none of the options
++    // (SIKE, SINE, no-compress, TTL) are used here, so the high byte is zero.
++    cmd.cdw11 = key_len;
++}
++
++/**
++ * Build a Store or Retrieve.
++ *
++ * @param value_len For Store the size of the value; for Retrieve the size of
++ *                  the host buffer, which the device will not overrun. A
++ *                  Retrieve whose stored value is longer reports the true
++ *                  length in the completion result, which the caller compares
++ *                  against what it asked for.
++ */
++inline struct nvme_uring_cmd
++makeDataCmd(uint8_t opcode,
++            uint32_t nsid,
++            const uint8_t *key,
++            uint8_t key_len,
++            void *value,
++            uint32_t value_len) {
++    struct nvme_uring_cmd cmd = {};
++    cmd.opcode = opcode;
++    cmd.nsid = nsid;
++    cmd.addr = reinterpret_cast<uint64_t>(value);
++    cmd.data_len = value_len;
++    cmd.cdw10 = value_len;
++    setKey(cmd, key, key_len);
++    return cmd;
++}
++
++/**
++ * Build a Delete or Exist: a key and nothing else.
++ */
++inline struct nvme_uring_cmd
++makeKeyOnlyCmd(uint8_t opcode, uint32_t nsid, const uint8_t *key, uint8_t key_len) {
++    struct nvme_uring_cmd cmd = {};
++    cmd.opcode = opcode;
++    cmd.nsid = nsid;
++    setKey(cmd, key, key_len);
++    return cmd;
++}
++
++} // namespace nvme_kv
++
++#endif // NIXL_SRC_PLUGINS_NVME_KV_NVME_KV_CMD_H
+diff --git a/src/plugins/nvme_kv/nvme_kv_plugin.cpp b/src/plugins/nvme_kv/nvme_kv_plugin.cpp
+new file mode 100644
+index 0000000..cf2d436
+--- /dev/null
++++ b/src/plugins/nvme_kv/nvme_kv_plugin.cpp
+@@ -0,0 +1,35 @@
++/*
++ * SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include "backend/backend_plugin.h"
++#include "nvme_kv_backend.h"
++
++using nvme_kv_plugin_t = nixlBackendPluginCreator<nvmeKvEngine>;
++
++// device_name has no useful default: there is no conventional path for a KV
++// namespace, and guessing one risks naming an LBA namespace, where a Store
++// would execute as a block Write. Empty, and the engine refuses to start.
++static const nixl_b_params_t nvme_kv_params = {
++    {"device_name", ""},
++    {"convert_key_to_128bit", "false"},
++    {"queue_depth", "256"},
++};
++
++#ifdef STATIC_PLUGIN_NVME_KV
++nixlBackendPlugin *
++createStaticNVME_KVPlugin() {
++    return nvme_kv_plugin_t::create(
++        NIXL_PLUGIN_API_VERSION, "NVME_KV", "0.1.0", nvme_kv_params, {OBJ_SEG, DRAM_SEG});
++}
++#else
++extern "C" NIXL_PLUGIN_EXPORT nixlBackendPlugin *
++nixl_plugin_init() {
++    return nvme_kv_plugin_t::create(
++        NIXL_PLUGIN_API_VERSION, "NVME_KV", "0.1.0", nvme_kv_params, {OBJ_SEG, DRAM_SEG});
++}
++
++extern "C" NIXL_PLUGIN_EXPORT void
++nixl_plugin_fini() {}
++#endif

@@ -200,6 +200,107 @@ the same three commands with `curl` -- and with multipart above 15 KiB,
 because a whole request is capped at 16 KiB. It touches only the seeding; the
 measured transfer still goes through NIXL and the `x-amz-rdma-token` path.
 
+## NVMe Key Value, over TCP and over RDMA
+
+`patches/nixl/09` adds an `NVME_KV` backend: the ROCm-reachable counterpart of
+NIXL's upstream DOCA_MEMOS plugin (ai-dynamo/nixl#1717), which needs doca-kv
+and a BlueField-3. It keeps DOCA_MEMOS's NIXL contract — DRAM_SEG value,
+OBJ_SEG key, WRITE is Store, READ is Retrieve, `queryMem()` is Exist — and
+issues the commands over io_uring NVMe passthrough instead, so it needs no
+vendor library at all.
+
+That works because Linux attaches a KV namespace and hides only its *block*
+device: `nvme nvme3: block device for nsid 1 not supported (csi 1)`, and
+`/dev/ng3n1` appears and takes passthrough.
+
+### Serving one
+
+SPDK's `kvdev_mem` is the target. The published
+`ubuntu-spdk-libvfio-user` image is built `CONFIG_RDMA=n`, so it can serve KV
+over TCP but not over RDMA; `--with-rdma` and `libibverbs-dev librdmacm-dev`
+are what the RDMA build needs.
+
+Over TCP, from a container on `nixl-mori_fleet`, which the guests reach
+through QEMU's NAT:
+
+```
+docker run -d --name nixl-mori-spdk-kv --network nixl-mori_fleet --privileged \
+    -v /tmp/spdkkv:/cfg -e SPDK_JSON_CONFIG=/cfg/empty.json \
+    sbates130272/batesste-ci-images-ubuntu-spdk-libvfio-user:latest
+# /cfg/empty.json is {"subsystems":[]}, which skips the image's VFIOUSER setup
+rpc.py nvmf_create_transport -t TCP
+rpc.py kvdev_mem_create kv0 -v 4194304 -k 65536
+rpc.py nvmf_create_subsystem nqn.2026-11.io.nixl:kv0 -a -s NIXLKV001
+rpc.py nvmf_subsystem_add_kv_ns nqn.2026-11.io.nixl:kv0 kv0 -n 1
+rpc.py nvmf_subsystem_add_listener nqn.2026-11.io.nixl:kv0 -t TCP -a <ip> -s 4420
+```
+
+Over RDMA the target has to be *inside* a guest, because the fabric is the
+emulated ernic and only a guest has one. Unpack an RDMA-enabled SPDK into a
+VM and run it under systemd — not `nohup ... &` over ssh, which dies with the
+session — then listen on that VM's rail address:
+
+```
+sudo systemd-run --unit=spdk-nvmf --collect \
+    /opt/spdk/build/bin/nvmf_tgt -r /var/tmp/spdk.sock -m 0x3 --no-huge -s 1024
+rpc.py nvmf_create_transport -t RDMA -q 128 -u 8192 --no-srq
+rpc.py nvmf_subsystem_add_listener ... -t RDMA -a 192.168.80.15 -s 4420
+```
+
+`--no-srq` is not optional: the ernic reports `max_srq: 0`.
+
+### Three things that will bite
+
+**The listener address must match exactly.** A listener on `0.0.0.0` refuses a
+guest that connects to the concrete address — "does not allow host ... to
+connect at this address" — and adding a second listener on the same port
+fails with "Invalid parameters". Remove the wildcard one and add the real
+address.
+
+**Route the target to a mesh rail.** Every rail shares one
+`ERNIC_GUEST_SUBNET` /20, so the kernel picks whichever it likes. On a VM
+whose rail 2 is the S3 server, that rail is not a mesh member and the
+connection resets with `rdma connection establishment failed (-104)` and
+nothing at all in the target's log. `ip route replace <target>/32 dev
+enp1s0np0` fixes it.
+
+**MDTS caps a value at 128 KiB here.** SPDK reports MDTS 5, so one value is at
+most 2^5 x 4 KiB whatever the kvdev's `--max-value-len` says. The plugin reads
+MDTS at startup and says so; without that the kernel rejects the command
+before the device sees it and the only symptom is a bare EINVAL.
+
+### Running it
+
+```
+nixlbench --backend NVME_KV --nvme_kv_device=/dev/ng3n1 \
+    --op_type WRITE --initiator_seg_type DRAM \
+    --start_block_size 4096 --max_block_size 131072
+```
+
+Passthrough is root-only, and sudo drops the environment, so pass
+`NIXL_PLUGIN_DIR` and `LD_LIBRARY_PATH` through explicitly rather than
+relying on `sudo -E`.
+
+**A READ run needs block size == value size.** nixlbench seeds one object at
+the *registration* size and then reads it in *block*-sized pieces, which is
+S3's model: a KV value is atomic and there is no ranged Retrieve. Reading 4
+KiB of a 128 KiB value trips the plugin's length check, which is correct and
+is what DOCA_MEMOS does too. Use
+`--start_block_size N --max_block_size N --total_buffer_size N`.
+
+Measured 2026-11-03, vm4, DRAM, GB/s and average latency:
+
+| Value | Store TCP | Store RDMA | Retrieve TCP | Retrieve RDMA |
+|---|---|---|---|---|
+| 4 KiB | 0.248 / 17 us | 0.156 / 26 us | 0.317 / 13 us | 0.098 / 42 us |
+| 16 KiB | 0.262 / 62 us | 0.352 / 47 us | 0.178 / 92 us | 0.487 / 34 us |
+| 64 KiB | 0.300 / 218 us | 0.727 / 90 us | 0.420 / 156 us | 1.361 / 48 us |
+| 128 KiB | 0.357 / 368 us | 1.164 / 113 us | 0.439 / 299 us | 1.812 / 72 us |
+
+RDMA is 3-4x TCP at 128 KiB and its latency grows far more slowly with size,
+which is the whole point. TCP wins at 4 KiB, where per-command overhead
+dominates and the RDMA path has more of it.
+
 ## What works here, and what does not
 
 All three transports, measured 2026-11-02 on the four-guest cluster with two

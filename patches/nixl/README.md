@@ -12,6 +12,7 @@ filename order. See [../README.md](../README.md) for the rules.
 | `05-nixl-rocm-ais-async.patch` | Makes the AIS plugins' transfers asynchronous. |
 | `06-nixl-libfabric-verbs-provider.patch` | Lets the LIBFABRIC backend select the `verbs` provider. |
 | `07-nixl-libfabric-rocr-vram.patch` | Restores the ROCm/VRAM support v1.5.2 removed from the LIBFABRIC backend. |
+| `09-nixl-nvme-kv-backend.patch` | New `src/plugins/nvme_kv/` — an NVMe Key Value backend over io_uring passthrough, the vendor-neutral counterpart of upstream's DOCA_MEMOS, plus `--backend=NVME_KV` in nixlbench. |
 | `08-nixl-obj-hipobject-engine.patch` | New `src/plugins/obj/s3_accel/amd/` — a hipObject S3-over-RDMA engine for the OBJ plugin, the ROCm counterpart of the CUDA-only Dell one, plus the meson wiring (`-Dhipobj_path=`). |
 
 ## Why a MORI plugin exists here
