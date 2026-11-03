@@ -423,6 +423,51 @@ of `/opt`. Without it `ofi_rxm` asks the verbs provider for a completion queue
 larger than the port's `max_cqe` and `fi_enable()` fails before any transfer,
 reporting only `Invalid argument`.
 
+## First thing to check when device memory will not register
+
+**If a VRAM registration fails, suspect a kernel-config dmabuf probe before
+you suspect the NIC.** This has now cost a day twice, in two different
+libraries, with two different symptoms and the same root cause.
+
+UCX and libfabric both decide whether ROCr dmabuf is usable by reading
+`/boot/config-$(uname -r)` and requiring BOTH:
+
+```
+CONFIG_DMABUF_MOVE_NOTIFY=y
+CONFIG_PCI_P2PDMA=y
+```
+
+The 7.2.6 guest kernel has the second, never mentions the first, and exports
+`dma_buf_move_notify` in `/proc/kallsyms` -- which it would not if the code
+were compiled out. So the capability is present and both probes conclude it
+is absent. `patches/ucx/03` and `patches/libfabric/01` add the symbol
+fallback; they are near-identical for that reason.
+
+The two symptoms look nothing alike, which is what makes this worth writing
+down:
+
+| Library | What you see |
+|---|---|
+| UCX | `ibv_reg_mr(...) failed: Bad address`, then NIXL's "registration failed for the specified or all potential backends" |
+| libfabric | `fi_mr_reg failed on rail 0: Bad address`, and **nothing else at any `FI_LOG_LEVEL`**, including an `--enable-debug` build |
+
+libfabric's silence is structural rather than bad luck: a failed export takes
+`vrb_reg_hmem_dmabuf()` to its `failover:` label with `saved_errno` still 0,
+and the one log line on that path is conditional on `saved_errno` being
+non-zero. The fallback then registers the device pointer with plain
+`ibv_reg_mr`, which is what returns EFAULT.
+
+Three checks, in order, before touching anything else:
+
+```sh
+grep -cE 'CONFIG_DMABUF_MOVE_NOTIFY=y|CONFIG_PCI_P2PDMA=y' /boot/config-$(uname -r)
+grep -c dma_buf_move_notify /proc/kallsyms      # capability really present?
+UCX_ROCM_COPY_DMABUF=try                        # and it must be set; default is n
+```
+
+A count of 1 from the first with a non-zero second is exactly this bug. Any
+other library that probes the same way will fail the same silent way.
+
 ## Restarting pieces by hand
 
 Three traps, all of which cost time to find:

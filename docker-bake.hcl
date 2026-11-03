@@ -21,6 +21,9 @@ variable "UCX_REF"        { default = "v1.22.0" }
 variable "LIBFABRIC_REF"  { default = "v2.7.0" }
 variable "HIPFILE_REF"    { default = "bd0bc2330a1573223209b9899055d1d6188b9113" }
 variable "FIO_REF"        { default = "c32261752c88b3f7aadfde4d011a028ae954f869" }
+// A branch head on sbates130272/perftest: the ROCm data-validation work is
+// not upstream. A SHA so a push to the fork does not change this image.
+variable "PERFTEST_REF"   { default = "18f7a8b0ad19107ce7d235916c8efa179990e0dd" }
 variable "VERSION"        { default = "" }
 variable "IMAGE_NAME"     { default = "nixl-mori-test" }
 variable "IMAGE_TAG"      { default = "latest" }
@@ -55,6 +58,7 @@ target "_common" {
     LIBFABRIC_REF    = LIBFABRIC_REF
     HIPFILE_REF      = HIPFILE_REF
     FIO_REF          = FIO_REF
+    PERFTEST_REF     = PERFTEST_REF
     VERSION          = VERSION
     RUNTIME_BASE_IMAGE = RUNTIME_BASE_IMAGE
   }

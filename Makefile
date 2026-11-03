@@ -31,7 +31,7 @@ _BAKE_DEFAULTS := $(shell sed -n 's/^variable[[:space:]]*"\([A-Z_0-9]*\)"[[:spac
 bake_default = $(patsubst $(1)=%,%,$(filter $(1)=%,$(_BAKE_DEFAULTS)))
 
 # ?= so the command line still wins: `make build NIXL_REF=v1.5.0` is unchanged.
-$(foreach _v,ROCM_VERSION NIXL_REF MORI_REF UCX_REF LIBFABRIC_REF HIPFILE_REF FIO_REF IMAGE_NAME,\
+$(foreach _v,ROCM_VERSION NIXL_REF MORI_REF UCX_REF LIBFABRIC_REF HIPFILE_REF FIO_REF PERFTEST_REF IMAGE_NAME,\
   $(eval $(_v) ?= $(call bake_default,$(_v))))
 
 # Not in bake: it builds from a context, and these only matter to the clone
@@ -56,6 +56,9 @@ HIPFILE_GIT_URL ?= https://github.com/ROCm/hipFile.git
 # API use, so it can say whether a plateau is NIXL's or the library's.  The
 # branch publishes no tags, hence a SHA.  Empty leaves fio out of the image.
 FIO_GIT_URL ?= https://github.com/ROCm/fio.git
+# perftest, the reference RDMA microbenchmark. The fork rather than
+# linux-rdma/perftest: the ROCm data-validation work is only there.
+PERFTEST_GIT_URL ?= https://github.com/sbates130272/perftest.git
 
 override VERSION := $(strip $(file <$(REPO_ROOT)/VERSION))
 
@@ -116,6 +119,8 @@ _BUILD_ARGS := \
 	--build-arg HIPFILE_GIT_URL=$(HIPFILE_GIT_URL) \
 	--build-arg HIPFILE_REF=$(HIPFILE_REF) \
 	--build-arg FIO_GIT_URL=$(FIO_GIT_URL) \
+	--build-arg PERFTEST_REF=$(PERFTEST_REF) \
+	--build-arg PERFTEST_GIT_URL=$(PERFTEST_GIT_URL) \
 	--build-arg FIO_REF=$(FIO_REF) \
 	$(if $(UCX_DEBUG_LOG),--build-arg UCX_DEBUG_LOG=$(UCX_DEBUG_LOG),) \
 	--build-arg VERSION=$(VERSION) \
@@ -498,7 +503,8 @@ _README_ENV := IMAGE_NAME="$(IMAGE_NAME)" IMAGE_REF="$(IMAGE_REF)" \
 	UCX_REF="$(UCX_REF)" UCX_GIT_URL="$(UCX_GIT_URL)" \
 	LIBFABRIC_REF="$(LIBFABRIC_REF)" LIBFABRIC_GIT_URL="$(LIBFABRIC_GIT_URL)" \
 	HIPFILE_REF="$(HIPFILE_REF)" HIPFILE_GIT_URL="$(HIPFILE_GIT_URL)" \
-	FIO_REF="$(FIO_REF)" FIO_GIT_URL="$(FIO_GIT_URL)"
+	FIO_REF="$(FIO_REF)" FIO_GIT_URL="$(FIO_GIT_URL)" \
+	PERFTEST_REF="$(PERFTEST_REF)" PERFTEST_GIT_URL="$(PERFTEST_GIT_URL)"
 
 readme:
 	@$(_README_ENV) "$(REPO_ROOT)/docker/scripts/readme-pins.sh"

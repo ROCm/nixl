@@ -27,6 +27,7 @@
     # no compiler and no reason to grow one.
     rdma_build_dir: "{{ playbook_dir }}/../build/guest-artifacts"
     ionic_target: /usr/lib/x86_64-linux-gnu/libionic.so.1.0.61.0
+    nixl_stack: /opt/nixl-stack/opt
 
   tasks:
 
@@ -310,6 +311,50 @@
       changed_when: "'formatted' in nvme_setup.stdout"
       when: nvme_list.stdout_lines | length > 0
       tags: [nvme]
+
+    # ---- perftest --------------------------------------------------------
+    # The reference RDMA microbenchmark, shipped in the stack image under
+    # /opt/perftest. It is here to put a number beside NIXL's that has none
+    # of NIXL in it: when a backend plateaus, perftest answers "is this the
+    # fabric or the stack?" directly against libibverbs.
+    #
+    # Verified rather than installed -- cluster-stack delivers it -- because
+    # the useful failure is a perftest built WITHOUT ROCm, which is silent:
+    # --use_rocm is simply not a recognised option, and the first sign would
+    # be a VRAM benchmark that quietly measured host memory.
+    - name: perftest is present and ROCm-capable
+      ansible.builtin.shell: |
+        P={{ nixl_stack }}/perftest/bin/ib_write_bw
+        [ -x "$P" ] || { echo "MISSING"; exit 0; }
+        help="$("$P" --help 2>&1 || true)"
+        grep -q -- '--use_rocm_dmabuf' <<< "$help" && echo "ok rocm+dmabuf" \
+          || { grep -q -- '--use_rocm' <<< "$help" && echo "rocm but NO dmabuf" \
+               || echo "NO rocm"; }
+      args:
+        # Herestrings are a bashism and ansible's shell module runs /bin/sh,
+        # which is dash here: without this the task dies on "Syntax error:
+        # redirection unexpected".
+        executable: /bin/bash
+      register: perftest_state
+      changed_when: false
+      tags: [perftest]
+
+    # --use_rocm WITHOUT --use_rocm_dmabuf fails on this cluster with
+    # "Couldn't create IB resources": registering a device pointer by virtual
+    # address needs peer memory, which ROCm does not provide here. With
+    # dmabuf it runs at full fabric speed. That is the same split that
+    # patches/ucx/03 and patches/libfabric/01 exist for, which is why it is
+    # worth asserting rather than discovering mid-benchmark.
+    - name: Fail if perftest cannot do ROCm dmabuf
+      ansible.builtin.fail:
+        msg: >-
+          perftest on {{ inventory_hostname }} reports
+          '{{ perftest_state.stdout | trim }}'. VRAM benchmarks need
+          --use_rocm_dmabuf; rebuild the image (see
+          docker/scripts/build-perftest.sh) and re-run cluster-stack.
+      when: perftest_state.stdout is defined
+            and 'ok rocm+dmabuf' not in perftest_state.stdout
+      tags: [perftest]
 
     # ---- Report ----------------------------------------------------------
     # The stock provider is 55688 bytes and the patched one about 67416, which

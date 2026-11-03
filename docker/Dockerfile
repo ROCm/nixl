@@ -283,6 +283,50 @@ RUN --mount=type=cache,target=/root/.cache,sharing=locked \
         bash /tmp/scripts/build-hipfile.sh && rm -rf /tmp/hipfile-src; \
     fi
 
+# ----- 1b2. perftest (linux-rdma), ROCm-enabled ------------------------------
+# FROM base: perftest depends on libibverbs and ROCm, not on UCX, libfabric or
+# hipFile, so it builds concurrently with all of them.
+#
+# Pinned to a branch head on sbates130272/perftest rather than upstream: the
+# ROCm data-validation work is not in linux-rdma/perftest. A SHA, not a branch
+# name, so the image does not change meaning on a push to the fork.
+#
+# PERFTEST_REF empty skips the stage and leaves /opt/perftest empty, which is
+# the same escape hatch FIO_REF and LIBFABRIC_REF have.
+FROM base AS perftest
+
+ARG PERFTEST_GIT_URL=https://github.com/sbates130272/perftest.git
+ARG PERFTEST_REF=18f7a8b0ad19107ce7d235916c8efa179990e0dd
+
+ENV PERFTEST_PREFIX=/opt/perftest
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    if [ -n "${PERFTEST_REF}" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends \
+            autoconf automake libtool pkg-config libibverbs-dev librdmacm-dev \
+            libibumad-dev libpci-dev; \
+    fi
+
+COPY docker/scripts/clone-src.sh docker/scripts/build-perftest.sh /tmp/scripts/
+
+RUN mkdir -p /opt/perftest && \
+    if [ -z "${PERFTEST_REF}" ]; then \
+        echo "PERFTEST_REF empty -- no perftest in this image"; \
+    else \
+        SRC_NAME=perftest \
+        SRC_GIT_URL="${PERFTEST_GIT_URL}" \
+        SRC_REF="${PERFTEST_REF}" \
+        SRC_DEST=/tmp/perftest-src \
+        bash /tmp/scripts/clone-src.sh; \
+    fi
+
+RUN --mount=type=cache,target=/root/.cache,sharing=locked \
+    if [ -n "${PERFTEST_REF}" ]; then \
+        PERFTEST_SRC=/tmp/perftest-src \
+        bash /tmp/scripts/build-perftest.sh && rm -rf /tmp/perftest-src; \
+    fi
+
 # ----- 1c. fio with the hipFile ioengine --------------------------------------
 # FROM hipfile, not FROM base: the engine must link the same libhipfile the AIS
 # plugins do, or a "fio says X, NIXL says Y" comparison is comparing two
@@ -494,6 +538,7 @@ COPY --from=hipfile /opt/hipfile     /opt/hipfile
 COPY --from=libfabric /opt/libfabric /opt/libfabric
 # Both are symlink trees or empty when FIO_REF is unset; /opt/fio-hipfile is
 # the prefix fio's rpath points at, so it has to come along with the binary.
+COPY --from=perftest /opt/perftest   /opt/perftest
 COPY --from=fio     /opt/fio         /opt/fio
 COPY --from=fio     /opt/fio-hipfile /opt/fio-hipfile
 COPY --from=mori /opt/mori        /opt/mori
@@ -524,8 +569,9 @@ ENV NIXL_PREFIX=/opt/nixl \
     NIXL_PLUGIN_DIR=/opt/nixl/lib/x86_64-linux-gnu/plugins \
     PYTHONPATH=/opt/nixl/lib/python3/dist-packages \
     FIO_PREFIX=/opt/fio \
+    PERFTEST_PREFIX=/opt/perftest \
     LIBFABRIC_PREFIX=/opt/libfabric \
-    PATH=/opt/nixlbench/bin:/opt/hsa-snoop/bin:/opt/fio/bin:/opt/rocnixl-ucx/bin:/opt/libfabric/bin:${PATH}
+    PATH=/opt/nixlbench/bin:/opt/hsa-snoop/bin:/opt/perftest/bin:/opt/fio/bin:/opt/rocnixl-ucx/bin:/opt/libfabric/bin:${PATH}
 
 # How many peers libfabric sizes itself for.  rxm derives the size of the MSG
 # completion queue it opens under an RDM endpoint from this, and the default of
@@ -748,6 +794,7 @@ COPY --from=runtime-slim-deps /slim/opt/rocm /opt/rocm
 COPY --from=ucx       /opt/rocnixl-ucx /opt/rocnixl-ucx
 COPY --from=libfabric /opt/libfabric   /opt/libfabric
 COPY --from=hipfile   /opt/hipfile     /opt/hipfile
+COPY --from=perftest  /opt/perftest    /opt/perftest
 COPY --from=fio       /opt/fio         /opt/fio
 COPY --from=fio       /opt/fio-hipfile /opt/fio-hipfile
 COPY --from=mori      /opt/mori        /opt/mori
@@ -764,9 +811,10 @@ ENV ROCM_PATH=/opt/rocm \
     UCX_PREFIX=/opt/rocnixl-ucx \
     LIBFABRIC_PREFIX=/opt/libfabric \
     FIO_PREFIX=/opt/fio \
+    PERFTEST_PREFIX=/opt/perftest \
     FI_UNIVERSE_SIZE=16 \
     UCX_ROCM_COPY_DMABUF=try \
-    PATH=/opt/nixlbench/bin:/opt/hsa-snoop/bin:/opt/fio/bin:/opt/rocnixl-ucx/bin:/opt/libfabric/bin:/opt/rocm/bin:${PATH}
+    PATH=/opt/nixlbench/bin:/opt/hsa-snoop/bin:/opt/perftest/bin:/opt/fio/bin:/opt/rocnixl-ucx/bin:/opt/libfabric/bin:/opt/rocm/bin:${PATH}
 
 RUN set -eux; \
     printf '%s\n' /opt/rocm/lib /opt/rocm/lib/rocm_sysdeps/lib \
