@@ -36,6 +36,31 @@ if [[ ! -f "${NIXL_SRC}/meson_options.txt" ]] \
 fi
 
 export PKG_CONFIG_PATH="${UCX_PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+
+# The AWS SDK, so meson finds aws-cpp-sdk-s3, -s3-crt and -core. Without
+# these three src/utils/object skips obj_utils and src/plugins/obj then calls
+# subdir_done(), so EVERY object engine disappears -- with one warning in the
+# meson log and no error anywhere. Harmless when the prefix is empty.
+AWS_SDK_PREFIX="${AWS_SDK_PREFIX:-/opt/aws-sdk}"
+if [[ -d "${AWS_SDK_PREFIX}/lib/pkgconfig" ]]; then
+	export PKG_CONFIG_PATH="${AWS_SDK_PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH}"
+	export LD_LIBRARY_PATH="${AWS_SDK_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
+	# CPLUS_INCLUDE_PATH is not belt-and-braces, it is the only thing that
+	# puts the SDK headers on the compile line. src/utils/object/meson.build
+	# narrows all three dependencies with
+	#   partial_dependency(compile_args: false, includes: true, ...)
+	# and for a pkg-config dependency meson keeps the -I flags from Cflags in
+	# compile_args -- `includes` only carries include_directories() objects,
+	# of which there are none here. So compile_args: false discards every -I
+	# and the plugin compiles with no way to find <aws/s3/S3Client.h>.
+	# Upstream never notices because its CI installs the SDK into a default
+	# prefix where the compiler looks anyway; ours lives in /opt beside every
+	# other component, which is the convention worth keeping.
+	export CPLUS_INCLUDE_PATH="${AWS_SDK_PREFIX}/include:${CPLUS_INCLUDE_PATH:-}"
+	echo "[nixl] AWS SDK at ${AWS_SDK_PREFIX} -- object engines can build"
+else
+	echo "[nixl] no AWS SDK at ${AWS_SDK_PREFIX} -- NIXL will skip the OBJ plugin"
+fi
 export LD_LIBRARY_PATH="${UCX_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
 export ROCM_PATH
 
@@ -88,6 +113,22 @@ if grep -q "option('mori_path'" "${NIXL_SRC}/meson_options.txt"; then
 	export PKG_CONFIG_PATH="${MORI_INSTALL_PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH}"
 	export LD_LIBRARY_PATH="${MORI_INSTALL_PREFIX}/lib:${LD_LIBRARY_PATH}"
 	echo "[nixl] building with the MORI backend plugin (-Dmori_path=${MORI_INSTALL_PREFIX})"
+fi
+
+# The OBJ plugin's hipobj engine -- S3 over RDMA on ROCm.  Same opt-in shape as
+# mori_path: the patchset adds the option, the hipobject stage stages the
+# library, and an unpatched tree gets nothing.  Note this is an ENGINE inside
+# the OBJ plugin, not a plugin of its own: without the AWS SDK there is no OBJ
+# plugin for it to live in, which is what AWS_SDK_PREFIX above provides.
+HIPOBJECT_PREFIX="${HIPOBJECT_PREFIX:-/opt/hipobject}"
+if grep -q "option('hipobj_path'" "${NIXL_SRC}/meson_options.txt"; then
+	if [[ ! -f "${HIPOBJECT_PREFIX}/include/hipobj/hipobj.h" ]]; then
+		echo "ERROR: the NIXL patchset declares hipobj_path but no hipObject at ${HIPOBJECT_PREFIX}" >&2
+		exit 1
+	fi
+	MESON_ARGS+=("-Dhipobj_path=${HIPOBJECT_PREFIX}")
+	export LD_LIBRARY_PATH="${HIPOBJECT_PREFIX}/lib:${LD_LIBRARY_PATH}"
+	echo "[nixl] building with the hipobj S3-over-RDMA engine (-Dhipobj_path=${HIPOBJECT_PREFIX})"
 fi
 
 # The LIBFABRIC backend.  Two options have to line up for it to build at all:

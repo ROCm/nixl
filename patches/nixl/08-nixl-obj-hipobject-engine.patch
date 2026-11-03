@@ -1,0 +1,1347 @@
+# Add a hipObject engine to NIXL's OBJ plugin: S3 over RDMA on ROCm.
+#
+# NIXL has exactly one S3-over-RDMA engine, src/plugins/obj/s3_accel/dell, and
+# it is CUDA-only -- it links the CUDA Toolkit's cuObject client and is
+# compiled only when `dependency('cuobjclient-13.x')` is found. On a ROCm image
+# the object path therefore stops at plain HTTP, with the payload in the body,
+# which is the one thing an RDMA fabric is there to avoid.
+#
+# This adds the ROCm counterpart, selected with `accelerated=true` and
+# `type=hipobj`, built on ROCm/hipObject.
+#
+# WHY THIS IS THE SAME PROTOCOL
+#
+# It is not a parallel invention. rocm-ernic's `--backend s3` already serves
+# the protocol cuObject v1.2.0 introduced and hipObject speaks on the client
+# side: an ordinary HTTP/1.1 S3 request carrying an x-amz-rdma-token header
+# that describes a registered client buffer, with the payload placed into that
+# buffer by RDMA before the response headers come back. So the server half has
+# been in this project all along; this is the client half, reached through the
+# NIXL backend API like any other transport.
+#
+# WHAT IT LOOKS LIKE
+#
+#   src/plugins/obj/s3_accel/amd/rdma_interface.h  iHipObjS3RdmaClient
+#   src/plugins/obj/s3_accel/amd/client.{h,cpp}    the S3 requests
+#   src/plugins/obj/s3_accel/amd/engine_impl.{h,cpp}  the engine
+#
+# laid out beside s3_accel/dell/ and registered through the same
+# objAccelEngineRegistrar, so obj_backend.cpp needs no change at all: the
+# registry already dispatches on the "type" custom parameter.
+#
+# THREE PLACES IT DIFFERS FROM THE DELL ENGINE, EACH FOR A REASON
+#
+# 1. It reads the response header. Dell's engine ignores what comes back; this
+#    one cannot. A server that does not implement the protocol answers a
+#    perfectly valid HTTP 200, having moved nothing, and sets x-amz-rdma-reply
+#    to 501 -- or omits it entirely. Either way the registered buffer still
+#    holds whatever it held before, and reporting success would be reporting a
+#    transfer that did not happen. statusFromRdmaReply() turns both into
+#    NIXL_ERR_BACKEND with a message that says which.
+#
+#    Getting at that header took a detour: the AWS SDK's generated result types
+#    expose only modelled headers, and GetObjectResult drops anything else. The
+#    headers-received event handler is the one place the raw HttpResponse is
+#    reachable, so client.cpp copies the value out there.
+#
+# 2. It synchronises the staging buffer. hipObject registers a host staging
+#    buffer when the NIC cannot reach device memory directly -- no dmabuf, or
+#    no peer-to-peer path -- and then the server's RDMA lands there instead.
+#    Callers driving a transfer through hipObjGetRdmaToken() must stage to host
+#    before a PUT and back to the device after a GET; hipObjBufSync() is a
+#    no-op, reporting success, when the buffer was registered directly. The GET
+#    side happens inside the completion callback, which is what keeps
+#    checkXfer()'s NIXL_SUCCESS meaning "the data is where the caller asked for
+#    it". Given how much of this project's history is dmabuf working or not
+#    working, the staged path is worth supporting rather than assuming away.
+#
+# 3. It refuses a transfer that does not start at a registered base.
+#    hipObjGetRdmaToken() looks the buffer up by exact pointer and mints the
+#    token for [devPtr, devPtr + size) -- it passes offset 0 internally and has
+#    no parameter for anything else, unlike hipObjGet()/hipObjPut(). A
+#    descriptor pointing into the middle of a registration would yield a token
+#    naming the base, and the server would RDMA to the wrong address. prepXfer()
+#    returns NIXL_ERR_INVALID_PARAM and says why instead.
+#
+# THE BUILD SIDE
+#
+# hipobj_dep mirrors cuobj_dep, but discovered by path rather than pkg-config,
+# because hipObject installs a CMake package and no .pc file. Empty
+# -Dhipobj_path -- the default -- leaves the engine out exactly as a missing
+# cuObject leaves the Dell one out, and the rest of the OBJ plugin is
+# unaffected either way.
+#
+# Note this is an ENGINE inside the OBJ plugin, not a plugin of its own. The
+# whole of src/plugins/obj is skipped unless the AWS SDK is present, which is
+# why docker/scripts/build-aws-sdk.sh had to come first.
+#
+# TWO INTEROP SEAMS FOUND BY RUNNING IT
+#
+# Both were found against rocm-ernic's `--backend s3` server on the emulated
+# cluster, and both are worth knowing before anyone reads the code and wonders.
+#
+# 1. The NIC has to be named. hipObject chooses its RDMA device by proximity to
+#    the GPU, which is the wrong answer when the S3 endpoint is served by one
+#    particular NIC: rocm-ernic's server reads the client buffer with
+#    `dma->from_host(ctx, tok.rkey, tok.remote_addr, ...)`, resolving the rkey
+#    in its own MR table -- "because one guest owns every registration this
+#    emulator holds". An rkey minted on the other rail's device means nothing
+#    to it, and the symptom is a 25-second stall then HTTP 500 "The RDMA read
+#    from the client buffer did not complete." hipObject takes the NIC name
+#    only through hipObjConfig_t, with no environment override, so the engine
+#    exposes it as the `hipobj_nic` backend parameter and this patch adds
+#    --obj_hipobj_nic to nixlbench to reach it. --obj_hipobj_gpu is its
+#    companion.
+#
+# 2. x-amz-rdma-reply: 206 is not 200. hipObject's docs/interop.rst says the
+#    only token-bearing form is "200:<88-hex>" and its parser enforces exactly
+#    that. rocm-ernic answers a ranged GET with "206:<88-hex>" -- the correct
+#    HTTP status for a Range request, and one hipObject's own public header
+#    lists among the valid reply codes (200, 204, 206, 501). So a GET that
+#    completed perfectly well comes back as hipObjInvalidValue. The engine
+#    reads the leading status itself when hipObjParseRdmaReply refuses, and
+#    says so in the log; it never uses the peer token, which is the only thing
+#    the two specs actually disagree about.
+#
+#    This is a real disagreement between two AMD components, not a bug in
+#    either one alone, and it should be settled upstream rather than papered
+#    over in every client.
+diff --git a/benchmark/nixlbench/src/utils/utils.cpp b/benchmark/nixlbench/src/utils/utils.cpp
+index 22d41ef..0b02fb7 100644
+--- a/benchmark/nixlbench/src/utils/utils.cpp
++++ b/benchmark/nixlbench/src/utils/utils.cpp
+@@ -218,6 +218,14 @@ NB_ARG_STRING(obj_accelerated_type,
+               "",
+               "S3 Accelerated client vendor type to use. "
+               "Only used when obj_accelerated_enable=true");
++NB_ARG_STRING(obj_hipobj_nic,
++              "",
++              "RDMA device hipObject should open, by ibv name (e.g. rocep3s0). Empty lets it "
++              "choose the NIC closest to the GPU. Only used with obj_accelerated_type=hipobj");
++NB_ARG_INT32(obj_hipobj_gpu,
++             -1,
++             "HIP device index hipObject should pick its NIC closest to, or -1 for the current "
++             "device. Only used with obj_accelerated_type=hipobj");
+ 
+ // AZURE BLOB options - only used when backend is AZURE_BLOB
+ NB_ARG_STRING(azure_blob_account_url, "", "Account URL for Azure Blob backend");
+@@ -337,6 +345,8 @@ std::string xferBenchConfig::obj_ca_bundle = "";
+ size_t xferBenchConfig::obj_crt_min_limit = 0;
+ bool xferBenchConfig::obj_accelerated_enable = false;
+ std::string xferBenchConfig::obj_accelerated_type = "";
++std::string xferBenchConfig::obj_hipobj_nic = "";
++int xferBenchConfig::obj_hipobj_gpu = -1;
+ std::string xferBenchConfig::azure_blob_account_url = "";
+ std::string xferBenchConfig::azure_blob_container_name = "";
+ std::string xferBenchConfig::azure_blob_connection_string = "";
+@@ -534,6 +544,8 @@ xferBenchConfig::loadParams(void) {
+             obj_crt_min_limit = NB_ARG(obj_crt_min_limit);
+             obj_accelerated_enable = NB_ARG(obj_accelerated_enable);
+             obj_accelerated_type = NB_ARG(obj_accelerated_type);
++            obj_hipobj_nic = NB_ARG(obj_hipobj_nic);
++            obj_hipobj_gpu = NB_ARG(obj_hipobj_gpu);
+ 
+             // Validate OBJ S3 scheme
+             if (obj_scheme != XFERBENCH_OBJ_SCHEME_HTTP &&
+@@ -890,6 +902,10 @@ xferBenchConfig::printConfig() {
+                                                  "false (Accelerated disabled)");
+             printOption("OBJ S3 Accelerated type (--obj_accelerated_type=type)",
+                         obj_accelerated_type.empty() ? "(default)" : obj_accelerated_type);
++            printOption("OBJ hipObject NIC (--obj_hipobj_nic=name)",
++                        obj_hipobj_nic.empty() ? "(closest to the GPU)" : obj_hipobj_nic);
++            printOption("OBJ hipObject GPU (--obj_hipobj_gpu=N)",
++                        obj_hipobj_gpu < 0 ? "(current device)" : std::to_string(obj_hipobj_gpu));
+         }
+ 
+         if (backend == XFERBENCH_BACKEND_AZURE_BLOB) {
+diff --git a/benchmark/nixlbench/src/utils/utils.h b/benchmark/nixlbench/src/utils/utils.h
+index 851e18c..ca90087 100644
+--- a/benchmark/nixlbench/src/utils/utils.h
++++ b/benchmark/nixlbench/src/utils/utils.h
+@@ -237,6 +237,8 @@ public:
+     static size_t obj_crt_min_limit;
+     static bool obj_accelerated_enable;
+     static std::string obj_accelerated_type;
++    static std::string obj_hipobj_nic;
++    static int obj_hipobj_gpu;
+     static std::string azure_blob_account_url;
+     static std::string azure_blob_container_name;
+     static std::string azure_blob_connection_string;
+diff --git a/benchmark/nixlbench/src/worker/nixl/nixl_worker.cpp b/benchmark/nixlbench/src/worker/nixl/nixl_worker.cpp
+index b51583f..e3b14b1 100644
+--- a/benchmark/nixlbench/src/worker/nixl/nixl_worker.cpp
++++ b/benchmark/nixlbench/src/worker/nixl/nixl_worker.cpp
+@@ -308,6 +308,20 @@ xferBenchNixlWorker::xferBenchNixlWorker(const std::vector<std::string> &devices
+                 backend_params["type"] = xferBenchConfig::obj_accelerated_type;
+                 std::cout << " (type: " << xferBenchConfig::obj_accelerated_type << ")";
+             }
++            // hipObject chooses its RDMA device by proximity to the GPU, which
++            // is the wrong answer on a host whose S3 endpoint is served by one
++            // particular NIC: the server reads the client buffer by rkey, and
++            // an rkey minted on another NIC means nothing to it. Naming the
++            // device is the only way to say so -- hipObject reads it from its
++            // config and has no environment override.
++            if (!xferBenchConfig::obj_hipobj_nic.empty()) {
++                backend_params["hipobj_nic"] = xferBenchConfig::obj_hipobj_nic;
++                std::cout << " (nic: " << xferBenchConfig::obj_hipobj_nic << ")";
++            }
++            if (xferBenchConfig::obj_hipobj_gpu >= 0) {
++                backend_params["hipobj_gpu"] = std::to_string(xferBenchConfig::obj_hipobj_gpu);
++                std::cout << " (gpu: " << xferBenchConfig::obj_hipobj_gpu << ")";
++            }
+             std::cout << std::endl;
+         } else {
+             std::cout << "OBJ backend with standard S3 enabled" << std::endl;
+diff --git a/meson.build b/meson.build
+index cb59e9e..5254d93 100644
+--- a/meson.build
++++ b/meson.build
+@@ -408,6 +408,38 @@ if mori_path != ''
+     message('MORI SDK found at ' + mori_path + '; MORI_IO backend enabled')
+ endif
+ 
++# --- hipObject (ROCm/hipObject), for the OBJ plugin's hipobj engine ---------
++# The ROCm counterpart of cuobj_dep above. Same shape, different discovery:
++# hipObject installs a CMake package and no pkg-config module, so this is
++# path-driven like mori_path rather than a dependency() lookup.
++#
++# Left empty -- the default -- hipobj_dep is not found and
++# src/plugins/obj/meson.build leaves the hipobj engine out, exactly as it does
++# the Dell one without cuObject. Everything else in the OBJ plugin is
++# unaffected either way.
++hipobj_dep = dependency('', required: false)
++hipobj_path = get_option('hipobj_path')
++if hipobj_path != ''
++    hipobj_inc = hipobj_path + '/include'
++    hipobj_lib_dir = hipobj_path + '/lib'
++    # The header lives under include/hipobj/, so consumers say
++    # <hipobj/hipobj.h>; asserting the full path catches a prefix pointed at
++    # the source tree or at a half-finished install.
++    if not fs.exists(hipobj_inc / 'hipobj' / 'hipobj.h')
++        error('hipobj_path=' + hipobj_path + ' has no include/hipobj/hipobj.h; ' +
++              'point it at a `cmake --install` of ROCm/hipObject.')
++    endif
++    hipobj_lib = cpp.find_library('hipobj', dirs: [hipobj_lib_dir], required: true)
++    hipobj_dep = declare_dependency(
++        dependencies: [hipobj_lib],
++        # is_system (-isystem): hipObject's headers are third-party here and
++        # NIXL compiles with -Werror.
++        include_directories: include_directories(hipobj_inc, is_system: true),
++        link_args: ['-L' + hipobj_lib_dir, '-Wl,-rpath,' + hipobj_lib_dir])
++    add_project_arguments('-DHAVE_HIPOBJ_CLIENT', language: ['cpp'])
++    message('hipObject found at ' + hipobj_path + '; OBJ hipobj engine enabled')
++endif
++
+ # Allow callers (e.g. ROCm CI/Dockerfile) to override the wheel variant suffix
+ # without otherwise affecting the build. Non-empty value wins over the
+ # autodetected CUDA-major value above: e.g. -Dwheel_variant=rocm -> nixl_rocm.
+diff --git a/meson_options.txt b/meson_options.txt
+index 403993b..fe961ae 100644
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -26,6 +26,7 @@ option('install_headers', type : 'boolean', value : true, description : 'install
+ option('gds_path', type: 'string', value: '/usr/local/cuda/', description: 'Path to GDS CuFile install')
+ option('rocm_ais_path', type: 'string', value: '', description: 'Path to hipFile install for AIS_MT (default: auto-detect via ROCM_PATH or /opt/rocm)')
+ option('mori_path', type: 'string', value: '', description: 'Path to the MORI (ROCm/mori) C++ SDK install prefix for the MORI_IO backend. Empty disables the plugin.')
++option('hipobj_path', type: 'string', value: '', description: 'Path to the hipObject (ROCm/hipObject) install prefix for the OBJ plugin\'s hipobj S3-over-RDMA engine. Empty disables that engine.')
+ option('cudapath_inc', type: 'string', value: '', description: 'Include path for CUDA')
+ option('cudapath_lib', type: 'string', value: '', description: 'Library path for CUDA')
+ option('cudapath_stub', type: 'string', value: '', description: 'Extra Stub path for CUDA')
+diff --git a/src/plugins/obj/meson.build b/src/plugins/obj/meson.build
+index 1da48f4..3512a1d 100644
+--- a/src/plugins/obj/meson.build
++++ b/src/plugins/obj/meson.build
+@@ -57,6 +57,32 @@ else
+     message('Could not find CUObjClient Library. Skipping S3 Accelerated engines')
+ endif
+ 
++# The ROCm S3-over-RDMA engine. It needs s3_accel/{client,engine_impl} too,
++# which the cuObject branch above also adds -- so guard against adding them
++# twice when both are present, which is a build no one has yet but nothing
++# here forbids.
++if hipobj_dep.found()
++    message('Found hipObject. Enabling the hipobj S3 Accelerated engine')
++    if not cuobj_dep.found()
++        obj_sources += [
++            's3_accel/client.cpp',
++            's3_accel/client.h',
++            's3_accel/engine_impl.cpp',
++            's3_accel/engine_impl.h',
++        ]
++    endif
++    obj_sources += [
++        's3_accel/amd/client.cpp',
++        's3_accel/amd/client.h',
++        's3_accel/amd/engine_impl.cpp',
++        's3_accel/amd/engine_impl.h',
++        's3_accel/amd/rdma_interface.h',
++    ]
++    plugin_deps += [ hipobj_dep ]
++else
++    message('Could not find hipObject. Skipping the hipobj S3 Accelerated engine')
++endif
++
+ if 'OBJ' in static_plugins
+     obj_backend_lib = static_library(
+         'OBJ',
+diff --git a/src/plugins/obj/s3_accel/amd/client.cpp b/src/plugins/obj/s3_accel/amd/client.cpp
+new file mode 100644
+index 0000000..99276c7
+--- /dev/null
++++ b/src/plugins/obj/s3_accel/amd/client.cpp
+@@ -0,0 +1,182 @@
++/*
++ * SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include "client.h"
++#include "object/s3/utils.h"
++#include <aws/s3/model/PutObjectRequest.h>
++#include <aws/s3/model/GetObjectRequest.h>
++#include <aws/core/http/HttpResponse.h>
++#include <absl/strings/str_format.h>
++#include <memory>
++#include <string>
++#include "common/nixl_log.h"
++
++namespace {
++
++/// The request header that carries the client's registered-buffer token.
++constexpr const char *kRdmaTokenHeader = "x-amz-rdma-token";
++/// The response header in which the server says what it did with it.
++constexpr const char *kRdmaReplyHeader = "x-amz-rdma-reply";
++
++/**
++ * Arrange for the x-amz-rdma-reply header to survive into the completion
++ * callback.
++ *
++ * The AWS SDK's generated result types expose only the headers the S3 model
++ * knows about -- GetObjectResult has accessors for Content-Range and the
++ * x-amz-meta-* map and nothing else, and an unmodelled header is parsed and
++ * dropped. The headers-received event handler is the one place the raw
++ * HttpResponse is reachable, so the reply is copied out there and read later.
++ *
++ * The handler runs on the HTTP transfer thread and the completion callback
++ * runs after the response is complete, so the shared string is written before
++ * it is read.
++ *
++ * @return The shared slot the handler will fill
++ */
++std::shared_ptr<std::string>
++captureRdmaReply(Aws::AmazonWebServiceRequest &request) {
++    auto reply = std::make_shared<std::string>();
++    request.SetHeadersReceivedEventHandler(
++        [reply](const Aws::Http::HttpRequest *, Aws::Http::HttpResponse *response) {
++            if (response != nullptr && response->HasHeader(kRdmaReplyHeader)) {
++                *reply = response->GetHeader(kRdmaReplyHeader);
++            }
++        });
++    return reply;
++}
++
++} // namespace
++
++awsS3HipObjClient::awsS3HipObjClient(nixl_b_params_t *custom_params,
++                                     std::shared_ptr<Aws::Utils::Threading::Executor> executor)
++    : awsS3AccelClient(custom_params, executor) {
++    NIXL_DEBUG << "Initialized hipObject S3 RDMA client";
++}
++
++void
++awsS3HipObjClient::putObjectRdmaAsync(std::string_view key,
++                                      size_t data_len,
++                                      size_t offset,
++                                      std::string_view rdma_token,
++                                      rdma_object_callback_t callback) {
++    NIXL_DEBUG << absl::StrFormat(
++        "putObjectRdmaAsync: key=%s, data_len=%zu, offset=%zu, token_len=%zu",
++        std::string(key).c_str(),
++        data_len,
++        offset,
++        rdma_token.size());
++
++    if (data_len == 0) {
++        NIXL_ERROR << "putObjectRdmaAsync: data_len is 0";
++        callback(false, "");
++        return;
++    }
++
++    if (rdma_token.empty()) {
++        NIXL_ERROR << "putObjectRdmaAsync: rdma_token is empty";
++        callback(false, "");
++        return;
++    }
++
++    Aws::S3::Model::PutObjectRequest request;
++    request.WithBucket(bucketName_).WithKey(Aws::String(key));
++    request.SetAdditionalCustomHeaderValue(kRdmaTokenHeader, std::string(rdma_token));
++
++    // The payload does not travel in the body -- the server RDMA READs it out
++    // of the buffer the token names -- so the body is empty and must be
++    // declared so, or the SDK waits for a stream that never comes.
++    request.SetContentLength(0);
++
++    // Where the data goes within the object. hipObject deliberately sends no
++    // object offset of its own (the token describes the client buffer, not the
++    // object), so saying so is the request's job. S3 PutObject has no ranged
++    // form, so a non-zero offset here has no way to be expressed.
++    if (offset != 0) {
++        NIXL_ERROR << absl::StrFormat(
++            "putObjectRdmaAsync: object offset %zu is not expressible in a PutObject request",
++            offset);
++        callback(false, "");
++        return;
++    }
++
++    auto reply = captureRdmaReply(request);
++
++    s3Client_->PutObjectAsync(
++        request,
++        [callback, reply](const Aws::S3::S3Client *,
++                          const Aws::S3::Model::PutObjectRequest &,
++                          const Aws::S3::Model::PutObjectOutcome &outcome,
++                          const std::shared_ptr<const Aws::Client::AsyncCallerContext> &) {
++            if (!outcome.IsSuccess()) {
++                const auto &error = outcome.GetError();
++                NIXL_ERROR << absl::StrFormat("putObjectRdmaAsync: PutObject failed - %s: %s "
++                                              "(HTTP %d)",
++                                              error.GetExceptionName().c_str(),
++                                              error.GetMessage().c_str(),
++                                              static_cast<int>(error.GetResponseCode()));
++            }
++            callback(outcome.IsSuccess(), *reply);
++        },
++        nullptr);
++}
++
++void
++awsS3HipObjClient::getObjectRdmaAsync(std::string_view key,
++                                      size_t data_len,
++                                      size_t offset,
++                                      std::string_view rdma_token,
++                                      rdma_object_callback_t callback) {
++    NIXL_DEBUG << absl::StrFormat(
++        "getObjectRdmaAsync: key=%s, data_len=%zu, offset=%zu, token_len=%zu",
++        std::string(key).c_str(),
++        data_len,
++        offset,
++        rdma_token.size());
++
++    if (data_len == 0) {
++        NIXL_ERROR << "getObjectRdmaAsync: data_len is 0";
++        callback(false, "");
++        return;
++    }
++
++    if (offset > (SIZE_MAX - (data_len - 1))) {
++        NIXL_ERROR << "getObjectRdmaAsync: offset + data_len would overflow";
++        callback(false, "");
++        return;
++    }
++
++    if (rdma_token.empty()) {
++        NIXL_ERROR << "getObjectRdmaAsync: rdma_token is empty";
++        callback(false, "");
++        return;
++    }
++
++    Aws::S3::Model::GetObjectRequest request;
++    request.WithBucket(bucketName_)
++        .WithKey(Aws::String(key))
++        .WithRange(absl::StrFormat("bytes=%zu-%zu", offset, offset + data_len - 1));
++    request.SetAdditionalCustomHeaderValue(kRdmaTokenHeader, std::string(rdma_token));
++
++    auto reply = captureRdmaReply(request);
++
++    s3Client_->GetObjectAsync(
++        request,
++        [callback, reply](const Aws::S3::S3Client *,
++                          const Aws::S3::Model::GetObjectRequest &,
++                          const Aws::S3::Model::GetObjectOutcome &outcome,
++                          const std::shared_ptr<const Aws::Client::AsyncCallerContext> &) {
++            if (!outcome.IsSuccess()) {
++                const auto &error = outcome.GetError();
++                NIXL_ERROR << absl::StrFormat("getObjectRdmaAsync: GetObject failed - %s: %s "
++                                              "(HTTP %d)",
++                                              error.GetExceptionName().c_str(),
++                                              error.GetMessage().c_str(),
++                                              static_cast<int>(error.GetResponseCode()));
++            }
++            callback(outcome.IsSuccess(), *reply);
++        },
++        nullptr);
++}
+diff --git a/src/plugins/obj/s3_accel/amd/client.h b/src/plugins/obj/s3_accel/amd/client.h
+new file mode 100644
+index 0000000..36ab8e4
+--- /dev/null
++++ b/src/plugins/obj/s3_accel/amd/client.h
+@@ -0,0 +1,48 @@
++/*
++ * SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#ifndef NIXL_OBJ_PLUGIN_S3_HIPOBJ_CLIENT_H
++#define NIXL_OBJ_PLUGIN_S3_HIPOBJ_CLIENT_H
++
++#include "s3_accel/client.h"
++#include "s3_accel/amd/rdma_interface.h"
++
++/**
++ * S3 client that speaks the cuObject/hipObject RDMA protocol.
++ *
++ * The AMD counterpart of awsS3DellObsClient. The difference is not only the
++ * header name -- Dell's x-rdma-info against this one's x-amz-rdma-token -- but
++ * that this protocol answers: the server reports what it did with the token in
++ * an x-amz-rdma-reply header, including declining RDMA altogether, and the
++ * caller has to read it. See rdma_interface.h.
++ */
++class awsS3HipObjClient : public awsS3AccelClient, public iHipObjS3RdmaClient {
++public:
++    /**
++     * @param custom_params Custom parameters containing S3 configuration
++     * @param executor Optional executor for async operations
++     */
++    explicit awsS3HipObjClient(
++        nixl_b_params_t *custom_params,
++        std::shared_ptr<Aws::Utils::Threading::Executor> executor = nullptr);
++
++    ~awsS3HipObjClient() override = default;
++
++    void
++    putObjectRdmaAsync(std::string_view key,
++                       size_t data_len,
++                       size_t offset,
++                       std::string_view rdma_token,
++                       rdma_object_callback_t callback) override;
++
++    void
++    getObjectRdmaAsync(std::string_view key,
++                       size_t data_len,
++                       size_t offset,
++                       std::string_view rdma_token,
++                       rdma_object_callback_t callback) override;
++};
++
++#endif // NIXL_OBJ_PLUGIN_S3_HIPOBJ_CLIENT_H
+diff --git a/src/plugins/obj/s3_accel/amd/engine_impl.cpp b/src/plugins/obj/s3_accel/amd/engine_impl.cpp
+new file mode 100644
+index 0000000..6d56469
+--- /dev/null
++++ b/src/plugins/obj/s3_accel/amd/engine_impl.cpp
+@@ -0,0 +1,576 @@
++/*
++ * SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include "engine_impl.h"
++#include "client.h"
++#include "rdma_interface.h"
++#include "common/backend.h"
++#include "common/nixl_log.h"
++#include <absl/strings/str_format.h>
++#include <hipobj/hipobj.h>
++#include <algorithm>
++#include <chrono>
++#include <future>
++#include <memory>
++#include <cctype>
++#include <string>
++#include <vector>
++
++#include "obj_engine_registry.h"
++
++namespace {
++
++objAccelEngineRegistrar reg_hipobj(
++    "hipobj",
++    [](const nixlBackendInitParams *p) { return std::make_unique<S3HipObjEngineImpl>(p); },
++    [](const nixlBackendInitParams *p, std::shared_ptr<iS3Client> s3, std::shared_ptr<iS3Client>) {
++        return std::make_unique<S3HipObjEngineImpl>(p, std::move(s3));
++    });
++
++/**
++ * Render a hipObject error for a log line. The HIP error is only meaningful
++ * when the failure came from HIP, so it is printed only when set.
++ */
++std::string
++hipObjErrStr(hipObjError_t err) {
++    const char *op = hipObjGetErrorString(err.opError);
++    if (err.hipError == 0) {
++        return op != nullptr ? op : "unknown";
++    }
++    return absl::StrFormat("%s (hip %d)", op != nullptr ? op : "unknown", err.hipError);
++}
++
++/**
++ * Release a token minted by hipObjGetRdmaToken(). The library allocated it and
++ * only it can free it, so this is the deleter rather than delete[].
++ */
++struct hipObjTokenDeleter {
++    void
++    operator()(char *token) const noexcept {
++        if (token != nullptr) {
++            (void)hipObjPutRdmaToken(token);
++        }
++    }
++};
++
++using hipObjTokenPtr = std::unique_ptr<char, hipObjTokenDeleter>;
++
++/**
++ * Validate parameters for prepXfer. Identical in substance to the Dell
++ * engine's check: the local side is memory, the remote side is an object.
++ */
++bool
++isValidPrepXferParams(const nixl_xfer_op_t &operation,
++                      const nixl_meta_dlist_t &local,
++                      const nixl_meta_dlist_t &remote,
++                      const std::string &remote_agent,
++                      const std::string &local_agent) {
++    if (operation != NIXL_WRITE && operation != NIXL_READ) {
++        NIXL_ERROR << absl::StrFormat("Invalid operation type: %d", operation);
++        return false;
++    }
++
++    if (remote_agent != local_agent) {
++        NIXL_WARN << absl::StrFormat(
++            "Remote agent doesn't match the requesting agent (%s). Got %s",
++            local_agent,
++            remote_agent);
++    }
++
++    if ((local.getType() != DRAM_SEG) && (local.getType() != VRAM_SEG)) {
++        NIXL_ERROR << absl::StrFormat("Local memory type must be VRAM_SEG or DRAM_SEG, got %d",
++                                      local.getType());
++        return false;
++    }
++
++    if (remote.getType() != OBJ_SEG) {
++        NIXL_ERROR << absl::StrFormat("Remote memory type must be OBJ_SEG, got %d",
++                                      remote.getType());
++        return false;
++    }
++
++    if (local.descCount() != remote.descCount()) {
++        NIXL_ERROR << absl::StrFormat(
++            "Local and remote descriptor counts must match. Got %d local, %d remote",
++            local.descCount(),
++            remote.descCount());
++        return false;
++    }
++
++    return true;
++}
++
++/**
++ * One descriptor's worth of transfer: the buffer, where in the object it goes,
++ * and the token that names the buffer to the server.
++ */
++struct hipObjTransferReq {
++    uintptr_t addr = 0;
++    size_t size = 0;
++    size_t offset = 0;
++    std::string obj_key;
++    hipObjTokenPtr token;
++};
++
++/**
++ * Backend request handle. Holds the per-descriptor requests, whose tokens it
++ * owns, and the futures that bridge the S3 client's callbacks to NIXL's
++ * polling interface.
++ */
++class nixlHipObjBackendReqH : public nixlBackendReqH {
++public:
++    std::vector<hipObjTransferReq> reqs_;
++    std::vector<std::future<nixl_status_t>> statusFutures_;
++
++    nixlHipObjBackendReqH() = default;
++    ~nixlHipObjBackendReqH() = default;
++
++    /**
++     * First error wins; otherwise NIXL_IN_PROG while any future is pending,
++     * and NIXL_SUCCESS once all have completed.
++     */
++    nixl_status_t
++    getOverallStatus() {
++        bool has_pending = false;
++        auto it = statusFutures_.begin();
++        while (it != statusFutures_.end()) {
++            if (it->wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
++                auto current_status = it->get();
++                if (current_status != NIXL_SUCCESS) {
++                    statusFutures_.clear();
++                    return current_status;
++                }
++                it = statusFutures_.erase(it);
++            } else {
++                ++it;
++                has_pending = true;
++            }
++        }
++        return has_pending ? NIXL_IN_PROG : NIXL_SUCCESS;
++    }
++};
++
++/**
++ * Metadata for a registered object or memory region.
++ */
++class nixlHipObjMetadata : public nixlBackendMD {
++public:
++    /// For object segments.
++    nixlHipObjMetadata(nixl_mem_t nixl_mem, uint64_t dev_id, std::string obj_key)
++        : nixlBackendMD(true),
++          nixlMem(nixl_mem),
++          devId(dev_id),
++          objKey(std::move(obj_key)),
++          localAddr(0),
++          localLen(0) {}
++
++    /// For DRAM/VRAM segments.
++    nixlHipObjMetadata(nixl_mem_t nixl_mem, uintptr_t addr, size_t len)
++        : nixlBackendMD(true),
++          nixlMem(nixl_mem),
++          devId(0),
++          localAddr(addr),
++          localLen(len) {}
++
++    ~nixlHipObjMetadata() = default;
++
++    nixl_mem_t nixlMem;
++    uint64_t devId;
++    std::string objKey;
++    uintptr_t localAddr;
++    size_t localLen;
++};
++
++/**
++ * Decide what the server's x-amz-rdma-reply means.
++ *
++ * An absent header is the awkward case. A server that never saw the token
++ * answers a normal 200 with a normal body, having moved nothing by RDMA, and
++ * the registered buffer still holds whatever it held before. Treating that as
++ * success would report a transfer that did not happen, so it is an error here.
++ *
++ * @param reply The raw header value, or empty if there was none
++ * @return NIXL_SUCCESS, or the error the reply describes
++ */
++nixl_status_t
++statusFromRdmaReply(const std::string &reply) {
++    if (reply.empty()) {
++        NIXL_ERROR << "S3 response carried no x-amz-rdma-reply header: the server does not "
++                      "speak the RDMA object protocol, and no data was transferred by RDMA";
++        return NIXL_ERR_BACKEND;
++    }
++
++    int http_code = 0;
++    const hipObjError_t err = hipObjParseRdmaReply(reply.c_str(), reply.size(), &http_code);
++    if (err.opError != hipObjSuccess) {
++        // THE TWO SPECS DISAGREE, AND THIS IS THE SEAM.
++        //
++        // hipObject's docs/interop.rst says the only token-bearing form of
++        // x-amz-rdma-reply is "200:<88-hex>", and its parser enforces exactly
++        // that -- a status it does not recognise, or a token after any status
++        // but 200, is rejected outright rather than reported.
++        //
++        // rocm-ernic's S3 server answers a ranged GET with "206:<88-hex>",
++        // which is the correct HTTP status for a Range request and which
++        // hipObject's own public header lists among the codes a reply may
++        // carry (200, 204, 206, 501). So a GET that completed perfectly well
++        // arrives here as hipObjInvalidValue.
++        //
++        // Reading the leading status ourselves rather than failing is the
++        // right call for a client: the transfer succeeded, the server said so,
++        // and the disagreement is about which statuses may be accompanied by a
++        // peer token -- which this engine does not use. The token is ignored
++        // either way.
++        const size_t colon = reply.find(':');
++        const std::string_view status(reply.data(), colon == std::string::npos ? reply.size() :
++                                                                                 colon);
++        if (status.size() != 3 ||
++            std::any_of(status.begin(), status.end(), [](char c) { return !isdigit(c); })) {
++            NIXL_ERROR << "Could not parse x-amz-rdma-reply '" << reply << "': "
++                       << hipObjErrStr(err);
++            return NIXL_ERR_BACKEND;
++        }
++        http_code = std::stoi(std::string(status));
++        NIXL_DEBUG << "hipObjParseRdmaReply rejected '" << reply << "'; read status " << http_code
++                   << " directly";
++    }
++
++    if (http_code == HIPOBJ_RDMA_REPLY_NOT_IMPLEMENTED) {
++        NIXL_ERROR << "Server declined RDMA (x-amz-rdma-reply 501) and fell back to HTTP, which "
++                      "this engine cannot consume: no data reached the registered buffer";
++        return NIXL_ERR_BACKEND;
++    }
++
++    // 200, 204 and 206 all mean the server completed the RDMA side.
++    if (http_code != 200 && http_code != 204 && http_code != 206) {
++        NIXL_ERROR << "Server reported x-amz-rdma-reply " << http_code;
++        return NIXL_ERR_BACKEND;
++    }
++
++    return NIXL_SUCCESS;
++}
++
++} // namespace
++
++S3HipObjEngineImpl::S3HipObjEngineImpl(const nixlBackendInitParams *init_params)
++    : S3AccelObjEngineImpl(init_params) {
++    init(init_params, nullptr);
++}
++
++S3HipObjEngineImpl::S3HipObjEngineImpl(const nixlBackendInitParams *init_params,
++                                       std::shared_ptr<iS3Client> s3_client)
++    : S3AccelObjEngineImpl(init_params, s3_client) {
++    init(init_params, std::move(s3_client));
++}
++
++void
++S3HipObjEngineImpl::init(const nixlBackendInitParams *init_params,
++                         std::shared_ptr<iS3Client> s3_client) {
++    // An RDMA GET answers with an empty body and delivers the payload out of
++    // band, so the SDK's body-checksum validation has nothing to check and
++    // fails whenever the server sends checksum headers. The Dell engine
++    // disables it for the same reason; RoCEv2's iCRC covers the wire.
++    nixl_b_params_t *params_to_use = init_params->customParams;
++    nixl_b_params_t local_params;
++    if (!init_params->customParams) {
++        local_params["resp_checksum"] = "required";
++        params_to_use = &local_params;
++    } else {
++        init_params->customParams->emplace("resp_checksum", "required");
++    }
++
++    s3Client_ = s3_client ? std::move(s3_client) :
++                            std::make_shared<awsS3HipObjClient>(params_to_use, executor_);
++
++    // gpuDevice -1 lets hipObject pick the NIC closest to the calling thread's
++    // current device, which is the right default under nixlbench. nicHint is
++    // the escape hatch for a host whose topology lookup cannot choose, and the
++    // only way to select a NIC on a host with no GPU at all.
++    const int gpu_device = nixl::getBackendParamDefaulted<int>(params_to_use, "hipobj_gpu", -1);
++    const std::string nic_hint =
++        nixl::getBackendParamDefaulted<std::string>(params_to_use, "hipobj_nic", "");
++
++    hipObjConfig_t config = {};
++    config.gpuDevice = gpu_device;
++    config.nicHint = nic_hint.empty() ? nullptr : nic_hint.c_str();
++
++    const hipObjError_t err = hipObjInit(&config);
++    if (err.opError == hipObjSuccess) {
++        ownsHipObjInit_ = true;
++        hipObjReady_ = true;
++    } else if (err.opError == hipObjAlreadyInitialized) {
++        // hipObject is initialised once per process. A second engine in the
++        // same process shares it and must not shut it down underneath the
++        // first, so it does not take ownership.
++        hipObjReady_ = true;
++        NIXL_DEBUG << "hipObject was already initialized; sharing it";
++    } else {
++        NIXL_ERROR << "hipObjInit failed: " << hipObjErrStr(err);
++        return;
++    }
++
++    NIXL_INFO << "Object storage backend initialized with hipObject S3 RDMA client ("
++              << hipObjGetVersionString() << ", gpu=" << gpu_device
++              << ", nic=" << (nic_hint.empty() ? "auto" : nic_hint) << ")";
++}
++
++S3HipObjEngineImpl::~S3HipObjEngineImpl() {
++    if (ownsHipObjInit_) {
++        (void)hipObjShutdown();
++    }
++}
++
++nixl_status_t
++S3HipObjEngineImpl::registerMem(const nixlBlobDesc &mem,
++                                const nixl_mem_t &nixl_mem,
++                                nixlBackendMD *&out) {
++    if (!hipObjReady_) {
++        NIXL_ERROR << "hipObject is not initialized";
++        return NIXL_ERR_BACKEND;
++    }
++
++    const auto supported_mems = {OBJ_SEG, DRAM_SEG, VRAM_SEG};
++    if (std::find(supported_mems.begin(), supported_mems.end(), nixl_mem) ==
++        supported_mems.end()) {
++        return NIXL_ERR_NOT_SUPPORTED;
++    }
++
++    if (nixl_mem == OBJ_SEG) {
++        auto obj_md = std::make_unique<nixlHipObjMetadata>(
++            nixl_mem, mem.devId, mem.metaInfo.empty() ? std::to_string(mem.devId) : mem.metaInfo);
++        devIdToObjKey_[mem.devId] = obj_md->objKey;
++        out = obj_md.release();
++        return NIXL_SUCCESS;
++    }
++
++    NIXL_DEBUG << absl::StrFormat(
++        "registerMem: addr=0x%x, len=%zu, nixl_mem=%d", mem.addr, mem.len, nixl_mem);
++
++    auto mem_md = std::make_unique<nixlHipObjMetadata>(nixl_mem, mem.addr, mem.len);
++
++    // VRAM goes through hipObjBufRegister, which tries dmabuf first and falls
++    // back to a host staging buffer when the NIC cannot reach device memory.
++    // DRAM has its own entry point and never stages.
++    void *ptr = reinterpret_cast<void *>(mem.addr);
++    const hipObjError_t err = (nixl_mem == VRAM_SEG) ? hipObjBufRegister(ptr, mem.len) :
++                                                       hipObjBufRegisterHost(ptr, mem.len);
++    if (err.opError != hipObjSuccess) {
++        NIXL_ERROR << "hipObjBufRegister failed for " << mem.len
++                   << " bytes: " << hipObjErrStr(err);
++        return (err.opError == hipObjSizeTooLarge) ? NIXL_ERR_NOT_SUPPORTED : NIXL_ERR_BACKEND;
++    }
++
++    registeredBufs_[mem.addr] = mem.len;
++    out = mem_md.release();
++    return NIXL_SUCCESS;
++}
++
++nixl_status_t
++S3HipObjEngineImpl::deregisterMem(nixlBackendMD *meta) {
++    auto *md = static_cast<nixlHipObjMetadata *>(meta);
++    if (md == nullptr) {
++        return NIXL_SUCCESS;
++    }
++
++    std::unique_ptr<nixlHipObjMetadata> owned(md);
++
++    if (md->nixlMem == OBJ_SEG) {
++        devIdToObjKey_.erase(md->devId);
++        return NIXL_SUCCESS;
++    }
++
++    const hipObjError_t err =
++        hipObjBufDeregister(reinterpret_cast<void *>(md->localAddr));
++    if (err.opError != hipObjSuccess) {
++        NIXL_ERROR << "hipObjBufDeregister failed: " << hipObjErrStr(err);
++        // The registration is still live, so the metadata must stay valid for
++        // the caller to retry with. Hand ownership back.
++        owned.release();
++        return NIXL_ERR_BACKEND;
++    }
++
++    registeredBufs_.erase(md->localAddr);
++    return NIXL_SUCCESS;
++}
++
++nixl_status_t
++S3HipObjEngineImpl::prepXfer(const nixl_xfer_op_t &operation,
++                             const nixl_meta_dlist_t &local,
++                             const nixl_meta_dlist_t &remote,
++                             const std::string &remote_agent,
++                             const std::string &local_agent,
++                             nixlBackendReqH *&handle,
++                             const nixl_opt_b_args_t *opt_args) const {
++    if (!hipObjReady_) {
++        NIXL_ERROR << "hipObject is not initialized";
++        return NIXL_ERR_BACKEND;
++    }
++
++    if (!isValidPrepXferParams(operation, local, remote, remote_agent, local_agent)) {
++        return NIXL_ERR_INVALID_PARAM;
++    }
++
++    auto req_h = std::make_unique<nixlHipObjBackendReqH>();
++
++    for (int i = 0; i < local.descCount(); ++i) {
++        hipObjTransferReq req;
++        req.addr = local[i].addr;
++        req.size = local[i].len;
++        req.offset = remote[i].addr;
++
++        const auto obj_key_search = devIdToObjKey_.find(remote[i].devId);
++        if (obj_key_search == devIdToObjKey_.end()) {
++            NIXL_ERROR << "The object segment key " << remote[i].devId
++                       << " is not registered with the backend";
++            return NIXL_ERR_INVALID_PARAM;
++        }
++        req.obj_key = obj_key_search->second;
++
++        // See limit 1 in the class comment: the token always describes the
++        // registration's base, so a descriptor that starts anywhere else would
++        // silently name the wrong memory.
++        const auto reg = registeredBufs_.find(req.addr);
++        if (reg == registeredBufs_.end()) {
++            NIXL_ERROR << absl::StrFormat(
++                "Transfer must start at the base of a registered buffer; 0x%x is not one. "
++                "hipObjGetRdmaToken() cannot describe an offset into a registration.",
++                req.addr);
++            return NIXL_ERR_INVALID_PARAM;
++        }
++        if (req.size > reg->second) {
++            NIXL_ERROR << absl::StrFormat("Transfer of %zu bytes exceeds the %zu-byte "
++                                          "registration at 0x%x",
++                                          req.size,
++                                          reg->second,
++                                          req.addr);
++            return NIXL_ERR_INVALID_PARAM;
++        }
++
++        const int op = (operation == NIXL_WRITE) ? HIPOBJ_RDMA_OP_PUT : HIPOBJ_RDMA_OP_GET;
++        char *token = nullptr;
++        const hipObjError_t err =
++            hipObjGetRdmaToken(reinterpret_cast<void *>(req.addr), req.size, op, &token);
++        if (err.opError != hipObjSuccess) {
++            NIXL_ERROR << "hipObjGetRdmaToken failed: " << hipObjErrStr(err);
++            return NIXL_ERR_BACKEND;
++        }
++        req.token.reset(token);
++
++        req_h->reqs_.push_back(std::move(req));
++    }
++
++    handle = req_h.release();
++    return NIXL_SUCCESS;
++}
++
++nixl_status_t
++S3HipObjEngineImpl::postXfer(const nixl_xfer_op_t &operation,
++                             const nixl_meta_dlist_t &local,
++                             const nixl_meta_dlist_t &remote,
++                             const std::string &remote_agent,
++                             nixlBackendReqH *&handle,
++                             const nixl_opt_b_args_t *opt_args) const {
++    if (handle == nullptr) {
++        NIXL_ERROR << "transfer request handle is null";
++        return NIXL_ERR_INVALID_PARAM;
++    }
++
++    auto *req_h = static_cast<nixlHipObjBackendReqH *>(handle);
++
++    auto *rdma_client = dynamic_cast<iHipObjS3RdmaClient *>(s3Client_.get());
++    if (rdma_client == nullptr) {
++        NIXL_ERROR << "hipObject RDMA operations require an iHipObjS3RdmaClient";
++        return NIXL_ERR_BACKEND;
++    }
++
++    for (const auto &req : req_h->reqs_) {
++        auto status_promise = std::make_shared<std::promise<nixl_status_t>>();
++        req_h->statusFutures_.push_back(status_promise->get_future());
++
++        const std::string_view token(req.token.get());
++
++        if (operation == NIXL_WRITE) {
++            // When hipObject staged this buffer through host memory, the
++            // server will RDMA READ the staging copy, so the device's contents
++            // have to be there first. A no-op, reporting success, for a buffer
++            // the NIC registered directly.
++            const hipObjError_t sync = hipObjBufSync(
++                reinterpret_cast<void *>(req.addr), req.size, 0, HIPOBJ_SYNC_TO_HOST);
++            if (sync.opError != hipObjSuccess) {
++                NIXL_ERROR << "hipObjBufSync to host failed: " << hipObjErrStr(sync);
++                status_promise->set_value(NIXL_ERR_BACKEND);
++                continue;
++            }
++
++            rdma_client->putObjectRdmaAsync(
++                req.obj_key,
++                req.size,
++                req.offset,
++                token,
++                [status_promise](bool success, std::string reply) {
++                    status_promise->set_value(success ? statusFromRdmaReply(reply) :
++                                                        NIXL_ERR_BACKEND);
++                });
++        } else {
++            // The mirror image: the payload lands in the staging buffer, so it
++            // has to be copied up to the device before the transfer can be
++            // called complete. Doing it here, inside the completion callback,
++            // is what keeps checkXfer()'s NIXL_SUCCESS meaning "the data is
++            // where the caller asked for it".
++            const uintptr_t addr = req.addr;
++            const size_t size = req.size;
++            rdma_client->getObjectRdmaAsync(
++                req.obj_key,
++                req.size,
++                req.offset,
++                token,
++                [status_promise, addr, size](bool success, std::string reply) {
++                    if (!success) {
++                        status_promise->set_value(NIXL_ERR_BACKEND);
++                        return;
++                    }
++                    const nixl_status_t status = statusFromRdmaReply(reply);
++                    if (status != NIXL_SUCCESS) {
++                        status_promise->set_value(status);
++                        return;
++                    }
++                    const hipObjError_t sync = hipObjBufSync(
++                        reinterpret_cast<void *>(addr), size, 0, HIPOBJ_SYNC_TO_DEVICE);
++                    if (sync.opError != hipObjSuccess) {
++                        NIXL_ERROR << "hipObjBufSync to device failed: " << hipObjErrStr(sync);
++                        status_promise->set_value(NIXL_ERR_BACKEND);
++                        return;
++                    }
++                    status_promise->set_value(NIXL_SUCCESS);
++                });
++        }
++    }
++
++    return NIXL_IN_PROG;
++}
++
++nixl_status_t
++S3HipObjEngineImpl::checkXfer(nixlBackendReqH *handle) const {
++    if (handle == nullptr) {
++        NIXL_ERROR << "transfer request handle is null";
++        return NIXL_ERR_INVALID_PARAM;
++    }
++    return static_cast<nixlHipObjBackendReqH *>(handle)->getOverallStatus();
++}
++
++nixl_status_t
++S3HipObjEngineImpl::releaseReqH(nixlBackendReqH *handle) const {
++    if (handle == nullptr) {
++        NIXL_ERROR << "transfer request handle is null";
++        return NIXL_ERR_INVALID_PARAM;
++    }
++    delete static_cast<nixlHipObjBackendReqH *>(handle);
++    return NIXL_SUCCESS;
++}
++
++iS3Client *
++S3HipObjEngineImpl::getClient() const {
++    return s3Client_.get();
++}
+diff --git a/src/plugins/obj/s3_accel/amd/engine_impl.h b/src/plugins/obj/s3_accel/amd/engine_impl.h
+new file mode 100644
+index 0000000..0947fe8
+--- /dev/null
++++ b/src/plugins/obj/s3_accel/amd/engine_impl.h
+@@ -0,0 +1,146 @@
++/*
++ * SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#ifndef NIXL_OBJ_PLUGIN_S3_HIPOBJ_ENGINE_IMPL_H
++#define NIXL_OBJ_PLUGIN_S3_HIPOBJ_ENGINE_IMPL_H
++
++#include "s3_accel/engine_impl.h"
++#include "s3_accel/amd/client.h"
++#include <cstdint>
++#include <unordered_map>
++
++/**
++ * S3-over-RDMA engine on ROCm, built on hipObject.
++ *
++ * This is the AMD counterpart of S3DellObsObjEngineImpl, and the shape is the
++ * same because the protocol is: register a buffer with the NIC, mint a token
++ * that describes it, send an otherwise ordinary S3 request carrying that
++ * token, and let the server move the payload by RDMA instead of in the HTTP
++ * body. Where Dell's engine calls cuObject and sends x-rdma-info, this one
++ * calls hipObject and sends x-amz-rdma-token -- the header cuObject v1.2.0
++ * introduced and hipObject speaks on the client side.
++ *
++ * It is selected with `accelerated=true` and `type=hipobj` in the backend's
++ * custom parameters.
++ *
++ * TWO LIMITS WORTH KNOWING, both from hipObject rather than from here:
++ *
++ * 1. A transfer must start at the base of a registered buffer.
++ *    hipObjGetRdmaToken() looks the buffer up by exact pointer and mints the
++ *    token for [devPtr, devPtr + size) -- it passes offset 0 internally and
++ *    has no parameter for anything else, unlike hipObjGet()/hipObjPut().
++ *    A descriptor pointing into the middle of a registration would therefore
++ *    yield a token naming the base, and the server would RDMA to the wrong
++ *    address, so prepXfer() refuses it instead.
++ *
++ * 2. A PUT writes the whole object.  hipObject sends no object offset, and
++ *    S3 PutObject has no ranged form, so there is nowhere for one to go. GET
++ *    is unaffected: the Range header carries it.
++ */
++class S3HipObjEngineImpl : public S3AccelObjEngineImpl {
++public:
++    /**
++     * Initialises hipObject and creates the RDMA-capable S3 client.
++     *
++     * @param init_params Backend initialization parameters
++     */
++    explicit S3HipObjEngineImpl(const nixlBackendInitParams *init_params);
++
++    /**
++     * Constructor that accepts an injected S3 client (for testing).
++     *
++     * @param init_params Backend initialization parameters
++     * @param s3_client Pre-configured S3 client (can be mock for testing)
++     */
++    S3HipObjEngineImpl(const nixlBackendInitParams *init_params,
++                       std::shared_ptr<iS3Client> s3_client);
++
++    ~S3HipObjEngineImpl() override;
++
++    /**
++     * Register memory with the backend.
++     *
++     * OBJ_SEG records the object key. DRAM_SEG and VRAM_SEG are registered
++     * with the NIC through hipObjBufRegisterHost() and hipObjBufRegister()
++     * respectively; hipObject falls back to a host staging buffer when the
++     * device memory cannot be registered directly, which postXfer() then
++     * synchronises.
++     */
++    nixl_status_t
++    registerMem(const nixlBlobDesc &mem, const nixl_mem_t &nixl_mem, nixlBackendMD *&out) override;
++
++    /**
++     * Deregister memory, releasing the hipObject registration.
++     */
++    nixl_status_t
++    deregisterMem(nixlBackendMD *meta) override;
++
++    /**
++     * Prepare a transfer: resolve the object key and mint one RDMA token per
++     * descriptor. The tokens live on the request handle and are released with
++     * it.
++     */
++    nixl_status_t
++    prepXfer(const nixl_xfer_op_t &operation,
++             const nixl_meta_dlist_t &local,
++             const nixl_meta_dlist_t &remote,
++             const std::string &remote_agent,
++             const std::string &local_agent,
++             nixlBackendReqH *&handle,
++             const nixl_opt_b_args_t *opt_args) const override;
++
++    /**
++     * Post the S3 requests that carry the tokens, staging the buffer to host
++     * memory first on a write and back to the device on a read when hipObject
++     * is staging (a no-op when it is not).
++     */
++    nixl_status_t
++    postXfer(const nixl_xfer_op_t &operation,
++             const nixl_meta_dlist_t &local,
++             const nixl_meta_dlist_t &remote,
++             const std::string &remote_agent,
++             nixlBackendReqH *&handle,
++             const nixl_opt_b_args_t *opt_args = nullptr) const override;
++
++    nixl_status_t
++    checkXfer(nixlBackendReqH *handle) const override;
++
++    nixl_status_t
++    releaseReqH(nixlBackendReqH *handle) const override;
++
++    /**
++     * VRAM_SEG is the point of this engine: the server RDMAs straight into
++     * GPU memory when the NIC can reach it.
++     */
++    nixl_mem_list_t
++    getSupportedMems() const override {
++        return {OBJ_SEG, DRAM_SEG, VRAM_SEG};
++    }
++
++protected:
++    iS3Client *
++    getClient() const override;
++
++private:
++    /**
++     * Bring up hipObject and the RDMA-capable client. Shared by both
++     * constructors, which differ only in whether they were handed a client.
++     */
++    void
++    init(const nixlBackendInitParams *init_params, std::shared_ptr<iS3Client> s3_client);
++
++    /// True when this engine called hipObjInit() and must therefore shut it
++    /// down. hipObject is initialised once per process, so a second engine in
++    /// the same process finds it already up and must leave it that way.
++    bool ownsHipObjInit_ = false;
++    /// True when hipObject is usable; every entry point checks it, because a
++    /// failed init must not look like a working engine.
++    bool hipObjReady_ = false;
++    /// Registered buffer base address -> length, for the base-address check
++    /// that limit 1 above describes.
++    std::unordered_map<uintptr_t, size_t> registeredBufs_;
++};
++
++#endif // NIXL_OBJ_PLUGIN_S3_HIPOBJ_ENGINE_IMPL_H
+diff --git a/src/plugins/obj/s3_accel/amd/rdma_interface.h b/src/plugins/obj/s3_accel/amd/rdma_interface.h
+new file mode 100644
+index 0000000..85d727e
+--- /dev/null
++++ b/src/plugins/obj/s3_accel/amd/rdma_interface.h
+@@ -0,0 +1,79 @@
++/*
++ * SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#ifndef NIXL_OBJ_PLUGIN_S3_HIPOBJ_RDMA_INTERFACE_H
++#define NIXL_OBJ_PLUGIN_S3_HIPOBJ_RDMA_INTERFACE_H
++
++#include <string>
++#include <string_view>
++#include <cstdint>
++#include <functional>
++#include "nixl_types.h"
++
++/**
++ * Completion callback for an RDMA-accelerated S3 request.
++ *
++ * Unlike put_object_callback_t, this carries the x-amz-rdma-reply header back
++ * to the caller. It has to: an S3 server that does not implement the protocol
++ * answers a perfectly valid HTTP 200 with that header set to 501 and an empty
++ * body, having moved no data at all. Reporting only the HTTP status would make
++ * that case indistinguishable from a transfer that succeeded, and the first
++ * symptom would be a buffer full of whatever it held before.
++ *
++ * @param success   Whether the S3 request itself succeeded
++ * @param rdma_reply The x-amz-rdma-reply header value, or empty if absent
++ */
++using rdma_object_callback_t = std::function<void(bool success, std::string rdma_reply)>;
++
++/**
++ * Interface for S3 clients that speak the cuObject/hipObject RDMA protocol:
++ * an ordinary S3 request carrying an x-amz-rdma-token header that describes a
++ * registered client buffer, to which the server RDMA WRITEs (GET) or from
++ * which it RDMA READs (PUT) before answering.
++ */
++class iHipObjS3RdmaClient {
++public:
++    virtual ~iHipObjS3RdmaClient() = default;
++
++    /**
++     * Asynchronously put an object to S3 by RDMA.
++     *
++     * The body is empty -- the server pulls the payload out of the buffer the
++     * token names.
++     *
++     * @param key The object key
++     * @param data_len Number of bytes the server should read
++     * @param offset Offset within the object
++     * @param rdma_token Hex-encoded token from hipObjGetRdmaToken()
++     * @param callback Invoked on completion
++     */
++    virtual void
++    putObjectRdmaAsync(std::string_view key,
++                       size_t data_len,
++                       size_t offset,
++                       std::string_view rdma_token,
++                       rdma_object_callback_t callback) = 0;
++
++    /**
++     * Asynchronously get an object from S3 by RDMA.
++     *
++     * The response body is empty -- the payload arrives in the buffer the
++     * token names, before the headers come back.
++     *
++     * @param key The object key
++     * @param data_len Number of bytes to fetch
++     * @param offset Offset within the object to start from
++     * @param rdma_token Hex-encoded token from hipObjGetRdmaToken()
++     * @param callback Invoked on completion
++     */
++    virtual void
++    getObjectRdmaAsync(std::string_view key,
++                       size_t data_len,
++                       size_t offset,
++                       std::string_view rdma_token,
++                       rdma_object_callback_t callback) = 0;
++};
++
++#endif // NIXL_OBJ_PLUGIN_S3_HIPOBJ_RDMA_INTERFACE_H

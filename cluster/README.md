@@ -125,9 +125,80 @@ make cluster-stack     # export /opt from the slim image, install on each guest
 ```
 
 That puts the artifacts under `/opt/nixl-stack/opt` and adds an
-`ld.so.conf.d` entry. Two system libraries are not in the tarball because they
-come from apt rather than `/opt` -- `libgflags2.2` and `libhwloc15` -- and
-`cluster-stack` installs them.
+`ld.so.conf.d` entry. Three system libraries are not in the tarball because
+they come from apt rather than `/opt` -- `libgflags2.2`, `libhwloc15` and
+`libcurl4t64`, the last being the AWS SDK's HTTP client and so the OBJ
+plugin's -- and `cluster-stack` installs them.
+
+## S3 over RDMA, in one VM
+
+`rocm-ernic`'s `--backend s3` runs an object store, an HTTP endpoint and an
+RDMA data mover inside the server process, so one guest and one rail are a
+complete object fabric: no second VM, no storage backend, and no `--tap`,
+because the control plane is terminated in band on the emulated wire. That is
+what NIXL's OBJ backend talks to here, through the `hipobj` engine
+(`patches/nixl/08`), which is the ROCm counterpart of NIXL's CUDA-only Dell
+one.
+
+```
+make cluster-s3                             # vm4 rail 2 becomes the S3 server
+make cluster-gpu ANSIBLE_ARGS='--limit vm4' # the VM was restarted
+```
+
+Then, in the guest:
+
+```
+nixlbench --backend OBJ \
+    --obj_accelerated_enable=true --obj_accelerated_type=hipobj \
+    --obj_hipobj_nic=rocep3s0 \
+    --obj_endpoint_override=192.168.80.200:9000 --obj_scheme=http \
+    --obj_bucket_name=ernic --obj_access_key=e --obj_secret_key=e \
+    --obj_use_virtual_addressing=false \
+    --op_type WRITE --initiator_seg_type VRAM \
+    --start_block_size 4096 --max_block_size 4194304
+```
+
+`make cluster-s3-restore` puts the rail back in the TCP mesh.
+
+**`--obj_hipobj_nic` is not optional.** hipObject picks its RDMA device by
+proximity to the GPU, and the server reads the client buffer by rkey,
+resolving it in its own MR table -- one emulator owns every registration one
+guest holds. An rkey minted on the other rail's device means nothing to it,
+and the symptom is a 25-second stall and then HTTP 500, "The RDMA read from
+the client buffer did not complete."
+
+**The endpoint needs a host route**, which `make cluster-s3` adds. Every rail
+sits in the same `ERNIC_GUEST_SUBNET` /20, so the endpoint address is on-link
+for all of them, the kernel picks the first, and the request leaves on rail 1
+to a wire with no S3 server on it: "No route to host".
+
+Measured 2026-11-02, vm4 rail 2, GB/s, with `HIPOBJ_REQUIRE_GPU_DIRECT=1` on
+the VRAM runs so a silent fall back to host staging would fail rather than be
+measured:
+
+| Block | WRITE DRAM | WRITE VRAM | READ DRAM | READ VRAM |
+|---|---|---|---|---|
+| 4 KiB | 0.027 | 0.026 | 0.038 | 0.028 |
+| 64 KiB | 0.258 | 0.262 | 0.580 | 0.463 |
+| 1 MiB | 0.558 | 0.559 | 7.32 | 6.20 |
+| 4 MiB | 0.553 | 0.595 | 12.68 | 18.00 |
+
+VRAM is at parity with DRAM, which is the point: the server RDMAs straight
+into GPU memory, through dmabuf, with no staging copy.
+
+Read the two columns differently, though. WRITE latency grows linearly with
+size -- 150 us at 4 KiB to 7.0 ms at 4 MiB -- so the server's RDMA READ really
+is paying per byte. READ latency is flat, 110 to 330 us across three orders of
+magnitude, so those numbers are a fixed HTTP round trip over a push that costs
+the emulator almost nothing. The large READ figures are not fabric bandwidth.
+
+One wrinkle in the harness: nixlbench seeds an object with the real `aws` CLI
+before a READ run, and aws-cli v2's chunk-signed `PutObject` is more HTTP than
+this server's parser implements. `cluster-stack` installs
+`cluster/scripts/aws-curl-shim.sh` as `~/bin/aws` on each guest, which does
+the same three commands with `curl` -- and with multipart above 15 KiB,
+because a whole request is capped at 16 KiB. It touches only the seeding; the
+measured transfer still goes through NIXL and the `x-amz-rdma-token` path.
 
 ## What works here, and what does not
 

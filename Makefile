@@ -183,7 +183,7 @@ DIST := $(REPO_ROOT)/.slurm/run-build.sh
         dist-build-here dist-bench dist-bench-2node \
         cluster-tool cluster-gen cluster-up cluster-down cluster-status \
         cluster-images cluster-boot cluster-ansible cluster-prep cluster-gpu ernic-image \
-        cluster-nvme cluster-stack \
+        cluster-nvme cluster-stack cluster-s3 cluster-s3-restore \
         patch-check patch-list readme readme-check \
         check pins-check print-pin \
         print-tag print-config clean clean-images
@@ -636,3 +636,18 @@ cluster-nvme:
 # `docker buildx bake slim` first.
 cluster-stack:
 	@"$(REPO_ROOT)/cluster/scripts/cluster.sh" stack
+
+# Turn one rail of one VM into an S3-over-RDMA object store, so NIXL's OBJ
+# backend has something to talk to. One guest and one rail are a complete
+# object fabric -- the store, the HTTP endpoint and the RDMA mover all live in
+# the rocm-ernic process. VM= and RAIL= choose which; `restore` puts the rail
+# back in the TCP mesh. Re-probe the GPUs afterwards: the VM is restarted.
+#
+#   make cluster-s3                       # vm4 rail 2 serves S3
+#   make cluster-gpu ANSIBLE_ARGS='--limit vm4'
+#   make cluster-s3-restore               # back to the mesh
+cluster-s3:
+	@VM="$(VM)" RAIL="$(RAIL)" "$(REPO_ROOT)/cluster/scripts/s3-server.sh" start
+
+cluster-s3-restore:
+	@VM="$(VM)" RAIL="$(RAIL)" "$(REPO_ROOT)/cluster/scripts/s3-server.sh" restore

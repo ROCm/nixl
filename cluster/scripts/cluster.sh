@@ -308,8 +308,11 @@ cmd_stack() {
 	# them and the plugins will not resolve without them.
 	cat > "${tmp}/install.sh" <<'INSTALL'
 set -e
+# libcurl4t64 is the AWS SDK's HTTP client and so libplugin_OBJ.so's: the
+# S3-over-RDMA path still speaks ordinary HTTP for the request that carries
+# the x-amz-rdma-token, and only the payload leaves the wire.
 sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-	libgflags2.2 libhwloc15 >/dev/null 2>&1 || true
+	libgflags2.2 libhwloc15 libcurl4t64 >/dev/null 2>&1 || true
 sudo -n rm -rf /opt/nixl-stack
 sudo -n mkdir -p /opt/nixl-stack
 sudo -n tar -xzf /tmp/nixl-stack.tgz -C /opt/nixl-stack
@@ -343,6 +346,7 @@ for kv in 'FI_UNIVERSE_SIZE=16' 'UCX_ROCM_COPY_DMABUF=try'; do
 done
 printf '%s\n' $S/rocm/lib $S/rocm/lib/rocm_sysdeps/lib $S/rocnixl-ucx/lib \
 	$S/libfabric/lib $S/mori/lib $S/hipfile/lib $S/nixl/lib/x86_64-linux-gnu \
+	$S/aws-sdk/lib $S/hipobject/lib \
 	| sudo -n tee /etc/ld.so.conf.d/nixl-stack.conf >/dev/null
 sudo -n ldconfig
 miss=0
@@ -361,6 +365,11 @@ INSTALL
 		printf 'vm%s: ' "${n}"
 		copy_to_guest "${n}" "${tmp}/nixl-stack.tgz" /tmp/nixl-stack.tgz
 		copy_to_guest "${n}" "${tmp}/install.sh" /tmp/install.sh
+		# nixlbench seeds an object with `aws` before an OBJ READ run, and
+		# aws-cli v2's chunk-signed PutObject is more HTTP than rocm-ernic's
+		# S3 server implements. See the script's header.
+		copy_to_guest "${n}" "${REPO_ROOT}/cluster/scripts/aws-curl-shim.sh" /tmp/aws-shim
+		in_guest "${n}" 'mkdir -p ~/bin && mv /tmp/aws-shim ~/bin/aws && chmod +x ~/bin/aws'
 		in_guest "${n}" 'bash /tmp/install.sh' || echo "  FAILED"
 	done
 

@@ -283,6 +283,52 @@ RUN --mount=type=cache,target=/root/.cache,sharing=locked \
         bash /tmp/scripts/build-hipfile.sh && rm -rf /tmp/hipfile-src; \
     fi
 
+# ----- 1b0. AWS SDK for C++ (s3, s3-crt) -------------------------------------
+# FROM base. This exists only so NIXL's OBJ plugin builds at all: without the
+# three pkg-config names below, src/utils/object skips obj_utils and
+# src/plugins/obj then calls subdir_done(), so every object engine -- the
+# plain S3 one, the CRT one, and any S3-over-RDMA engine -- vanishes from the
+# image with a single meson warning. See docker/scripts/build-aws-sdk.sh.
+#
+# Submodules are required: the s3-crt client is built on aws-crt-cpp and the
+# C libraries under crt/.
+#
+# AWS_SDK_REF empty skips the stage, and NIXL then builds exactly as it did
+# before -- no OBJ plugin, no error.
+FROM base AS aws-sdk
+
+ARG AWS_SDK_GIT_URL=https://github.com/aws/aws-sdk-cpp.git
+ARG AWS_SDK_REF=1.11.921
+
+ENV AWS_SDK_PREFIX=/opt/aws-sdk
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    if [ -n "${AWS_SDK_REF}" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends \
+            cmake pkg-config libcurl4-openssl-dev libssl-dev zlib1g-dev uuid-dev; \
+    fi
+
+COPY docker/scripts/clone-src.sh docker/scripts/build-aws-sdk.sh /tmp/scripts/
+
+RUN mkdir -p /opt/aws-sdk && \
+    if [ -z "${AWS_SDK_REF}" ]; then \
+        echo "AWS_SDK_REF empty -- no AWS SDK, so NIXL will skip the OBJ plugin"; \
+    else \
+        SRC_NAME=aws-sdk \
+        SRC_GIT_URL="${AWS_SDK_GIT_URL}" \
+        SRC_REF="${AWS_SDK_REF}" \
+        SRC_DEST=/tmp/aws-sdk-src \
+        SRC_SUBMODULES=1 \
+        bash /tmp/scripts/clone-src.sh; \
+    fi
+
+RUN --mount=type=cache,target=/root/.cache,sharing=locked \
+    if [ -n "${AWS_SDK_REF}" ]; then \
+        AWS_SDK_SRC=/tmp/aws-sdk-src \
+        bash /tmp/scripts/build-aws-sdk.sh && rm -rf /tmp/aws-sdk-src; \
+    fi
+
 # ----- 1b1. hipObject (ROCm), the S3-over-RDMA client ------------------------
 # FROM base: it needs HIP and hsa-runtime64 and nothing else in this image.
 #
@@ -466,7 +512,9 @@ ARG NIXL_GIT_URL=https://github.com/ai-dynamo/nixl.git
 ARG NIXL_REF=v1.5.2
 # Plugins excluded from the build: CUDA-only (GDS/GDS_MT/GPUNETIO) or needing
 # vendor SDKs / cloud object stores we do not test here.
-ARG NIXL_DISABLE_PLUGINS=GDS,GDS_MT,GPUNETIO,OBJ,AZURE_BLOB,INFINIA
+# OBJ is NOT in this list any more: the AWS SDK stage supplies the three
+# pkg-config names src/utils/object needs, so the object engines can build.
+ARG NIXL_DISABLE_PLUGINS=GDS,GDS_MT,GPUNETIO,AZURE_BLOB,INFINIA
 # Extra meson options, e.g. NIXL_MESON_EXTRA_ARGS="-Dbuild_docs=true".
 ARG NIXL_MESON_EXTRA_ARGS=
 
@@ -492,6 +540,14 @@ COPY --from=hipfile /opt/hipfile /opt/hipfile
 # LIBFABRIC_REF is unset, in which case build-nixl.sh leaves the plugin out of
 # the build rather than falling back to the too-old distro libfabric.
 COPY --from=libfabric /opt/libfabric /opt/libfabric
+
+# The AWS SDK the OBJ plugin's engines link. Empty when AWS_SDK_REF is unset,
+# in which case meson finds no aws-cpp-sdk-* and skips the plugin exactly as
+# it did before this stage existed.
+COPY --from=aws-sdk /opt/aws-sdk /opt/aws-sdk
+
+# hipObject, for an S3-over-RDMA engine under the OBJ plugin.
+COPY --from=hipobject /opt/hipobject /opt/hipobject
 
 COPY docker/scripts/clone-src.sh docker/scripts/build-nixl.sh \
      docker/scripts/build-nixlbench.sh /tmp/scripts/
@@ -581,6 +637,9 @@ COPY --from=libfabric /opt/libfabric /opt/libfabric
 # Both are symlink trees or empty when FIO_REF is unset; /opt/fio-hipfile is
 # the prefix fio's rpath points at, so it has to come along with the binary.
 COPY --from=hipobject /opt/hipobject /opt/hipobject
+# libplugin_OBJ.so links the AWS SDK, so the runtime needs the shared
+# libraries; only the nixl stage needs the headers.
+COPY --from=aws-sdk /opt/aws-sdk/lib /opt/aws-sdk/lib
 COPY --from=perftest /opt/perftest   /opt/perftest
 COPY --from=fio     /opt/fio         /opt/fio
 COPY --from=fio     /opt/fio-hipfile /opt/fio-hipfile
@@ -666,6 +725,8 @@ RUN printf '%s\n' \
         /opt/mori/lib \
         /opt/rocnixl-ucx/lib \
         /opt/libfabric/lib \
+        /opt/aws-sdk/lib \
+        /opt/hipobject/lib \
         > /etc/ld.so.conf.d/nixl-mori.conf && \
     ldconfig
 
@@ -684,7 +745,7 @@ RUN set -eu; \
     python3 -c "import mori; print('mori OK', mori.__version__)"; \
     nixlbench --help 2>&1 | grep -q -- "-backend" && echo "nixlbench OK"; \
     hsa-snoop --help 2>&1 | grep -q -- "--prometheus" && echo "hsa-snoop OK"; \
-    for p in UCX MORI_IO AIS AIS_MT POSIX; do \
+    for p in UCX MORI_IO AIS AIS_MT POSIX OBJ; do \
         test -e "${NIXL_PLUGIN_DIR}/libplugin_$p.so" || \
             { echo "ERROR: missing NIXL plugin: $p" >&2; exit 1; }; \
         ldd "${NIXL_PLUGIN_DIR}/libplugin_$p.so" | grep "not found" && \
@@ -825,13 +886,19 @@ LABEL org.opencontainers.image.title="nixl-mori-test (slim runtime)" \
 
 # Only what the artifacts need to load and run: libibverbs/librdmacm for the
 # RDMA backends, numa/atomic for UCX, python3 for the bindings and the wheel.
+#
+# libcurl4 is the AWS SDK's HTTP client, and so the OBJ plugin's: the RDMA
+# object path still speaks ordinary HTTP/1.1 for the request that carries the
+# token, and only the payload leaves the wire. The ldd assertion below is what
+# found it.
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
         ca-certificates libibverbs1 librdmacm1 libnuma1 libatomic1 \
         libglib2.0-0t64 libgomp1 libelf1t64 libdrm2 libnl-3-200 \
         libnl-route-3-200 python3 python3-pip pciutils kmod iproute2 \
-        libaio1t64 libdrm-amdgpu1 libgflags2.2 libhwloc15 liburing2; \
+        libaio1t64 libdrm-amdgpu1 libgflags2.2 libhwloc15 liburing2 \
+        libcurl4t64; \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=runtime-slim-deps /slim/opt/rocm /opt/rocm
@@ -839,6 +906,9 @@ COPY --from=ucx       /opt/rocnixl-ucx /opt/rocnixl-ucx
 COPY --from=libfabric /opt/libfabric   /opt/libfabric
 COPY --from=hipfile   /opt/hipfile     /opt/hipfile
 COPY --from=hipobject /opt/hipobject   /opt/hipobject
+# libplugin_OBJ.so links the AWS SDK directly, so the slim runtime needs the
+# shared libraries even though nothing here builds against the headers.
+COPY --from=aws-sdk   /opt/aws-sdk/lib /opt/aws-sdk/lib
 COPY --from=perftest  /opt/perftest    /opt/perftest
 COPY --from=fio       /opt/fio         /opt/fio
 COPY --from=fio       /opt/fio-hipfile /opt/fio-hipfile
@@ -866,6 +936,7 @@ RUN set -eux; \
     printf '%s\n' /opt/rocm/lib /opt/rocm/lib/rocm_sysdeps/lib \
         /opt/rocnixl-ucx/lib /opt/libfabric/lib \
         /opt/mori/lib /opt/hipfile/lib /opt/nixl/lib/x86_64-linux-gnu \
+        /opt/aws-sdk/lib /opt/hipobject/lib \
         > /etc/ld.so.conf.d/nixl-mori-slim.conf; \
     ldconfig
 
