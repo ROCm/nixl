@@ -5,8 +5,15 @@ patchset, applied on top of its pinned release tag.
 
 ```
 patches/
-  nixl/    -> applied to ai-dynamo/nixl @ NIXL_REF
-  mori/    -> applied to ROCm/mori      @ MORI_REF
+  nixl/       -> applied to ai-dynamo/nixl    @ NIXL_REF
+  mori/       -> applied to ROCm/mori         @ MORI_REF
+  ucx/        -> applied to openucx/ucx       @ UCX_REF
+  libfabric/  -> applied to ofiwg/libfabric   @ LIBFABRIC_REF
+  hipfile/    -> applied to ROCm/hipFile      @ HIPFILE_REF
+  rdma-core/  -> NOT applied during the image build; built and installed
+                 into the cluster guests instead, because the stack bundles
+                 no rdma-core and resolves providers through the guest's.
+                 See patches/rdma-core/README.md.
 ```
 
 ## Rules

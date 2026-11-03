@@ -220,6 +220,7 @@ ARG LIBFABRIC_DEBUG=
 
 ENV LIBFABRIC_PREFIX=/opt/libfabric
 
+COPY patches/libfabric/ /tmp/patches/libfabric/
 COPY docker/scripts/clone-src.sh docker/scripts/build-libfabric.sh /tmp/scripts/
 
 RUN mkdir -p /opt/libfabric && \
@@ -229,6 +230,7 @@ RUN mkdir -p /opt/libfabric && \
         SRC_NAME=libfabric \
         SRC_GIT_URL="${LIBFABRIC_GIT_URL}" \
         SRC_REF="${LIBFABRIC_REF}" \
+        SRC_PATCH_DIR=/tmp/patches/libfabric \
         SRC_DEST=/tmp/libfabric-src \
         bash /tmp/scripts/clone-src.sh; \
     fi

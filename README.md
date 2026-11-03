@@ -101,7 +101,7 @@ nodelist, backends, segment type).
 | NIXL | [`v1.5.2`](https://github.com/ai-dynamo/nixl/tree/v1.5.2) | [`ai-dynamo/nixl`](https://github.com/ai-dynamo/nixl) | 7 patches |
 | MORI | [`v1.2.4`](https://github.com/ROCm/mori/tree/v1.2.4) | [`ROCm/mori`](https://github.com/ROCm/mori) | pristine |
 | UCX | [`v1.22.0`](https://github.com/openucx/ucx/tree/v1.22.0) | [`openucx/ucx`](https://github.com/openucx/ucx) | 3 patches |
-| libfabric | [`v2.7.0`](https://github.com/ofiwg/libfabric/tree/v2.7.0) | [`ofiwg/libfabric`](https://github.com/ofiwg/libfabric) | pristine |
+| libfabric | [`v2.7.0`](https://github.com/ofiwg/libfabric/tree/v2.7.0) | [`ofiwg/libfabric`](https://github.com/ofiwg/libfabric) | 1 patch |
 | hipFile | [`bd0bc23`](https://github.com/ROCm/hipFile/commit/bd0bc2330a1573223209b9899055d1d6188b9113) | [`ROCm/hipFile`](https://github.com/ROCm/hipFile) | 1 patch |
 | fio | [`c322617`](https://github.com/ROCm/fio/commit/c32261752c88b3f7aadfde4d011a028ae954f869) | [`ROCm/fio`](https://github.com/ROCm/fio) | pristine |
 

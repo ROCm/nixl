@@ -12,7 +12,7 @@
 # rebases in seconds instead of after a 30-minute image build.
 #
 #   make patch-check                 # every component
-#   make patch-check COMPONENT=nixl  # just one (ucx, hipfile, nixl or mori)
+#   make patch-check COMPONENT=nixl  # just one (ucx, hipfile, nixl, mori, libfabric)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -107,6 +107,16 @@ if [[ "${COMPONENT}" == "all" || "${COMPONENT}" == "nixl" ]]; then
 fi
 if [[ "${COMPONENT}" == "all" || "${COMPONENT}" == "mori" ]]; then
 	check_one mori "$(_arg MORI_GIT_URL)" "$(_arg MORI_REF)"
+fi
+if [[ "${COMPONENT}" == "all" || "${COMPONENT}" == "libfabric" ]]; then
+	# Same escape hatch as hipfile: an empty LIBFABRIC_REF skips the stage,
+	# so its patches are never applied and there is nothing to check.
+	libfabric_ref="$(_arg LIBFABRIC_REF)"
+	if [[ -n "${libfabric_ref}" ]]; then
+		check_one libfabric "$(_arg LIBFABRIC_GIT_URL)" "${libfabric_ref}"
+	else
+		echo "=== libfabric (skipped: LIBFABRIC_REF empty -- no LIBFABRIC plugin) ==="
+	fi
 fi
 
 if [[ "${rc}" -ne 0 ]]; then

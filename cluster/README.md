@@ -300,45 +300,48 @@ image change.
   works, which is what `docker/rocm-ernic/` builds. `rping` is the quickest
   check that the third one is in place: it is nothing but RDMA CM, and it
   completes only on an ernic carrying ROCm/rocm-ernic#315.
-* **LIBFABRIC on VRAM does not work yet**, and is no longer blocked by
-  anything in this repo. `patches/nixl/07` restores the ROCm support NIXL
-  v1.5.2 removed, and with it the plugin detects `ROCr for 2 AMD GPU(s)`,
-  reports FI_HMEM support on both rails, accepts a `VRAM_SEG` registration
-  and reaches `fi_mr_reg` -- which then fails:
+* **LIBFABRIC on VRAM works**, and is the fastest VRAM path here. 1 MiB
+  blocks: LIBFABRIC 2.247 GB/s, UCX 2.333, MORI_IO 0.816.
+
+  It took `patches/libfabric/01`, and the cause was the same bug as
+  `patches/ucx/03` in a second library. `rocr_is_dmabuf_supported()` decides
+  whether ROCr dmabuf is usable by grepping `/boot/config-$(uname -r)` for
+  `CONFIG_DMABUF_MOVE_NOTIFY=y` and `CONFIG_PCI_P2PDMA=y`. The 7.2.6 kernel
+  has the second, never mentions the first, and exports
+  `dma_buf_move_notify` -- so the capability is there and the probe cannot
+  see it.
+
+  What made it expensive is that the failure is silent. The export is
+  skipped, and `vrb_reg_hmem_dmabuf()` in the verbs provider does:
+
+  ```c
+  err = ofi_hmem_get_dmabuf_fd(iface, buf, len, &fd, &offset);
+  if (err) goto failover;          /* saved_errno stays 0 */
+  ...
+  failover:
+      mr = ibv_reg_mr(pd, (void *)buf, len, vrb_access);
+  ```
+
+  `ibv_reg_mr` on a device pointer returns EFAULT, and the "Failover failed"
+  message is only printed when `saved_errno` is non-zero -- which it is not
+  on this path. So the whole thing surfaces as
 
   ```
   fi_mr_reg failed on rail 0: Bad address
-      (buffer=0x7d4e12a00000, length=16777216, requested_key=0)
   ```
 
-  NIXL is passing what it should: `iface=FI_HMEM_ROCR` with
-  `mr_attr.device.rocr` set. So the remaining fault is inside libfabric's
-  verbs HMEM registration. `FI_VERBS_USE_DMABUF=1` and
-  `FI_HMEM_ROCR_USE_DMABUF=1` change nothing.
+  with nothing logged at any `FI_LOG_LEVEL`, even in an `--enable-debug`
+  build, and it points at the NIC rather than at a probe that read the wrong
+  file.
 
-  **Tested and ruled out: the device name.** `vrb_hmem_supported()` in
-  libfabric 2.7.0 accepts a device when
-  `peer_mem_support && (strstr(dev_name, "mlx") || "bnxt_re" || "roce")`,
-  and only otherwise probes dmabuf. Our device is named **`rocep1s0`**,
-  which contains `roce` as a substring, so the obvious theory was a false
-  name match sending libfabric down the peer-memory path -- which would
-  EFAULT, since there is no peermem module for ROCm. This is the same class
-  of bug as the two in `udev/99-zz-nixl-ernic-name.rules`, where a device
-  name silently changed behaviour in libfabric and in UCX.
+  **Two things were ruled out before finding it**, both recorded so nobody
+  repeats them. The device name is not the cause: `vrb_hmem_supported()`
+  takes the peer-memory path when the name contains `mlx`, `bnxt_re` or
+  `roce`, and ours is `rocep1s0` -- but renaming both devices to
+  `rocm_ernic0`/`rocm_ernic1` left `fi_mr_reg` failing identically. And NIXL
+  was only half the story: `patches/nixl/07` is needed to get as far as
+  attempting the registration at all, but on its own it still fails here.
 
-  It is not the cause here. Renaming both devices to `rocm_ernic0` and
-  `rocm_ernic1`, which contain no `roce` substring, leaves `fi_mr_reg`
-  failing with exactly the same `Bad address`. DRAM still ran at 2.086 GB/s
-  under the renamed devices, so the rename itself is harmless and changes
-  nothing either way. Do not spend time on it again.
-
-  Still open, then. libfabric does have the ROCr export compiled in
-  (`hsa_amd_portable_export_dmabuf` is referenced in the built library), so
-  the next step is provider logs, which the release build compiles out:
-  rebuild with `LIBFABRIC_DEBUG=1` and read which branch
-  `vrb_hmem_supported` takes and what the registration does with the fd.
-
-  Note UCX moves VRAM over this same device, so the NIC is not the limit.
 * **AIS and AIS_MT work**, against VRAM, through hipFile. They did not on the
   previous guest image, where I/O failed with `hipFileWrite failed: Success`
   and `hipFileBatchIOSubmit failed: err=5030`. Registration still needs
@@ -375,6 +378,10 @@ wrong question of it. Measured vm1 <-> vm2, 16 MiB buffer, GB/s:
 | 64 KiB | 0.176 | 0.170 | 0.072 | 0.070 |
 | 128 KiB | 0.345 | 0.325 | 0.139 | 0.138 |
 | 256 KiB | **0.643** | 0.589 | 0.274 | 0.269 |
+
+All three transports move VRAM now, at 1 MiB: LIBFABRIC 2.247, UCX 2.333,
+MORI_IO 0.816 GB/s. LIBFABRIC needed `patches/libfabric/01` as well as
+`patches/nixl/07`; see the transport list below for why.
 
 All four columns are one 16 MiB buffer so they compare directly; the DRAM
 figures elsewhere in this file use a 1 GiB buffer and are not interchangeable

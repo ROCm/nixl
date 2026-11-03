@@ -1,0 +1,103 @@
+# Fall back to /proc/kallsyms when deciding whether ROCr dmabuf works.
+#
+# This is the same bug as patches/ucx/03, in a second library, found the hard
+# way twice. Both read the kernel's config file to decide whether dmabuf is
+# usable, and both get the wrong answer on a kernel that supports it without
+# advertising it there.
+#
+# THE SYMPTOM
+#
+# A VRAM segment registered through NIXL's LIBFABRIC backend fails:
+#
+#   fi_mr_reg failed on rail 0: Bad address
+#       (buffer=0x7620e1a00000, length=16777216, requested_key=0)
+#
+# and nothing else is logged, at any FI_LOG_LEVEL, even in a build configured
+# --enable-debug. The plugin has already reported "System runtime: ROCr for 2
+# AMD GPU(s)" and "Using provider with FI_HMEM support" on every rail, so the
+# failure looks like the device refusing GPU memory.
+#
+# THE CAUSE
+#
+# rocr_is_dmabuf_supported() requires BOTH of these in
+# /boot/config-$(uname -r):
+#
+#   CONFIG_DMABUF_MOVE_NOTIFY=y
+#   CONFIG_PCI_P2PDMA=y
+#
+# The 7.2.6 guest kernel has the second, never mentions the first, and exports
+# dma_buf_move_notify in /proc/kallsyms -- which it would not if the code were
+# compiled out. So the capability is present and the probe cannot see it.
+#
+# WHY IT IS SILENT, WHICH IS THE EXPENSIVE PART
+#
+# rocr_hmem_get_dmabuf_fd() then returns -FI_EOPNOTSUPP, and in
+# prov/verbs/src/verbs_mr.c vrb_reg_hmem_dmabuf() does:
+#
+#     err = ofi_hmem_get_dmabuf_fd(iface, buf, len, &fd, &offset);
+#     if (err) goto failover;        <-- saved_errno stays 0
+#     ...
+#   failover:
+#     mr = ibv_reg_mr(pd, (void *)buf, len, vrb_access);
+#
+# ibv_reg_mr on a device pointer returns EFAULT. The "Failover failed" FI_INFO
+# is only emitted when saved_errno is non-zero, which it is not on this path,
+# so the fallback happens and reports nothing. The result is an EFAULT that
+# points at the NIC rather than at a probe that read the wrong file.
+#
+# THE FIX
+#
+# Check the symbols when the config file does not settle it, which is what
+# upstream ROCm/ucx already does in uct_rocm_base_kernel_symbols_supports_dmabuf().
+#
+# With this, VRAM over LIBFABRIC reaches 2.16 GB/s at 1 MiB on the emulated
+# ERNIC -- ahead of UCX's 1.99 on the same buffers. Verified separately by
+# appending the missing line to /boot/config, which produces the same result
+# and is NOT a fix: it edits a system file to satisfy a probe rather than
+# correcting the probe.
+#
+# Drop this when upstream libfabric grows the fallback; check
+# rocr_is_dmabuf_supported() in src/hmem_rocr.c.
+#
+--- a/src/hmem_rocr.c
++++ b/src/hmem_rocr.c
+@@ -1368,6 +1368,39 @@
+ 			}
+ 		}
+ 		fclose(fp);
++
++		/*
++		 * A kernel can support dmabuf without saying so in its config
++		 * file. 7.2.x has CONFIG_PCI_P2PDMA=y and no
++		 * CONFIG_DMABUF_MOVE_NOTIFY line at all, yet exports
++		 * dma_buf_move_notify -- which it would not if the code were
++		 * compiled out. Check the symbols directly when the config
++		 * file does not settle it.
++		 *
++		 * Getting this wrong is silent and expensive to chase: the
++		 * export is skipped, vrb_reg_hmem_dmabuf() falls back to
++		 * ibv_reg_mr() on a device pointer with saved_errno still 0,
++		 * so the registration fails EFAULT with nothing logged at any
++		 * level.
++		 */
++		if (!dmabuf_kernel) {
++			found_opt1 = false;
++			found_opt2 = false;
++			fp = fopen("/proc/kallsyms", "r");
++			if (fp) {
++				while (fgets(buf, sizeof(buf), fp) != NULL) {
++					if (strstr(buf, "dma_buf_move_notify"))
++						found_opt1 = true;
++					if (strstr(buf, "pci_p2pdma"))
++						found_opt2 = true;
++					if (found_opt1 && found_opt2) {
++						dmabuf_kernel = true;
++						break;
++					}
++				}
++				fclose(fp);
++			}
++		}
+ 	}
+ #endif
+ out:
