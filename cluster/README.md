@@ -241,17 +241,25 @@ Measured 2026-11-03, vm4, 128 KiB values, GB/s and average latency:
 
 | | Store | Retrieve |
 |---|---|---|
-| DRAM | 6.141 / 21 us | 5.072 / 26 us |
-| VRAM | 0.062 / 2118 us | 2.126 / 62 us |
+| DRAM | 6.787 / 19.3 us | 9.290 / 14.1 us |
+| VRAM | 0.330 / 396.9 us | 7.049 / 18.6 us |
 
-Three to four times the SPDK path below, with latency flat in size (21 to 30
-us from 4 KiB to 128 KiB) rather than climbing, because the data never
+Median of three runs each. Re-measured on ernic 8e43a0c, which moved every
+figure: against the 461dbbd numbers this table used to carry, Retrieve DRAM
+is up from 5.072 and Retrieve VRAM from 2.126, and Store VRAM from 0.062.
+Only Store DRAM is close to where it was, at 6.141 before.
+
+Many times the SPDK path below, with latency flat in size -- 13.2, 12.3,
+13.8, 14.0, 14.1 and 13.9 us from 4 KiB to 128 KiB, so bandwidth is just the
+value size over a fixed cost -- rather than climbing, because the data never
 leaves the host: `dp_sge_to_host()` is a copy within the emulator's own
 address space.
 
-**The VRAM Store number is the staging copy, and it is the argument for
-finishing the job.** 6.1 GB/s against 0.062 is a factor of a hundred, and
-all of it is the device-to-host copy (`post` is 2115 us of the 2118).
+**The VRAM Store number is still the staging copy, and it is still the
+argument for finishing the job.** 6.8 GB/s against 0.330 is a factor of
+twenty, and essentially all of it is the device-to-host copy: `post` is
+375.6 us of the 376.9. The large BAR and p2pdma registration landing did not
+move it, which is consistent -- this client does not take that path.
 The target can already RDMA straight into GPU memory -- it reaches guest
 memory by rkey, and that is the same path the hipObject S3 engine uses
 GPU-direct. What stages is the *client*, because it goes through the kernel
@@ -750,9 +758,35 @@ wrong question of it. Measured vm1 <-> vm2, 16 MiB buffer, GB/s:
 | 128 KiB | 0.345 | 0.325 | 0.139 | 0.138 |
 | 256 KiB | **0.643** | 0.589 | 0.274 | 0.269 |
 
-All three transports move VRAM now, at 1 MiB: LIBFABRIC 2.247, UCX 2.333,
-MORI_IO 0.816 GB/s. LIBFABRIC needed `patches/libfabric/01` as well as
-`patches/nixl/07`; see the transport list below for why.
+All three transports move VRAM now. LIBFABRIC needed `patches/libfabric/01`
+as well as `patches/nixl/07`; see the transport list below for why.
+
+Re-measured on ernic 8e43a0c, 1 MiB blocks, 16 MiB buffer, vm1 <-> vm2, two
+runs each:
+
+| Backend | DRAM | VRAM | recorded on the previous pins (VRAM) |
+|---|---|---|---|
+| UCX | 1.545, 1.631 | 1.591, 1.796 | 2.333 |
+| LIBFABRIC | 1.659, 1.780 | 1.523, 1.477 | 2.247 |
+| MORI_IO | 0.775, 0.766 | 0.672, 0.705 | 0.816 |
+
+**Every transport is below what this file used to record, by 15 to 33%, and
+that is a fleet property rather than a backend one.** The pins moved three
+ways at once between the two measurements -- ernic source and base image,
+QEMU `aa4344e` to `f91f120`, and libvfio-user `vfu.8039244` to
+`vfu.3719c3a` -- so nothing here attributes it. The last two are in the
+vfio-user data path, which is where bandwidth would go.
+
+What has NOT changed is the shape, which is what the conclusions below rest
+on: VRAM still matches DRAM within run-to-run variance for all three, and
+the ordering is still UCX and LIBFABRIC together at roughly 2.3x MORI_IO.
+
+For reference, raw RDMA underneath all of this is 5.73 GB/s at 1 MiB
+(`ib_send_bw -s 1048576 -n 2000`, vm3 <-> vm4, rail 1). There is no earlier
+perftest figure recorded here to compare it against, which is the gap that
+makes the regression hard to localise -- a raw-fabric baseline taken at each
+pin bump would have said immediately whether the loss is under NIXL or in
+it.
 
 All four columns are one 16 MiB buffer so they compare directly; the DRAM
 figures elsewhere in this file use a 1 GiB buffer and are not interchangeable
