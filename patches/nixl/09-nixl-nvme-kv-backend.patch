@@ -85,6 +85,59 @@
 # For this backend the object name IS the key, written as 32 hex characters,
 # so no hash has to agree between the benchmark and the plugin -- and
 # --nvme_kv_convert_key refuses to seed rather than seeding the wrong key.
+#
+# ONE BUG WORTH RECORDING, BECAUSE IT LOOKED LIKE A RESULT
+#
+# The first working version tagged each SQE with the task's index within its
+# request. One ring serves every request, so every request numbered its tasks
+# from zero and a straggling completion from an earlier transfer was
+# indistinguishable from this one's first task: checkXfer() counted it and
+# declared the transfer finished before the device had answered.
+#
+# It did not look like a bug. It looked like 23 GB/s at 128 KiB with a 2.8 us
+# latency, over an emulated NIC -- which is what gave it away, together with
+# an "Avg Tx 0.0 us" in the same table. The fix is a token unique for the
+# engine's lifetime and a map from it back to the request and task that
+# submitted it, so a completion can always find its owner. releaseReqH()
+# moves the tokens of a request abandoned in flight to an orphan set, because
+# those completions still arrive and following a freed handle would be worse
+# than the original bug.
+#
+# VRAM_SEG, AND WHY IT IS STAGED RATHER THAN DIRECT
+#
+# NVMe passthrough maps its data buffer with blk_rq_map_user_io() or
+# io_uring_cmd_import_fixed() (drivers/nvme/host/ioctl.c), and both pin USER
+# PAGES. A device pointer is not backed by any, so there is nothing to pin,
+# and there is no dmabuf or p2pdma path in the passthrough ioctl to take one
+# instead. IORING_URING_CMD_FIXED exists, but a registered io_uring buffer is
+# an iovec of user addresses too.
+#
+# Nor would p2pdma help on the transports used here even if it existed. Over
+# nvme-rdma and nvme-tcp the HOST moves the data -- nvme-rdma registers MRs
+# over the request's pages, nvme-tcp sends from them -- so the bytes have to
+# be in host memory at some point regardless. GPU-direct against a KV
+# namespace needs a local PCIe KV device and a p2p provider, which is not
+# what this cluster has.
+#
+# So a VRAM registration gets a pinned host staging buffer (hipHostMalloc, so
+# the pages are already pinned when the kernel maps them again for the NVMe
+# command), a Store copies device-to-host before submitting, and a Retrieve
+# copies host-to-device once the device has answered. Both copies run OUTSIDE
+# the ring lock: hipMemcpy blocks, and holding the lock across it would
+# serialise every other request behind one GPU copy. The host-to-device copy
+# happens in checkXfer() before it reports success, which is what keeps
+# NIXL_SUCCESS meaning "the data is where the caller asked for it".
+#
+# This is what hipObject does when a device pointer cannot be registered with
+# the NIC (hipObjBufSync, HIPOBJ_SYNC_TO_HOST / _TO_DEVICE). DOCA_MEMOS avoids
+# the question by taking DRAM only -- and requires hugepages even for that,
+# because the NVMe kernel device hands buffers over by user address and a
+# value spread across 4 KiB pages can exceed the per-command segment limit.
+#
+# The copy is real and it is in the numbers; cluster/README.md has them beside
+# the DRAM ones rather than reporting VRAM as if it were free. What the
+# caller gets is that a device pointer works at all, without arranging the
+# staging itself.
 diff --git a/benchmark/nixlbench/src/utils/utils.cpp b/benchmark/nixlbench/src/utils/utils.cpp
 index 0b02fb7..08f60a7 100644
 --- a/benchmark/nixlbench/src/utils/utils.cpp
@@ -418,10 +471,10 @@ index 5ed4835..ad3f753 100644
  if nixl_trace_enabled
 diff --git a/src/plugins/nvme_kv/meson.build b/src/plugins/nvme_kv/meson.build
 new file mode 100644
-index 0000000..20f56e8
+index 0000000..8f5388a
 --- /dev/null
 +++ b/src/plugins/nvme_kv/meson.build
-@@ -0,0 +1,42 @@
+@@ -0,0 +1,49 @@
 +# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 +# SPDX-License-Identifier: Apache-2.0
 +
@@ -436,6 +489,13 @@ index 0000000..20f56e8
 +# linux/nvme_ioctl.h, which every kernel ships -- so there is no vendor library
 +# anywhere in this plugin. That is the point of it.
 +nvme_kv_plugin_deps = [nixl_infra, nixl_common_dep, io_uring_dep]
++
++# HIP is optional: without it the plugin still builds and serves DRAM_SEG,
++# and VRAM_SEG simply is not advertised. With it, a VRAM value is staged
++# through pinned host memory -- see getSupportedMems() for why it has to be.
++if hip_dep.found()
++    nvme_kv_plugin_deps += [hip_dep]
++endif
 +
 +if 'NVME_KV' in static_plugins
 +    nvme_kv_backend_lib = static_library('NVME_KV',
@@ -466,10 +526,10 @@ index 0000000..20f56e8
 +nvme_kv_backend_interface = declare_dependency(link_with: nvme_kv_backend_lib)
 diff --git a/src/plugins/nvme_kv/nvme_kv_backend.cpp b/src/plugins/nvme_kv/nvme_kv_backend.cpp
 new file mode 100644
-index 0000000..b9b198d
+index 0000000..abf6f9d
 --- /dev/null
 +++ b/src/plugins/nvme_kv/nvme_kv_backend.cpp
-@@ -0,0 +1,643 @@
+@@ -0,0 +1,846 @@
 +/*
 + * SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 + * SPDX-License-Identifier: Apache-2.0
@@ -479,6 +539,9 @@ index 0000000..b9b198d
 +#include "common/backend.h"
 +#include "common/nixl_log.h"
 +#include <absl/strings/str_format.h>
++#ifdef HAVE_HIP
++#include <hip/hip_runtime_api.h>
++#endif
 +#include <fcntl.h>
 +#include <sys/ioctl.h>
 +#include <unistd.h>
@@ -498,9 +561,34 @@ index 0000000..b9b198d
 +    uint32_t requestedLen = 0;
 +    bool isRetrieve = false;
 +    nixl_status_t status = NIXL_IN_PROG;
++    /// Set for a VRAM value: where the device copy lives, and the host
++    /// staging bytes the NVMe command actually names.
++    void *devicePtr = nullptr;
++    void *stagingPtr = nullptr;
++    /// A completed VRAM Retrieve whose bytes are still only in the staging
++    /// buffer. checkXfer() performs the copy outside the ring lock.
++    bool needsHostToDevice = false;
 +};
 +
 +} // namespace
++
++/// What registerMem() hands back, and what prepXfer() reads off
++/// nixlMetaDesc::metadataP to find a VRAM registration's staging buffer.
++class nvmeKvMetadata : public nixlBackendMD {
++public:
++    nvmeKvMetadata(nixl_mem_t mem, uintptr_t a, size_t l, void *stage)
++        : nixlBackendMD(true),
++          memType(mem),
++          addr(a),
++          len(l),
++          staging(stage) {}
++
++    nixl_mem_t memType;
++    uintptr_t addr = 0;
++    size_t len = 0;
++    /// Pinned host memory for VRAM_SEG, nullptr otherwise.
++    void *staging = nullptr;
++};
 +
 +class nvmeKvBackendReqH : public nixlBackendReqH {
 +public:
@@ -738,6 +826,17 @@ index 0000000..b9b198d
 +    }
 +    ringReady_ = true;
 +
++#ifdef HAVE_HIP
++    // Non-blocking so it never implicitly synchronises with the null stream,
++    // which is the whole reason for having a stream of our own.
++    if (hipStreamCreateWithFlags(&stagingStream_, hipStreamNonBlocking) == hipSuccess) {
++        stagingStreamReady_ = true;
++    } else {
++        NIXL_WARN << "NVMe KV: could not create a staging stream; VRAM copies will use the "
++                     "null stream and serialise against other GPU work";
++    }
++#endif
++
 +    NIXL_INFO << absl::StrFormat(
 +        "NVMe KV backend ready on %s (nsid %u, queue_depth %u, convert_key_to_128bit %s)",
 +        devicePath_.c_str(),
@@ -747,6 +846,11 @@ index 0000000..b9b198d
 +}
 +
 +nvmeKvEngine::~nvmeKvEngine() {
++#ifdef HAVE_HIP
++    if (stagingStreamReady_) {
++        (void)hipStreamDestroy(stagingStream_);
++    }
++#endif
 +    if (ringReady_) {
 +        io_uring_queue_exit(&ring_);
 +    }
@@ -777,7 +881,7 @@ index 0000000..b9b198d
 +            return NIXL_ERR_INVALID_PARAM;
 +        }
 +        devIdToMetaInfo_[mem.devId] = mem.metaInfo;
-+        out = new nixlBackendMD(true);
++        out = new nvmeKvMetadata(nixl_mem, mem.addr, mem.len, nullptr);
 +        return NIXL_SUCCESS;
 +    }
 +
@@ -785,16 +889,55 @@ index 0000000..b9b198d
 +        // Nothing to pin. NVMe passthrough takes a user virtual address and
 +        // the kernel pins it for the duration of each command, so there is no
 +        // registration to hold between transfers.
-+        out = new nixlBackendMD(true);
++        out = new nvmeKvMetadata(nixl_mem, mem.addr, mem.len, nullptr);
 +        return NIXL_SUCCESS;
 +    }
++
++#ifdef HAVE_HIP
++    if (nixl_mem == VRAM_SEG) {
++        // One staging buffer per registration, sized to it, so a transfer
++        // never has to allocate. hipHostMalloc rather than malloc: the pages
++        // are pinned, which both makes the copies faster and means the kernel
++        // has nothing to do when it pins them again for the NVMe command.
++        void *staging = nullptr;
++        const hipError_t err = hipHostMalloc(&staging, mem.len, hipHostMallocDefault);
++        if (err != hipSuccess || staging == nullptr) {
++            NIXL_ERROR << "NVMe KV: could not allocate a " << mem.len
++                       << "-byte host staging buffer for a VRAM registration: "
++                       << hipGetErrorString(err);
++            return NIXL_ERR_BACKEND;
++        }
++        NIXL_DEBUG << absl::StrFormat(
++            "NVMe KV: staging %zu bytes of VRAM at 0x%x through host %p",
++            mem.len,
++            mem.addr,
++            staging);
++        out = new nvmeKvMetadata(nixl_mem, mem.addr, mem.len, staging);
++        return NIXL_SUCCESS;
++    }
++#endif
 +
 +    return NIXL_ERR_NOT_SUPPORTED;
 +}
 +
++void
++nvmeKvEngine::freeStaging(void *staging) {
++#ifdef HAVE_HIP
++    if (staging != nullptr) {
++        (void)hipHostFree(staging);
++    }
++#else
++    (void)staging;
++#endif
++}
++
 +nixl_status_t
 +nvmeKvEngine::deregisterMem(nixlBackendMD *meta) {
-+    delete meta;
++    auto *md = static_cast<nvmeKvMetadata *>(meta);
++    if (md != nullptr) {
++        freeStaging(md->staging);
++    }
++    delete md;
 +    return NIXL_SUCCESS;
 +}
 +
@@ -899,6 +1042,12 @@ index 0000000..b9b198d
 +            status = NIXL_ERR_BACKEND;
 +        }
 +
++        // The bytes are in the staging buffer, not yet on the device. The
++        // copy is left to checkXfer(), which runs without the ring lock.
++        if (status == NIXL_SUCCESS && task.isRetrieve && task.stagingPtr != nullptr) {
++            task.needsHostToDevice = true;
++        }
++
 +        task.status = status;
 +        req->completed_++;
 +        if (status != NIXL_SUCCESS && req->overall_ == NIXL_IN_PROG) {
@@ -939,6 +1088,56 @@ index 0000000..b9b198d
 +}
 +
 +nixl_status_t
++nvmeKvEngine::stageTasks(nvmeKvBackendReqH *req, bool to_device) const {
++#ifdef HAVE_HIP
++    bool issued = false;
++    for (auto &task : req->tasks_) {
++        if (task.stagingPtr == nullptr) {
++            continue;
++        }
++        if (to_device && !task.needsHostToDevice) {
++            continue;
++        }
++        const hipError_t err = to_device ?
++            hipMemcpyAsync(task.devicePtr,
++                           task.stagingPtr,
++                           task.requestedLen,
++                           hipMemcpyHostToDevice,
++                           stagingStream_) :
++            hipMemcpyAsync(task.stagingPtr,
++                           task.devicePtr,
++                           task.requestedLen,
++                           hipMemcpyDeviceToHost,
++                           stagingStream_);
++        if (err != hipSuccess) {
++            NIXL_ERROR << "NVMe KV: staging copy failed to start: " << hipGetErrorString(err);
++            return NIXL_ERR_BACKEND;
++        }
++        task.needsHostToDevice = false;
++        issued = true;
++    }
++
++    if (!issued) {
++        return NIXL_SUCCESS;
++    }
++
++    // One wait for the whole request. Before a Store this is also what makes
++    // the caller's own GPU work ordering safe to assume: the copy cannot read
++    // the buffer until work already queued ahead of it on the caller's stream
++    // has retired, and this returns only once the copy itself has.
++    const hipError_t err = hipStreamSynchronize(stagingStream_);
++    if (err != hipSuccess) {
++        NIXL_ERROR << "NVMe KV: staging copy failed: " << hipGetErrorString(err);
++        return NIXL_ERR_BACKEND;
++    }
++#else
++    (void)req;
++    (void)to_device;
++#endif
++    return NIXL_SUCCESS;
++}
++
++nixl_status_t
 +nvmeKvEngine::prepXfer(const nixl_xfer_op_t &operation,
 +                       const nixl_meta_dlist_t &local,
 +                       const nixl_meta_dlist_t &remote,
@@ -952,10 +1151,17 @@ index 0000000..b9b198d
 +        NIXL_ERROR << "NVMe KV: invalid operation " << operation;
 +        return NIXL_ERR_INVALID_PARAM;
 +    }
-+    if (local.getType() != DRAM_SEG) {
-+        NIXL_ERROR << "NVMe KV: the value must be DRAM_SEG, got " << local.getType();
++    if (local.getType() != DRAM_SEG && local.getType() != VRAM_SEG) {
++        NIXL_ERROR << "NVMe KV: the value must be DRAM_SEG or VRAM_SEG, got "
++                   << local.getType();
 +        return NIXL_ERR_INVALID_PARAM;
 +    }
++#ifndef HAVE_HIP
++    if (local.getType() == VRAM_SEG) {
++        NIXL_ERROR << "NVMe KV: this build has no HIP, so VRAM_SEG cannot be staged";
++        return NIXL_ERR_NOT_SUPPORTED;
++    }
++#endif
 +    if (remote.getType() != OBJ_SEG) {
 +        NIXL_ERROR << "NVMe KV: the key must be OBJ_SEG, got " << remote.getType();
 +        return NIXL_ERR_INVALID_PARAM;
@@ -1005,12 +1211,42 @@ index 0000000..b9b198d
 +                maxValueLen_);
 +            return NIXL_ERR_INVALID_PARAM;
 +        }
++        // The buffer the NVMe command names. For VRAM that is the staging
++        // slice, not the device pointer: see the comment on getSupportedMems().
++        void *value = reinterpret_cast<void *>(local[i].addr);
++        if (local.getType() == VRAM_SEG) {
++            const auto *md = static_cast<const nvmeKvMetadata *>(local[i].metadataP);
++            if (md == nullptr || md->staging == nullptr) {
++                NIXL_ERROR << "NVMe KV: descriptor " << i
++                           << " is VRAM_SEG but carries no staging buffer; the segment has to "
++                              "be registered with this backend first";
++                return NIXL_ERR_INVALID_PARAM;
++            }
++            // A descriptor may name a slice of the registration, so the
++            // staging offset has to match rather than always starting at zero.
++            if (local[i].addr < md->addr ||
++                (local[i].addr - md->addr) + task.requestedLen > md->len) {
++                NIXL_ERROR << absl::StrFormat(
++                    "NVMe KV: descriptor %d [0x%x, +%u) lies outside its registration "
++                    "[0x%x, +%zu)",
++                    i,
++                    local[i].addr,
++                    task.requestedLen,
++                    md->addr,
++                    md->len);
++                return NIXL_ERR_INVALID_PARAM;
++            }
++            task.devicePtr = reinterpret_cast<void *>(local[i].addr);
++            task.stagingPtr = static_cast<uint8_t *>(md->staging) + (local[i].addr - md->addr);
++            value = task.stagingPtr;
++        }
++
 +        task.cmd = nvme_kv::makeDataCmd(
 +            task.isRetrieve ? nvme_kv::OPC_RETRIEVE : nvme_kv::OPC_STORE,
 +            nsid_,
 +            key,
 +            key_len,
-+            reinterpret_cast<void *>(local[i].addr),
++            value,
 +            task.requestedLen);
 +        req->tasks_.push_back(task);
 +    }
@@ -1030,6 +1266,20 @@ index 0000000..b9b198d
 +        return NIXL_ERR_INVALID_PARAM;
 +    }
 +    auto *req = static_cast<nvmeKvBackendReqH *>(handle);
++
++#ifdef HAVE_HIP
++    // A Store reads the staging buffer, so the device's bytes have to be in
++    // it first. Outside the ring lock: the wait inside stageTasks() blocks,
++    // and holding the lock across it would serialise every other request
++    // behind this request's GPU copies.
++    if (operation == NIXL_WRITE) {
++        const nixl_status_t staged = stageTasks(req, false);
++        if (staged != NIXL_SUCCESS) {
++            req->overall_ = staged;
++            return staged;
++        }
++    }
++#endif
 +
 +    const std::lock_guard<std::mutex> lock(ringLock_);
 +
@@ -1083,6 +1333,19 @@ index 0000000..b9b198d
 +        reapCompletions(0, nullptr, nullptr);
 +    }
 +
++#ifdef HAVE_HIP
++    // Finish any VRAM Retrieve by copying the staged bytes up to the device.
++    // Doing it here rather than in reapCompletions() keeps the blocking wait
++    // out of the ring lock, and doing it before the success below is what
++    // keeps NIXL_SUCCESS meaning "the data is where the caller asked for it".
++    if (req->completed_ == req->tasks_.size()) {
++        const nixl_status_t staged = stageTasks(req, true);
++        if (staged != NIXL_SUCCESS && req->overall_ == NIXL_IN_PROG) {
++            req->overall_ = staged;
++        }
++    }
++#endif
++
 +    if (req->completed_ < req->tasks_.size()) {
 +        return NIXL_IN_PROG;
 +    }
@@ -1115,10 +1378,10 @@ index 0000000..b9b198d
 +}
 diff --git a/src/plugins/nvme_kv/nvme_kv_backend.h b/src/plugins/nvme_kv/nvme_kv_backend.h
 new file mode 100644
-index 0000000..6f8b90b
+index 0000000..6271c17
 --- /dev/null
 +++ b/src/plugins/nvme_kv/nvme_kv_backend.h
-@@ -0,0 +1,244 @@
+@@ -0,0 +1,295 @@
 +/*
 + * SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 + * SPDX-License-Identifier: Apache-2.0
@@ -1128,6 +1391,9 @@ index 0000000..6f8b90b
 +#define NIXL_SRC_PLUGINS_NVME_KV_NVME_KV_BACKEND_H
 +
 +#include <liburing.h>
++#ifdef HAVE_HIP
++#include <hip/hip_runtime_api.h>
++#endif
 +#include <cstdint>
 +#include <memory>
 +#include <mutex>
@@ -1205,17 +1471,35 @@ index 0000000..6f8b90b
 +    }
 +
 +    /**
-+     * OBJ_SEG names keys; DRAM_SEG holds values.
++     * OBJ_SEG names keys; DRAM_SEG and VRAM_SEG hold values.
 +     *
-+     * VRAM_SEG is deliberately absent. NVMe passthrough hands the kernel a
-+     * user virtual address to pin, and a device pointer is not that -- it
-+     * would need p2pdma, which neither the emulated device here nor a stock
-+     * KV namespace offers. DOCA_MEMOS makes the same choice and additionally
-+     * requires hugepages for the same underlying reason.
++     * VRAM_SEG IS STAGED THROUGH HOST MEMORY, NOT GPU-DIRECT, and the
++     * distinction matters enough to state here rather than bury.
++     *
++     * NVMe passthrough maps its data buffer with blk_rq_map_user_io() or
++     * io_uring_cmd_import_fixed(), both of which pin USER PAGES. A device
++     * pointer is not backed by any, so there is nothing to pin. Nor is there
++     * a dmabuf or p2pdma path in drivers/nvme/host/ioctl.c to take one
++     * instead -- and over nvme-rdma or nvme-tcp it would not help if there
++     * were, because the host moves the data from those same pages.
++     *
++     * So a VRAM registration gets a pinned host staging buffer, a Store
++     * copies device-to-host before submitting and a Retrieve copies
++     * host-to-device once the device has answered. That is exactly what
++     * hipObject does when a device pointer cannot be registered with the NIC
++     * (hipObjBufSync, HIPOBJ_SYNC_TO_HOST / _TO_DEVICE); DOCA_MEMOS avoids
++     * the question by taking DRAM only. The copy is real and it shows up in
++     * the numbers -- see cluster/README.md -- but a NIXL caller holding a
++     * device pointer no longer has to do the staging itself, which is the
++     * point.
 +     */
 +    nixl_mem_list_t
 +    getSupportedMems() const override {
++#ifdef HAVE_HIP
++        return {OBJ_SEG, DRAM_SEG, VRAM_SEG};
++#else
 +        return {OBJ_SEG, DRAM_SEG};
++#endif
 +    }
 +
 +    nixl_status_t
@@ -1348,6 +1632,13 @@ index 0000000..6f8b90b
 +    bool ringReady_ = false;
 +    mutable std::mutex ringLock_;
 +
++#ifdef HAVE_HIP
++    /// Carries the staging copies. Created once; the null stream would
++    /// serialise them against all other GPU work on the device.
++    hipStream_t stagingStream_ = nullptr;
++    bool stagingStreamReady_ = false;
++#endif
++
 +    /// Monotonic, so no two commands in this engine's lifetime share a tag.
 +    mutable uint64_t nextToken_ = 1;
 +    /// Token -> the request that submitted it and which of its tasks it is.
@@ -1356,6 +1647,29 @@ index 0000000..6f8b90b
 +    /// completions still arrive and must be dropped rather than followed to a
 +    /// freed request handle.
 +    mutable std::unordered_set<uint64_t> orphaned_;
++
++    /// Free a VRAM registration's staging buffer. Separate so the error
++    /// paths in registerMem() do not have to repeat the HIP call.
++    static void
++    freeStaging(void *staging);
++
++    /**
++     * Copy every staged descriptor of a request in one direction, then wait
++     * once.
++     *
++     * Two things here are worth more than they look. The copies go on a
++     * stream of this engine's own rather than the null stream, which
++     * synchronises device-wide and makes every copy wait on unrelated GPU
++     * work. And a request's descriptors are all issued before anything is
++     * waited on, so a batch pays one synchronisation rather than one per
++     * value -- which matters because the per-call cost here dominates the
++     * per-byte one by orders of magnitude.
++     *
++     * @param to_device true for host->device (after a Retrieve), false for
++     *                  device->host (before a Store)
++     */
++    nixl_status_t
++    stageTasks(nvmeKvBackendReqH *req, bool to_device) const;
 +
 +    /// OBJ_SEG devId -> key, filled by registerMem() and read by prepXfer(),
 +    /// mirroring the devIdToObjKey_ map the OBJ plugin's engines keep.
@@ -1497,10 +1811,10 @@ index 0000000..2fccd54
 +#endif // NIXL_SRC_PLUGINS_NVME_KV_NVME_KV_CMD_H
 diff --git a/src/plugins/nvme_kv/nvme_kv_plugin.cpp b/src/plugins/nvme_kv/nvme_kv_plugin.cpp
 new file mode 100644
-index 0000000..cf2d436
+index 0000000..752f71a
 --- /dev/null
 +++ b/src/plugins/nvme_kv/nvme_kv_plugin.cpp
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,43 @@
 +/*
 + * SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 + * SPDX-License-Identifier: Apache-2.0
@@ -1508,6 +1822,14 @@ index 0000000..cf2d436
 +
 +#include "backend/backend_plugin.h"
 +#include "nvme_kv_backend.h"
++
++// Kept in step with nvmeKvEngine::getSupportedMems(). VRAM is staged through
++// host memory rather than reached directly; the engine's header says why.
++#ifdef HAVE_HIP
++#define NVME_KV_MEM_TYPES {OBJ_SEG, DRAM_SEG, VRAM_SEG}
++#else
++#define NVME_KV_MEM_TYPES {OBJ_SEG, DRAM_SEG}
++#endif
 +
 +using nvme_kv_plugin_t = nixlBackendPluginCreator<nvmeKvEngine>;
 +
@@ -1524,13 +1846,13 @@ index 0000000..cf2d436
 +nixlBackendPlugin *
 +createStaticNVME_KVPlugin() {
 +    return nvme_kv_plugin_t::create(
-+        NIXL_PLUGIN_API_VERSION, "NVME_KV", "0.1.0", nvme_kv_params, {OBJ_SEG, DRAM_SEG});
++        NIXL_PLUGIN_API_VERSION, "NVME_KV", "0.1.0", nvme_kv_params, NVME_KV_MEM_TYPES);
 +}
 +#else
 +extern "C" NIXL_PLUGIN_EXPORT nixlBackendPlugin *
 +nixl_plugin_init() {
 +    return nvme_kv_plugin_t::create(
-+        NIXL_PLUGIN_API_VERSION, "NVME_KV", "0.1.0", nvme_kv_params, {OBJ_SEG, DRAM_SEG});
++        NIXL_PLUGIN_API_VERSION, "NVME_KV", "0.1.0", nvme_kv_params, NVME_KV_MEM_TYPES);
 +}
 +
 +extern "C" NIXL_PLUGIN_EXPORT void

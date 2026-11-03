@@ -301,6 +301,62 @@ RDMA is 3-4x TCP at 128 KiB and its latency grows far more slowly with size,
 which is the whole point. TCP wins at 4 KiB, where per-command overhead
 dominates and the RDMA path has more of it.
 
+### VRAM works, and is staged rather than GPU-direct
+
+`--initiator_seg_type VRAM` works, and a round trip is byte-verified on both
+transports: a pattern written to device memory, Stored through NIXL, the
+device buffer wiped, Retrieved back and read off the device again, 65536
+bytes identical. `cluster/scripts/kv-vram-roundtrip.cpp` does it, with the
+build line in its header; it is a standalone check rather than nixlbench's
+own consistency flag.
+
+It is a staged path, not GPU-direct, and the reason is structural rather
+than a missing feature. NVMe passthrough maps its data buffer with
+`blk_rq_map_user_io()` or `io_uring_cmd_import_fixed()`, both of which pin
+*user pages*; a device pointer has none, and there is no dmabuf or p2pdma
+path in `drivers/nvme/host/ioctl.c` to take one instead. Nor would p2pdma
+help over nvme-rdma or nvme-tcp, where the host moves the data from those
+same pages. So a VRAM registration gets a pinned host staging buffer and the
+plugin copies into it before a Store and out of it after a Retrieve --
+exactly what hipObject does when a device pointer cannot be registered with
+the NIC. DOCA_MEMOS sidesteps the question by taking DRAM only.
+
+**On this cluster the staging copy dominates everything else**, and that is
+the emulated GPU rather than the design. Store, RDMA:
+
+| Value | Latency | of which Post (the D2H copy) | Tx |
+|---|---|---|---|
+| 4 KiB | 589 us | 577 us | 17 us |
+| 32 KiB | 2114 us | 2089 us | 27 us |
+| 128 KiB | 2144 us | 2118 us | 30 us |
+
+A standalone `hipMemcpy` on this GPU measures 497 us at 4 KiB and 2113 us at
+32 KiB and above — so the plugin's Post time *is* the copy, with nothing
+measurable on top. The numbers are flat in size because the cost is per-call,
+not per-byte.
+
+The two directions behave differently, which is worth knowing before reading
+the Retrieve numbers as a contradiction. Cold and single-shot, both cost
+about 2 ms (a lone Retrieve into VRAM measures 1941 us). Across a benchmark
+loop the host-to-device copy amortises to ~57 us while device-to-host stays
+at ~2.1 ms, so VRAM Retrieve looks close to DRAM and VRAM Store does not:
+
+| Value | Store DRAM | Store VRAM | Retrieve DRAM | Retrieve VRAM |
+|---|---|---|---|---|
+| 4 KiB | 0.156 / 26 us | 0.007 / 589 us | 0.098 / 42 us | 0.083 / 49 us |
+| 128 KiB | 1.164 / 113 us | 0.061 / 2144 us | 1.812 / 72 us | 0.989 / 133 us |
+
+The plugin's code path is the same in both directions, so the asymmetry is
+the emulator's. On real hardware a 128 KiB copy either way is single-digit
+microseconds and none of this would be visible.
+
+Two things in the plugin do matter for the staging cost, and both are worth
+keeping if this is ever ported: the copies go on a stream of the engine's own
+rather than the null stream, which otherwise waits on unrelated GPU work (that
+alone took 4 KiB Post from 1482 us to 565 us), and a request's descriptors are
+all issued before anything is waited on, so a batch pays one synchronisation
+rather than one per value.
+
 ## What works here, and what does not
 
 All three transports, measured 2026-11-02 on the four-guest cluster with two
