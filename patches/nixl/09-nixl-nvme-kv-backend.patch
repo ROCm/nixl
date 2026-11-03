@@ -148,10 +148,19 @@
 # caller gets is that a device pointer works at all, without arranging the
 # staging itself.
 diff --git a/benchmark/nixlbench/src/utils/utils.cpp b/benchmark/nixlbench/src/utils/utils.cpp
-index 0b02fb7..08f60a7 100644
+index 0b02fb7..ebb6f6a 100644
 --- a/benchmark/nixlbench/src/utils/utils.cpp
 +++ b/benchmark/nixlbench/src/utils/utils.cpp
-@@ -58,7 +58,7 @@ NB_ARG_STRING(worker_type, XFERBENCH_WORKER_NIXL, "Type of worker [nixl, nvshmem
+@@ -29,6 +29,8 @@
+ 
+ #include <fcntl.h>
+ #include <filesystem>
++#include <linux/nvme_ioctl.h>
++#include <sys/ioctl.h>
+ #include <gflags/gflags.h>
+ 
+ #include "runtime/etcd/etcd_rt.h"
+@@ -58,7 +60,7 @@ NB_ARG_STRING(worker_type, XFERBENCH_WORKER_NIXL, "Type of worker [nixl, nvshmem
  NB_ARG_STRING(backend,
                XFERBENCH_BACKEND_UCX,
                "Name of NIXL backend [UCX, GDS, GDS_MT, POSIX, GPUNETIO, Mooncake, HF3FS, OBJ, "
@@ -160,7 +169,7 @@ index 0b02fb7..08f60a7 100644
  NB_ARG_STRING(initiator_seg_type,
                XFERBENCH_SEG_TYPE_DRAM,
                "Type of memory segment for initiator [DRAM, VRAM]. Note: Storage backends always "
-@@ -222,6 +222,14 @@ NB_ARG_STRING(obj_hipobj_nic,
+@@ -222,6 +224,14 @@ NB_ARG_STRING(obj_hipobj_nic,
                "",
                "RDMA device hipObject should open, by ibv name (e.g. rocep3s0). Empty lets it "
                "choose the NIC closest to the GPU. Only used with obj_accelerated_type=hipobj");
@@ -175,7 +184,7 @@ index 0b02fb7..08f60a7 100644
  NB_ARG_INT32(obj_hipobj_gpu,
               -1,
               "HIP device index hipObject should pick its NIC closest to, or -1 for the current "
-@@ -346,6 +354,8 @@ size_t xferBenchConfig::obj_crt_min_limit = 0;
+@@ -346,6 +356,8 @@ size_t xferBenchConfig::obj_crt_min_limit = 0;
  bool xferBenchConfig::obj_accelerated_enable = false;
  std::string xferBenchConfig::obj_accelerated_type = "";
  std::string xferBenchConfig::obj_hipobj_nic = "";
@@ -184,7 +193,7 @@ index 0b02fb7..08f60a7 100644
  int xferBenchConfig::obj_hipobj_gpu = -1;
  std::string xferBenchConfig::azure_blob_account_url = "";
  std::string xferBenchConfig::azure_blob_container_name = "";
-@@ -530,6 +540,11 @@ xferBenchConfig::loadParams(void) {
+@@ -530,6 +542,11 @@ xferBenchConfig::loadParams(void) {
          }
  
          // Load OBJ-specific configurations if backend is OBJ
@@ -196,7 +205,7 @@ index 0b02fb7..08f60a7 100644
          if (backend == XFERBENCH_BACKEND_OBJ) {
              obj_access_key = NB_ARG(obj_access_key);
              obj_secret_key = NB_ARG(obj_secret_key);
-@@ -1006,14 +1021,16 @@ xferBenchConfig::isStorageBackend() {
+@@ -1006,14 +1023,16 @@ xferBenchConfig::isStorageBackend() {
              XFERBENCH_BACKEND_OBJ == xferBenchConfig::backend ||
              XFERBENCH_BACKEND_GUSLI == xferBenchConfig::backend ||
              XFERBENCH_BACKEND_AZURE_BLOB == xferBenchConfig::backend ||
@@ -215,7 +224,7 @@ index 0b02fb7..08f60a7 100644
  };
  
  
-@@ -1492,6 +1509,9 @@ xferBenchUtils::putObj(size_t buffer_size, const std::string &name) {
+@@ -1492,6 +1511,9 @@ xferBenchUtils::putObj(size_t buffer_size, const std::string &name) {
          // INFINIA backends don't need external CLI put
          return true;
      }
@@ -225,7 +234,7 @@ index 0b02fb7..08f60a7 100644
      if (xferBenchConfig::backend == XFERBENCH_BACKEND_OBJ) {
          return putObjS3(buffer_size, name);
      } else if (xferBenchConfig::backend == XFERBENCH_BACKEND_AZURE_BLOB) {
-@@ -1509,6 +1529,9 @@ xferBenchUtils::getObj(const std::string &name) {
+@@ -1509,6 +1531,9 @@ xferBenchUtils::getObj(const std::string &name) {
          // INFINIA backends don't need external CLI get
          return true;
      }
@@ -235,7 +244,7 @@ index 0b02fb7..08f60a7 100644
      if (xferBenchConfig::backend == XFERBENCH_BACKEND_OBJ) {
          return getObjS3(name);
      } else if (xferBenchConfig::backend == XFERBENCH_BACKEND_AZURE_BLOB) {
-@@ -1525,6 +1548,9 @@ xferBenchUtils::rmObj(const std::string &name) {
+@@ -1525,6 +1550,9 @@ xferBenchUtils::rmObj(const std::string &name) {
      if (xferBenchConfig::backend == XFERBENCH_BACKEND_INFINIA) {
          return true;
      }
@@ -245,7 +254,7 @@ index 0b02fb7..08f60a7 100644
      if (xferBenchConfig::backend == XFERBENCH_BACKEND_OBJ) {
          return rmObjS3(name);
      } else if (xferBenchConfig::backend == XFERBENCH_BACKEND_AZURE_BLOB) {
-@@ -1536,6 +1562,118 @@ xferBenchUtils::rmObj(const std::string &name) {
+@@ -1536,6 +1564,165 @@ xferBenchUtils::rmObj(const std::string &name) {
      }
  }
  
@@ -300,6 +309,44 @@ index 0b02fb7..08f60a7 100644
 +    return true;
 +}
 +
++/*
++ * The namespace id the device node actually refers to.
++ *
++ * NOT a constant. A controller may serve several namespaces and only some of
++ * them Key Value -- the rocm-ernic target does exactly that -- and in that
++ * case the Key Value namespace is routinely not nsid 1. Worse, the node name
++ * does not give it away: Linux names namespace devices by the head instance it
++ * allocated rather than by namespace id, and a hidden Key Value namespace
++ * still consumes one, so /dev/ng0n1 is commonly nsid 2.
++ *
++ * Getting this wrong is not a failed command, it is a command sent to the
++ * WRONG NAMESPACE. Store is opcode 01h and so is block Write; Delete is 10h
++ * and so is Dataset Management. Aimed at a block namespace on the same
++ * controller, a seeding Store is a write at an LBA derived from the key and
++ * the value size. NVME_IOCTL_ID asks the kernel which namespace this fd is,
++ * which is the same question the plugin asks of its own fd.
++ */
++static bool
++nvmeKvNsid(const std::string &device, uint32_t &nsid) {
++    int fd = open(device.c_str(), O_RDONLY | O_CLOEXEC);
++    if (fd < 0) {
++        std::cerr << "Error: cannot open " << device << ": " << std::strerror(errno)
++                  << std::endl;
++        return false;
++    }
++    int id = ioctl(fd, NVME_IOCTL_ID);
++    close(fd);
++    if (id < 0) {
++        std::cerr << "Error: " << device << " has no namespace id: " << std::strerror(errno)
++                  << ". It has to be a namespace character device such as /dev/ng0n1, not a "
++                     "controller handle such as /dev/nvme0."
++                  << std::endl;
++        return false;
++    }
++    nsid = static_cast<uint32_t>(id);
++    return true;
++}
++
 +static bool
 +nvmeKvRun(const std::string &cmd) {
 +    int rc = std::system(cmd.c_str());
@@ -317,6 +364,10 @@ index 0b02fb7..08f60a7 100644
 +    if (!nvmeKvKeyCdws(name, cdws, key_len)) {
 +        return false;
 +    }
++    uint32_t nsid = 0;
++    if (!nvmeKvNsid(xferBenchConfig::nvme_kv_device, nsid)) {
++        return false;
++    }
 +    std::string filename = "/tmp/" + name;
 +    int fd = createFile(buffer_size, filename);
 +    if (fd < 0) {
@@ -325,7 +376,8 @@ index 0b02fb7..08f60a7 100644
 +    close(fd);
 +
 +    std::string cmd = "nvme io-passthru " + xferBenchConfig::nvme_kv_device +
-+        " --opcode=0x01 --namespace-id=1" + cdws + " --cdw10=" + std::to_string(buffer_size) +
++        " --opcode=0x01 --namespace-id=" + std::to_string(nsid) + cdws +
++        " --cdw10=" + std::to_string(buffer_size) +
 +        " --data-len=" + std::to_string(buffer_size) + " --write --input-file=" + filename +
 +        " >/dev/null 2>&1";
 +    std::cout << "Storing NVMe KV key: " << name << " (" << buffer_size << " bytes)" << std::endl;
@@ -355,8 +407,12 @@ index 0b02fb7..08f60a7 100644
 +    if (!nvmeKvKeyCdws(name, cdws, key_len)) {
 +        return false;
 +    }
++    uint32_t nsid = 0;
++    if (!nvmeKvNsid(xferBenchConfig::nvme_kv_device, nsid)) {
++        return false;
++    }
 +    std::string cmd = "nvme io-passthru " + xferBenchConfig::nvme_kv_device +
-+        " --opcode=0x10 --namespace-id=1" + cdws + " >/dev/null 2>&1";
++        " --opcode=0x10 --namespace-id=" + std::to_string(nsid) + cdws + " >/dev/null 2>&1";
 +    return nvmeKvRun(cmd);
 +}
 +

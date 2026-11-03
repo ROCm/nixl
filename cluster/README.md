@@ -325,6 +325,23 @@ Passthrough is root-only, and sudo drops the environment, so pass
 `NIXL_PLUGIN_DIR` and `LD_LIBRARY_PATH` through explicitly rather than
 relying on `sudo -E`.
 
+**The device node does not tell you the namespace id, and the plugin needs
+both.** `--nvme_kv_device` names a character device; which namespace that is
+comes from `NVME_IOCTL_ID`, not from the name. Linux names namespace devices
+by the head instance it allocated, and a hidden KV namespace still consumes
+one, so on a controller serving a block namespace *and* a KV one, `/dev/ng2n1`
+is nsid 2 and nsid 1 is `/dev/nvme2n2`. Resolve it rather than assuming:
+
+```
+for d in /sys/class/nvme/nvme2/nvme2n*; do
+    echo "$(basename "$d") -> nsid $(cat "$d/nsid")"
+done
+```
+
+This is not pedantry. Store is opcode 01h and so is block Write; Delete is 10h
+and so is Dataset Management. A command aimed at the wrong namespace of the
+same controller is not refused as nonsense, it is executed as something else.
+
 **A READ run needs block size == value size.** nixlbench seeds one object at
 the *registration* size and then reads it in *block*-sized pieces, which is
 S3's model: a KV value is atomic and there is no ranged Retrieve. Reading 4
