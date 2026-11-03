@@ -206,7 +206,37 @@ do_restore() {
 	docker run --rm -v "${PROJECT}_vfu-sockets:/run/vfu" alpine rm -f "${SOCK}"
 	docker rename "${SAVED}" "${MESH}"
 	docker start "${MESH}" >/dev/null
+
+	# The mesh server needs tap0, and tap0 lives in ITS network namespace,
+	# created by a tapsetup container that runs once and exits.  Restarting
+	# the ernic gives it a fresh namespace with no tap0 in it, so the
+	# server spins on "tap0 never appeared", never binds the vfio-user
+	# socket, and the guest never comes back -- which reads as a VM that
+	# failed to boot rather than as a missing sidecar.  The s3, kv and
+	# mixed servers do not take -T and so do not need this; only the mesh
+	# does, which is why it bites on the way back and not on the way out.
+	local tap="${PROJECT}-tapsetup-${VM}-${RAIL}-1"
+	if docker inspect "${tap}" >/dev/null 2>&1; then
+		echo "re-running ${tap} for tap0"
+		docker start "${tap}" >/dev/null
+		wait_for_tap
+	fi
+
 	restart_guest
+}
+
+# tapsetup exits as soon as it has made the interface, so "started" is not
+# "ready".  Wait for the thing itself rather than sleeping.
+wait_for_tap() {
+	local i
+	for i in $(seq 1 30); do
+		if docker exec "${MESH}" test -e /sys/class/net/tap0 2>/dev/null; then
+			return 0
+		fi
+		sleep 1
+	done
+	echo "WARNING: tap0 did not appear in ${MESH}; the guest will not boot" >&2
+	return 1
 }
 
 restart_guest() {
