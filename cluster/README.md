@@ -316,18 +316,27 @@ image change.
   verbs HMEM registration. `FI_VERBS_USE_DMABUF=1` and
   `FI_HMEM_ROCR_USE_DMABUF=1` change nothing.
 
-  **Unconfirmed hypothesis, for whoever picks this up.**
-  `vrb_hmem_supported()` in libfabric 2.7.0 accepts a device when
+  **Tested and ruled out: the device name.** `vrb_hmem_supported()` in
+  libfabric 2.7.0 accepts a device when
   `peer_mem_support && (strstr(dev_name, "mlx") || "bnxt_re" || "roce")`,
   and only otherwise probes dmabuf. Our device is named **`rocep1s0`**,
-  which contains `roce` as a substring, so libfabric may be taking the
-  peer-memory path on a false name match and registering the virtual address
-  directly -- which EFAULTs, because there is no peermem module for ROCm.
-  The dmabuf branch is the one that should run, and libfabric does have the
-  export compiled in (`hsa_amd_portable_export_dmabuf` is referenced in the
-  built library). Settling it needs provider logs, which the release build
-  compiles out: rebuild with `LIBFABRIC_DEBUG=1` and read which branch
-  `vrb_hmem_supported` takes.
+  which contains `roce` as a substring, so the obvious theory was a false
+  name match sending libfabric down the peer-memory path -- which would
+  EFAULT, since there is no peermem module for ROCm. This is the same class
+  of bug as the two in `udev/99-zz-nixl-ernic-name.rules`, where a device
+  name silently changed behaviour in libfabric and in UCX.
+
+  It is not the cause here. Renaming both devices to `rocm_ernic0` and
+  `rocm_ernic1`, which contain no `roce` substring, leaves `fi_mr_reg`
+  failing with exactly the same `Bad address`. DRAM still ran at 2.086 GB/s
+  under the renamed devices, so the rename itself is harmless and changes
+  nothing either way. Do not spend time on it again.
+
+  Still open, then. libfabric does have the ROCr export compiled in
+  (`hsa_amd_portable_export_dmabuf` is referenced in the built library), so
+  the next step is provider logs, which the release build compiles out:
+  rebuild with `LIBFABRIC_DEBUG=1` and read which branch
+  `vrb_hmem_supported` takes and what the registration does with the fd.
 
   Note UCX moves VRAM over this same device, so the NIC is not the limit.
 * **AIS and AIS_MT work**, against VRAM, through hipFile. They did not on the
