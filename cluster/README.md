@@ -186,6 +186,54 @@ the block size -- by running 16 MiB blocks at 16, 32 and 256 MiB buffers:
 2.547, 2.537 and 2.670, so buffer size is not the variable. MORI_IO still
 fails at 16 MiB, with `NIXL_ERR_BACKEND`.
 
+## Batching is still the largest lever
+
+1 MiB blocks, varying only the batch size. Nothing else tried moves
+throughput this much:
+
+| Batch | UCX | LIBFABRIC | MORI_IO |
+|---|---|---|---|
+| 1 | 2.157 | 2.091 | 0.866 |
+| 4 | **5.612** | 4.625 | **2.815** |
+| 8 | 5.184 | **5.467** | 1.404 |
+
+2.6x for UCX and LIBFABRIC. The two differ in where they want to sit: UCX
+peaks at batch 4 and gives a little back at 8, LIBFABRIC is still climbing at
+8. **MORI_IO is the one to be careful with** -- 3.2x at batch 4 and then half
+of that at 8, a collapse rather than a plateau, so a batch size tuned for the
+other two is actively bad for it.
+
+## MORI_IO worker threads
+
+`--progress_threads`, which patch 04 maps onto the plugin's
+`mori_worker_threads`. 1 MiB, batch 4:
+
+| Threads | GB/s |
+|---|---|
+| 1 | 2.232 |
+| 2 | 2.725 |
+| 4 | 2.744 |
+| 8 | 2.725 |
+
+The knee is at 2 and everything past it is flat, so MORI_IO is not
+thread-bound here; one worker is the only setting that costs anything.
+
+## The mesh scales across pairs
+
+Two pairs at once, vm1 <-> vm2 alongside vm3 <-> vm4, 1 MiB at batch 4:
+
+| Backend | pair A | pair B | aggregate |
+|---|---|---|---|
+| LIBFABRIC | 4.162 | 3.949 | **8.112** |
+| UCX | 3.846 | 3.767 | 7.613 |
+| MORI_IO | 1.897 | 1.626 | 3.523 |
+
+8.1 GB/s is the highest figure measured on this cluster. Each pair runs at
+roughly 75% of what it does alone, so the fabric is sharing rather than
+serialising, and LIBFABRIC edges UCX here where the single-pair batched
+numbers had them the other way round -- another reminder not to rank those
+two on one run.
+
 ## Two rails aggregate
 
 Both rails between the same pair of guests, driven as two independent jobs,
@@ -245,32 +293,63 @@ image change.
   registration and rendezvous before failing with
   `connect(10.0.2.15:<port>): Connection refused`. Any multi-homed host has
   this problem; these guests just make it certain.
-* **LIBFABRIC** does not, and the cause is now identified: **RDMA CM does not
-  work on this fabric.** `rping`, which is nothing but RDMA CM, hangs on both
-  sides with no output in either direction. libfabric's `verbs;ofi_rxm` sets
-  its connections up through RDMA CM, so the plugin gets as far as creating
-  its backend, both ranks reach "All processes are ready to proceed" -- that
-  is the ASIO rendezvous, which is ordinary TCP and unaffected -- and then no
-  fabric connection is ever established and the initiator dies on `ASIO
-  Receive timeout`. UCX and MORI_IO are unaffected because they do their own
-  out-of-band setup over TCP and use raw verbs QPs.
+* **LIBFABRIC works on DRAM** and is one of the two fastest backends here;
+  see the tables above. It needed three things, none of them default:
+  `--enable_pt`, the rdma-core ionic `sq_sig_all` fix (see
+  `patches/rdma-core/`), and a rocm-ernic whose guest-to-guest `rdma_cm`
+  works, which is what `docker/rocm-ernic/` builds. `rping` is the quickest
+  check that the third one is in place: it is nothing but RDMA CM, and it
+  completes only on an ernic carrying ROCm/rocm-ernic#315.
+* **LIBFABRIC on VRAM does not work yet**, and is no longer blocked by
+  anything in this repo. `patches/nixl/07` restores the ROCm support NIXL
+  v1.5.2 removed, and with it the plugin detects `ROCr for 2 AMD GPU(s)`,
+  reports FI_HMEM support on both rails, accepts a `VRAM_SEG` registration
+  and reaches `fi_mr_reg` -- which then fails:
 
-  This matches what `overnight-2026-10-22.md` recorded independently: of the
-  three things LIBFABRIC needs, the published rocm-ernic image is not one of
-  them. The other two are now in place --- `--enable_pt`, and the rdma-core
-  ionic `sq_sig_all` fix, which the stock Ubuntu 61.0 provider lacks and
-  without which libfabric gets no send completions at all above the 255-byte
-  inject limit (see `patches/rdma-core/`). Neither is sufficient alone.
+  ```
+  fi_mr_reg failed on rail 0: Bad address
+      (buffer=0x7d4e12a00000, length=16777216, requested_key=0)
+  ```
 
-  Two corrections to what this file used to say. The device is not at fault
-  in the way claimed --- UCX and MORI_IO move multiple GB/s over it. And the
-  claim that `fi_pingpong -e rdm` completes a full sweep is **not reproduced
-  here**; the attempt never got past fi_pingpong's own out-of-band control
-  socket, so it settles nothing either way.
-* **AIS and AIS_MT** reach the GPU but not past hipFile. Registration needs
-  `HIPFILE_ALLOW_COMPAT_MODE=true`, and I/O then still fails
-  (`hipFileWrite failed: Success`, `hipFileBatchIOSubmit failed: err=5030`).
-  Not retested since the guest image moved.
+  NIXL is passing what it should: `iface=FI_HMEM_ROCR` with
+  `mr_attr.device.rocr` set. So the remaining fault is inside libfabric's
+  verbs HMEM registration. `FI_VERBS_USE_DMABUF=1` and
+  `FI_HMEM_ROCR_USE_DMABUF=1` change nothing.
+
+  **Unconfirmed hypothesis, for whoever picks this up.**
+  `vrb_hmem_supported()` in libfabric 2.7.0 accepts a device when
+  `peer_mem_support && (strstr(dev_name, "mlx") || "bnxt_re" || "roce")`,
+  and only otherwise probes dmabuf. Our device is named **`rocep1s0`**,
+  which contains `roce` as a substring, so libfabric may be taking the
+  peer-memory path on a false name match and registering the virtual address
+  directly -- which EFAULTs, because there is no peermem module for ROCm.
+  The dmabuf branch is the one that should run, and libfabric does have the
+  export compiled in (`hsa_amd_portable_export_dmabuf` is referenced in the
+  built library). Settling it needs provider logs, which the release build
+  compiles out: rebuild with `LIBFABRIC_DEBUG=1` and read which branch
+  `vrb_hmem_supported` takes.
+
+  Note UCX moves VRAM over this same device, so the NIC is not the limit.
+* **AIS and AIS_MT work**, against VRAM, through hipFile. They did not on the
+  previous guest image, where I/O failed with `hipFileWrite failed: Success`
+  and `hipFileBatchIOSubmit failed: err=5030`. Registration still needs
+  `HIPFILE_ALLOW_COMPAT_MODE=true`. Two-rail cluster, consistency-checked,
+  `--filepath` on a local NVMe, GB/s:
+
+  | Block | AIS_MT | AIS | POSIX (DRAM) |
+  |---|---|---|---|
+  | 256 KiB | 0.140 | 0.137 | 0.732 |
+  | 512 KiB | 0.199 | 0.196 | 1.031 |
+  | 1 MiB | 0.400 | 0.406 | 1.361 |
+
+  AIS and AIS_MT are indistinguishable from each other at every size, so
+  hipFile's threading is buying nothing here. POSIX is on DRAM and is NOT a
+  like-for-like comparison: it cannot register VRAM at all, failing
+  `registerMem`, which is expected for a host-memory path.
+
+  Measure storage with `--check_consistency true`. Without it AIS_MT reads
+  0.226 GB/s at 1 MiB against 0.138 checked -- the inflation
+  `overnight-2026-10-22.md` warned about is real.
 
 The GPU is driven by `make cluster-gpu`; `VM_VFIO_USER_ROOT_PORT=true` in
 `env/nixl-mori` is load-bearing for it.

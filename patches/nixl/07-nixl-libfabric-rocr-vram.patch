@@ -1,0 +1,338 @@
+# Restore the ROCm support NIXL v1.5.2 removed from its LIBFABRIC backend.
+#
+# VRAM over libfabric worked on v1.5.0 and does not on v1.5.2. The symptom is
+# not a transfer failure -- registerMem refuses the segment before libfabric
+# is ever asked:
+#
+#   libfabric_backend.cpp] Memory type VRAM_SEG is not supported by libfabric
+#                          backend.
+#   nixl_agent.cpp] registerMem: registration failed for the specified or all
+#                   potential backends
+#
+# and the plugin logs "System runtime: SYSTEM (no accelerators)" at startup on
+# a guest with two working GPUs, which reads like a broken ROCm install rather
+# than deleted code.
+#
+# WHAT WAS REMOVED
+#
+# Not one gate -- the whole ROCm path, across five files:
+#
+#   libfabric_topology.h       6 AMD references -> 0   (isAmdAccel,
+#                                                        getNumAmdAccel,
+#                                                        num_amd_accel, and the
+#                                                        ROCR arm of
+#                                                        getMrAttrIface)
+#   libfabric_topology.cpp    15 -> 0   (AMD vendor detection and counting)
+#   libfabric_rail.cpp         8 -> 0   (mr_attr.device.rocr)
+#   libfabric_rail_manager.cpp 3 -> 0   (runtime_ = FI_HMEM_ROCR)
+#   libfabric_backend.cpp      6 -> 0   (the FI_HMEM_ROCR arms)
+#
+# The chain runs bottom-up, which is why restoring any one file alone changes
+# nothing: topology detects an AMD GPU by PCI vendor, the rail manager turns a
+# non-zero count into FI_HMEM_ROCR, and only then do the backend's predicates
+# admit VRAM_SEG. Restoring just the backend leaves it comparing against a
+# value nothing produces.
+#
+# WHY IT WAS PROBABLY REMOVED, AND WHY IT IS SAFE TO PUT BACK HERE
+#
+# v1.5.2 also reverted its own libfabric build baseline from 2.7.0 to 1.21.0
+# (ai-dynamo/nixl#2528). `fi_mr_attr.device.rocr` arrived in libfabric v2.3,
+# so on a 1.21.0 baseline the ROCr registration path cannot compile as
+# written. Dropping ROCm is consistent with that; nothing in the release notes
+# says so.
+#
+# This repo builds libfabric 2.7.0 (see docker/scripts/build-libfabric.sh), so
+# the version the removal was made for does not apply. The restored
+# registration keeps v1.5.0's `FI_VERSION >= (2, 3)` guard, so it still
+# compiles against an older libfabric -- it simply leaves the device handle
+# zeroed there, which is what v1.5.0 did.
+#
+# Restored rather than reverted: v1.5.2's libfabric_backend.cpp differs from
+# v1.5.0's by ~200 lines, and the rest of that is the concurrency work this
+# repo wants -- per-rail endpoint locking (#2542) and the EFA
+# unsolicited-write fix (#2529).
+#
+# The AMD class check accepts 0x1200 (Processing accelerators) as well as the
+# 0x300-0x3ff display-controller range, because MI300X and the emulated
+# rocjitsu both present 0x1200. A check written only against consumer GPUs
+# finds nothing on either.
+#
+# `is_cuda_vram` keeps its name: local, used three lines later, and renaming
+# it would enlarge the patch for no behavioural gain. It now means "VRAM on an
+# accelerator runtime", CUDA or ROCr.
+#
+# Drop this when upstream restores ROCm support; check getNumAmdAccel in
+# src/utils/libfabric/libfabric_topology.h first, since everything else
+# depends on it.
+#
+# THE BUILD-TIME GATE, WHICH IS THE ONE THAT ACTUALLY DECIDES
+#
+# Restoring the runtime detection above is necessary and still not enough.
+# src/plugins/libfabric/meson.build adds -DHAVE_CUDA only when a CUDA toolkit
+# is found, and EVERY VRAM path in the backend sits behind that macro. On a
+# ROCm machine there is no CUDA, so the whole block is compiled out and
+# getSupportedMems() cannot return VRAM_SEG no matter what the rail manager
+# detected -- the plugin cheerfully reports "System runtime: ROCr for 2 AMD
+# GPU(s)" and then refuses the segment two calls later. That is also why this
+# never worked on v1.5.0 either: its ROCR arm is inside the same #ifdef.
+#
+# So the patch adds -DHAVE_ROCM, keyed off the existing rocm_path option, and
+# widens only the support predicate to accept either GPU stack.
+#
+# The CUDA address workaround -- vramInitCtx, vramUpdateCtx, vramApplyCtx and
+# the is_cuda_vram gating in the transfer path -- is deliberately NOT widened.
+# It exists to fix a CUDA context problem, ROCr has no equivalent, and routing
+# ROCr through it would call CUDA driver entry points on a machine with no
+# CUDA. An earlier draft of this patch did exactly that.
+#
+# No ROCm dependency is linked, because the ROCr path needs no HIP calls from
+# this plugin: the device handle is set in the rail layer via
+# fi_mr_attr.device.rocr.
+#
+--- a/src/utils/libfabric/libfabric_topology.h
++++ b/src/utils/libfabric/libfabric_topology.h
+@@ -44,6 +44,7 @@
+     // System information
+     int num_aws_accel; // AWS Trainium accelerators
+     int num_nvidia_accel; // NVIDIA GPU accelerators
++    int num_amd_accel; // AMD GPU accelerators
+     int num_numa_nodes;
+     int num_devices;
+ 
+@@ -145,6 +146,8 @@
+     isNvidiaAccel(hwloc_obj_t obj) const;
+     bool
+     isNeuronAccel(hwloc_obj_t obj) const;
++    bool
++    isAmdAccel(hwloc_obj_t obj) const;
+ 
+     // retrieves line speed of NIC from map
+     size_t
+@@ -209,6 +212,11 @@
+         return num_nvidia_accel;
+     }
+ 
++    int
++    getNumAmdAccel() const {
++        return num_amd_accel;
++    }
++
+     const std::vector<std::string> &
+     getAllDevices() const {
+         return all_devices;
+@@ -230,7 +238,13 @@
+ 
+     enum fi_hmem_iface
+     getMrAttrIface(int device_id) const {
+-        return (device_id < num_nvidia_accel) ? FI_HMEM_CUDA : FI_HMEM_NEURON;
++        if (device_id < num_nvidia_accel) {
++            return FI_HMEM_CUDA;
++        } else if (device_id < num_nvidia_accel + num_amd_accel) {
++            return FI_HMEM_ROCR;
++        } else {
++            return FI_HMEM_NEURON;
++        }
+     }
+ 
+     /** @brief Invalid NUMA node id constant. */
+--- a/src/utils/libfabric/libfabric_topology.cpp
++++ b/src/utils/libfabric/libfabric_topology.cpp
+@@ -36,6 +36,7 @@
+ nixlLibfabricTopology::nixlLibfabricTopology()
+     : num_aws_accel(0),
+       num_nvidia_accel(0),
++      num_amd_accel(0),
+       num_numa_nodes(0),
+       num_devices(0),
+       topology_discovered(false),
+@@ -72,6 +73,19 @@
+         return status;
+     }
+ 
++    // Discover accelerators from hwloc early, before provider selection. v1.5.0
++    // did this; v1.5.2 reaches discoverAccelWithHwloc() only through
++    // discoverHwlocTopology(), which runs for the efa and cxi providers alone.
++    // On verbs -- which is what an RDMA NIC that is not EFA or CXI selects --
++    // the scan therefore never happens, every accelerator count stays zero, and
++    // the rail manager reports "SYSTEM (no accelerators)" on a host with GPUs.
++    // That is what gates VRAM_SEG out of getSupportedMems().
++    status = discoverAccelWithHwloc();
++    if (status != NIXL_SUCCESS) {
++        NIXL_ERROR << "Failed to discover accelerators from hwloc";
++        return status;
++    }
++
+     status = discoverProviderWithDevices();
+     if (status != NIXL_SUCCESS) {
+         return status;
+@@ -260,7 +274,8 @@
+ void
+ nixlLibfabricTopology::printTopologyInfo() const {
+     NIXL_INFO << "Topology: " << num_numa_nodes << " NUMA nodes, " << num_devices << " NICs, "
+-              << num_nvidia_accel << " NVIDIA GPUs, " << num_aws_accel << " AWS accelerators";
++              << num_nvidia_accel << " NVIDIA GPUs, " << num_amd_accel << " AMD GPUs, "
++              << num_aws_accel << " AWS accelerators";
+     if (avg_nic_speed > 0) {
+         NIXL_INFO << "Avg NIC bandwidth: " << avg_nic_speed << " Gbps";
+     }
+@@ -408,29 +423,38 @@
+ nixlLibfabricTopology::discoverAccelWithHwloc() {
+     num_aws_accel = 0;
+     num_nvidia_accel = 0;
++    num_amd_accel = 0;
+     // Find all PCI devices and log detailed information
+-    static const char *vendor_names[2] = {"NEURON", "NVIDIA"};
+     hwloc_obj_t pci_obj = nullptr;
+     while ((pci_obj = hwloc_get_next_pcidev(hwloc_topology, pci_obj)) != nullptr) {
+         const bool is_nvidia_accel = isNvidiaAccel(pci_obj);
+-        if (is_nvidia_accel || isNeuronAccel(pci_obj)) {
++        const bool is_amd_accel = isAmdAccel(pci_obj);
++        if (is_nvidia_accel || is_amd_accel || isNeuronAccel(pci_obj)) {
+             std::string pcie_addr = getPcieAddressFromHwlocObj(pci_obj);
+             // Get device and vendor info
+             uint16_t vendor_id = pci_obj->attr->pcidev.vendor_id;
+             uint16_t device_id = pci_obj->attr->pcidev.device_id;
+             uint16_t class_id = pci_obj->attr->pcidev.class_id;
+ 
+-            NIXL_TRACE << "Found " << vendor_names[is_nvidia_accel] << " accelerator "
+-                       << num_aws_accel << ": " << pcie_addr << " (vendor=" << std::hex << vendor_id
+-                       << ", device=" << device_id << ", class=" << class_id << std::dec << ")";
++            const char *vendor_name =
++                is_nvidia_accel ? "NVIDIA" : is_amd_accel ? "AMD" : "NEURON";
+ 
+-            num_aws_accel++;
+-            num_nvidia_accel += is_nvidia_accel;
++            NIXL_TRACE << "Found " << vendor_name << " accelerator: " << pcie_addr
++                       << " (vendor=" << std::hex << vendor_id << ", device=" << device_id
++                       << ", class=" << class_id << std::dec << ")";
++
++            if (is_nvidia_accel) {
++                num_nvidia_accel++;
++            } else if (is_amd_accel) {
++                num_amd_accel++;
++            } else {
++                num_aws_accel++;
++            }
+         }
+     }
+ 
+-    NIXL_TRACE << "Discovered " << num_aws_accel << " "
+-               << vendor_names[num_aws_accel == num_nvidia_accel] << " devices via hwloc";
++    NIXL_TRACE << "Discovered " << num_nvidia_accel << " NVIDIA, " << num_amd_accel
++               << " AMD, and " << num_aws_accel << " Neuron accelerators via hwloc";
+ 
+     // If we found more than 8 NVIDIA accelerators on P5en, investigate further
+     if (num_nvidia_accel > 8) {
+@@ -746,6 +770,23 @@
+ }
+ 
+ bool
++nixlLibfabricTopology::isAmdAccel(hwloc_obj_t obj) const {
++    if (!obj || obj->type != HWLOC_OBJ_PCI_DEVICE) {
++        return false;
++    }
++    // AMD vendor ID is 0x1002
++    if (obj->attr->pcidev.vendor_id != 0x1002) {
++        return false;
++    }
++    // Class 0x300-0x3ff is a display controller, which is what consumer
++    // GPUs present. MI300X and the emulated rocjitsu present 0x1200,
++    // Processing accelerators, so both ranges have to be accepted.
++    uint16_t class_id = obj->attr->pcidev.class_id;
++    return (class_id >= 0x300 && class_id < 0x400) ||
++        (class_id >= 0x1200 && class_id < 0x1300);
++}
++
++bool
+ nixlLibfabricTopology::isNeuronAccel(hwloc_obj_t obj) const {
+     if (!obj || obj->type != HWLOC_OBJ_PCI_DEVICE) {
+         return false;
+--- a/src/utils/libfabric/libfabric_rail_manager.cpp
++++ b/src/utils/libfabric/libfabric_rail_manager.cpp
+@@ -206,6 +206,10 @@
+         runtime_ = FI_HMEM_CUDA;
+         NIXL_INFO << "System runtime: CUDA for " << topology->getNumNvidiaAccel()
+                   << " NVIDIA GPU(s)";
++    } else if (topology->getNumAmdAccel() > 0) {
++        runtime_ = FI_HMEM_ROCR;
++        NIXL_INFO << "System runtime: ROCr for " << topology->getNumAmdAccel()
++                  << " AMD GPU(s)";
+     } else if (topology->getNumAwsAccel() > 0) {
+         runtime_ = FI_HMEM_NEURON;
+         NIXL_INFO << "System runtime: NEURON for " << topology->getNumAwsAccel()
+--- a/src/utils/libfabric/libfabric_rail.cpp
++++ b/src/utils/libfabric/libfabric_rail.cpp
+@@ -1612,6 +1612,19 @@
+                 mr_attr.device.cuda = device_id;
+                 NIXL_DEBUG << "CUDA memory registration - iface: FI_HMEM_CUDA, device.cuda: "
+                            << device_id;
++            } else if (iface == FI_HMEM_ROCR) {
++                // AMD ROCr memory registration
++                // ROCr uses HSA agent handles for device identification.
++                // The device_id corresponds to the GPU index (0-based).
++                // The device.rocr union member was added in libfabric v2.3; on
++                // older libfabric the union has no rocr member (and the EFA
++                // provider ignores the device handle for ROCr), so the
++                // zero-initialized union is sufficient.
++#if FI_VERSION(FI_MAJOR_VERSION, FI_MINOR_VERSION) >= FI_VERSION(2, 3)
++                mr_attr.device.rocr = device_id;
++#endif
++                NIXL_DEBUG << "ROCr memory registration - iface: FI_HMEM_ROCR, device_id: "
++                           << device_id;
+             } else if (iface == FI_HMEM_NEURON) {
+                 /*
+                  * Store a sentinel; libfabric requires this to be initialized.
+--- a/src/plugins/libfabric/libfabric_backend.cpp
++++ b/src/plugins/libfabric/libfabric_backend.cpp
+@@ -486,6 +486,7 @@
+ 
+     NIXL_INFO << "System runtime: "
+               << (runtime_ == FI_HMEM_CUDA       ? "CUDA" :
++                      runtime_ == FI_HMEM_ROCR   ? "ROCr" :
+                       runtime_ == FI_HMEM_NEURON ? "NEURON" :
+                                                    "SYSTEM");
+ 
+@@ -934,9 +935,10 @@
+ nixlLibfabricEngine::getSupportedMems() const {
+     nixl_mem_list_t mems;
+     mems.push_back(DRAM_SEG);
+-#ifdef HAVE_CUDA
+-    if (runtime_ == FI_HMEM_CUDA) {
+-        NIXL_DEBUG << "CUDA runtime detected, adding VRAM support";
++#if defined(HAVE_CUDA) || defined(HAVE_ROCM)
++    if (runtime_ == FI_HMEM_CUDA || runtime_ == FI_HMEM_ROCR) {
++        NIXL_DEBUG << (runtime_ == FI_HMEM_CUDA ? "CUDA" : "ROCr")
++                   << " runtime detected, adding VRAM support";
+         mems.push_back(VRAM_SEG);
+     } else
+ #endif
+--- a/src/plugins/libfabric/meson.build
++++ b/src/plugins/libfabric/meson.build
+@@ -34,6 +34,27 @@
+     compile_flags += ['-DHAVE_CUDA']
+ endif
+ 
++# Add ROCm support if available.
++#
++# Every VRAM path in this plugin sits behind HAVE_CUDA, which is defined only
++# when a CUDA toolkit is found -- so on a ROCm machine the backend compiles
++# host-memory-only and getSupportedMems() can never return VRAM_SEG, whatever
++# the rail manager detected. That is a build-time gate, not a device or
++# libfabric limitation: libfabric's verbs provider advertises FI_HMEM for a
++# RoCE device, and FI_HMEM_ROCR with fi_mr_attr.device.rocr has been available
++# since libfabric v2.3.
++#
++# No ROCm dependency is linked. The ROCr path needs no HIP calls from this
++# plugin: the CUDA context workaround stays CUDA-only (ROCr has no equivalent),
++# and the device handle is set in the rail layer. This flag therefore only
++# un-gates code, which is why it can key off the path rather than a found
++# dependency.
++rocm_path_opt = get_option('rocm_path')
++if rocm_path_opt != '' and fs.exists(rocm_path_opt)
++    compile_flags += ['-DHAVE_ROCM']
++    message('LIBFABRIC plugin: ROCm VRAM support enabled from ' + rocm_path_opt)
++endif
++
+ # Build as static or shared library based on configuration
+ if 'LIBFABRIC' in static_plugins
+     libfabric_backend_lib = static_library(
