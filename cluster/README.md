@@ -244,8 +244,10 @@ Measured 2026-11-03, vm4, 128 KiB values, GB/s and average latency:
 | DRAM | 6.787 / 19.3 us | 9.290 / 14.1 us |
 | VRAM | 0.330 / 396.9 us | 7.049 / 18.6 us |
 
-Median of three runs each. Re-measured on ernic 8e43a0c, which moved every
-figure: against the 461dbbd numbers this table used to carry, Retrieve DRAM
+Median of three runs each -- fewer than the eight the transport table below
+uses, so treat these as indicative and re-measure in one burst before
+quoting them against anything. Re-measured on ernic 8e43a0c, which moved
+every figure: against the 461dbbd numbers this table used to carry, Retrieve DRAM
 is up from 5.072 and Retrieve VRAM from 2.126, and Store VRAM from 0.062.
 Only Store DRAM is close to where it was, at 6.141 before.
 
@@ -680,7 +682,9 @@ image change.
   check that the third one is in place: it is nothing but RDMA CM, and it
   completes only on an ernic carrying ROCm/rocm-ernic#315.
 * **LIBFABRIC on VRAM works**, and is the fastest VRAM path here. 1 MiB
-  blocks: LIBFABRIC 2.247 GB/s, UCX 2.333, MORI_IO 0.816.
+  blocks, medians of eight runs: LIBFABRIC 2.174 GB/s, UCX 2.103,
+  MORI_IO 0.944. See "VRAM over the fabric works" below for the spread and
+  for why a smaller sample on this host is not worth quoting.
 
   It took `patches/libfabric/01`, and the cause was the same bug as
   `patches/ucx/03` in a second library. `rocr_is_dmabuf_supported()` decides
@@ -761,32 +765,59 @@ wrong question of it. Measured vm1 <-> vm2, 16 MiB buffer, GB/s:
 All three transports move VRAM now. LIBFABRIC needed `patches/libfabric/01`
 as well as `patches/nixl/07`; see the transport list below for why.
 
-Re-measured on ernic 8e43a0c, 1 MiB blocks, 16 MiB buffer, vm1 <-> vm2, two
-runs each:
+Re-measured on ernic 8e43a0c, 1 MiB blocks, 16 MiB buffer, vm1 <-> vm2.
+**Eight consecutive runs each, median reported** -- see the warning below
+about why two is not enough here:
 
-| Backend | DRAM | VRAM | recorded on the previous pins (VRAM) |
+| Backend | VRAM median | VRAM min-max | previously recorded |
 |---|---|---|---|
-| UCX | 1.545, 1.631 | 1.591, 1.796 | 2.333 |
-| LIBFABRIC | 1.659, 1.780 | 1.523, 1.477 | 2.247 |
-| MORI_IO | 0.775, 0.766 | 0.672, 0.705 | 0.816 |
+| UCX | 2.103 | 2.070 - 2.129 | 2.333 |
+| LIBFABRIC | 2.174 | 2.116 - 2.385 | 2.247 |
+| MORI_IO | 0.944 | 0.739 - 1.005 | 0.816 |
 
-**Every transport is below what this file used to record, by 15 to 33%, and
-that is a fleet property rather than a backend one.** The pins moved three
-ways at once between the two measurements -- ernic source and base image,
-QEMU `aa4344e` to `f91f120`, and libvfio-user `vfu.8039244` to
-`vfu.3719c3a` -- so nothing here attributes it. The last two are in the
-vfio-user data path, which is where bandwidth would go.
+UCX DRAM over the same eight runs: median 2.162, range 2.093 - 2.253.
 
-What has NOT changed is the shape, which is what the conclusions below rest
-on: VRAM still matches DRAM within run-to-run variance for all three, and
-the ordering is still UCX and LIBFABRIC together at roughly 2.3x MORI_IO.
+So nothing regressed. Two are a few per cent under what this file recorded
+and MORI_IO is above it, which is the spread of the measurement rather than
+a change in the cluster.
+
+**THIS HOST IS SHARED, AND THE NUMBERS MOVE WITH ITS LOAD.** It has 32
+threads and several hundred logged-in users, and during the runs above its
+load average went from 50 to 177 -- other people's jobs, not ours. The
+consequence is specific and worth knowing before trusting any figure here:
+
+* Within one burst of eight back-to-back runs the spread is small: 1.03x
+  for UCX, 1.13x for LIBFABRIC, 1.36x for MORI_IO.
+* BETWEEN bursts minutes apart it is not. The same UCX VRAM configuration
+  that medians 2.103 here read 1.591 and 1.796 in a two-run sample taken
+  twenty minutes earlier, when the host was busier. That is a 1.5x swing
+  from nothing but neighbours.
+
+An earlier revision of this file reported a 15-33% fleet-wide regression
+across all three transports, attributed to the pin bump. That was wrong, and
+it was wrong because it rested on two runs per configuration. Take eight in
+one burst, report the median, and note the load; a two-run sample on this
+machine can say almost anything.
+
+`cluster/scripts/bench.sh` does exactly that, so the rule does not have to
+be remembered:
+
+```
+cluster/scripts/bench.sh UCX VRAM
+RUNS=16 BLOCK=262144 cluster/scripts/bench.sh LIBFABRIC DRAM
+```
+
+It runs eight by default, prints every run, reports min/median/max and the
+load either side, and says so when the spread passes 1.25x. It also carries
+the two flags that are mandatory and not default -- `--enable_pt` for
+LIBFABRIC and `--mori_host` for MORI_IO -- so a measurement cannot
+accidentally be taken without them.
 
 For reference, raw RDMA underneath all of this is 5.73 GB/s at 1 MiB
-(`ib_send_bw -s 1048576 -n 2000`, vm3 <-> vm4, rail 1). There is no earlier
-perftest figure recorded here to compare it against, which is the gap that
-makes the regression hard to localise -- a raw-fabric baseline taken at each
-pin bump would have said immediately whether the loss is under NIXL or in
-it.
+(`ib_send_bw -s 1048576 -n 2000`, vm3 <-> vm4, rail 1), measured the same
+way. It is recorded here so the next pin bump has a fabric baseline to move
+against rather than only end-to-end numbers, which is what would separate a
+real regression from a loaded afternoon.
 
 All four columns are one 16 MiB buffer so they compare directly; the DRAM
 figures elsewhere in this file use a 1 GiB buffer and are not interchangeable
