@@ -48,7 +48,9 @@ PROJECT="${PROJECT:-nixl-mori}"
 VM="${VM:-4}"
 RAIL="${RAIL:-2}"
 SUBNET="$(envget ERNIC_GUEST_SUBNET 192.168.80)"
-ERNIC_IMAGE="$(envget ERNIC_IMAGE '')"
+# Overridable from the environment so a locally built server can be put on
+# one rail without editing the pins the rest of the fleet runs.
+ERNIC_IMAGE="${ERNIC_IMAGE:-$(envget ERNIC_IMAGE '')}"
 ERNIC_PER_VM="$(envget ERNIC_PER_VM 1)"
 SSH_BASE="$(envget VM_SSH_PORT_BASE 2400)"
 
@@ -57,9 +59,66 @@ S3_PORT="${S3_PORT:-9000}"
 S3_BUCKET="${S3_BUCKET:-ernic}"
 S3_SIZE="${S3_SIZE:-1G}"
 
+# NVMe Key Value. `--backend nvmeof:kv=1` turns the NVMe-oF target's namespace
+# into a KV one, and like s3 it runs inside the server process -- so one guest
+# and one rail are a complete KV fabric. maxval is what the plugin can Store in
+# one command; MDTS caps the transfer below it anyway (5, so 128 KiB here).
+KV_IP="${KV_IP:-${SUBNET}.201}"
+KV_PORT="${KV_PORT:-4420}"
+KV_SIZE="${KV_SIZE:-256M}"
+KV_KEYS="${KV_KEYS:-4096}"
+KV_MAXVAL="${KV_MAXVAL:-1M}"
+KV_NQN="${KV_NQN:-nvmet-test}"
+
+# The block namespace of a mixed controller.
+BLK_SIZE="${BLK_SIZE:-1G}"
+BLK_BS="${BLK_BS:-4096}"
+
+# Everything below is backend-agnostic: the rail swap, the restart ordering,
+# the socket handling and the host route are the same whichever one is served.
+MODE="${MODE:-s3}"
+case "${MODE}" in
+	s3)
+		BACKEND="s3:ip=${S3_IP},port=${S3_PORT},size=${S3_SIZE},bucket=${S3_BUCKET}"
+		TARGET_IP="${S3_IP}"
+		ENDPOINT="http://${S3_IP}:${S3_PORT}/${S3_BUCKET}/"
+		;;
+	kv)
+		BACKEND="nvmeof:kv=1,size=${KV_SIZE},keys=${KV_KEYS},maxval=${KV_MAXVAL},ip=${KV_IP}"
+		TARGET_IP="${KV_IP}"
+		ENDPOINT="nvme://${KV_IP}:${KV_PORT}/${KV_NQN}"
+		;;
+	mixed)
+		# One controller, two namespaces, two command sets: nsid 1 blocks
+		# and nsid 2 Key Value.  The guest gets /dev/nvmeXn1 for the first
+		# and /dev/ngXn2 for the second off a single `nvme connect`.
+		BACKEND="nvmeof:size=${BLK_SIZE},bs=${BLK_BS},ip=${KV_IP}"
+		BACKEND="${BACKEND},ns=2,kv=1,size=${KV_SIZE}"
+		BACKEND="${BACKEND},keys=${KV_KEYS},maxval=${KV_MAXVAL}"
+		TARGET_IP="${KV_IP}"
+		ENDPOINT="nvme://${KV_IP}:${KV_PORT}/${KV_NQN} (nsid 1 block, nsid 2 kv)"
+		;;
+	*) echo "ERROR: MODE must be s3, kv or mixed, not '${MODE}'" >&2; exit 2 ;;
+esac
+
 MESH="${PROJECT}-ernic-${VM}-${RAIL}-1"
-S3C="${PROJECT}-ernic-${VM}-${RAIL}-s3"
+SVC="${PROJECT}-ernic-${VM}-${RAIL}-${MODE}"
 SAVED="${PROJECT}-ernic-${VM}-${RAIL}-mesh-saved"
+
+# Every mode's container name, so switching modes on a rail displaces the
+# previous server instead of leaving it running: two servers on one socket
+# look like a guest that will not come up, and the loser is silent about it.
+ALL_SVC=()
+for _m in s3 kv mixed; do
+	ALL_SVC+=("${PROJECT}-ernic-${VM}-${RAIL}-${_m}")
+done
+
+drop_services() {
+	local c
+	for c in "${ALL_SVC[@]}"; do
+		docker rm -f "${c}" >/dev/null 2>&1 || true
+	done
+}
 QEMU="${PROJECT}-qemu-${VM}-1"
 SOCK="/run/vfu/ernic-${VM}-${RAIL}.sock"
 SSH_PORT=$(( SSH_BASE + VM - 1 ))
@@ -100,27 +159,42 @@ do_start() {
 	docker stop "${QEMU}" >/dev/null 2>&1 || true
 	docker stop "${src}" >/dev/null 2>&1 || true
 	[[ "${src}" == "${SAVED}" ]] || docker rename "${src}" "${SAVED}"
-	docker rm -f "${S3C}" >/dev/null 2>&1 || true
+	drop_services
 
 	# The displaced server owns the socket inode; a new one cannot bind it.
 	docker run --rm -v "${PROJECT}_vfu-sockets:/run/vfu" alpine rm -f "${SOCK}"
 
-	echo "starting the S3 server at http://${S3_IP}:${S3_PORT}/${S3_BUCKET} (${S3_SIZE})"
-	docker run -d --name "${S3C}" \
+	echo "starting the ${MODE} server at ${ENDPOINT}"
+	docker run -d --name "${SVC}" \
 		--user "${user}" --hostname "${hostname}" \
 		--network "${PROJECT}_fleet" --ip "${fleet_ip}" \
 		-v "${PROJECT}_vfu-sockets:/run/vfu" \
 		-e "ERNIC_TCP_GUEST_GIDS=${gids}" \
 		--restart on-failure \
 		"${ERNIC_IMAGE}" \
-		rocm-ernic -s "${SOCK}" \
-			-b "s3:ip=${S3_IP},port=${S3_PORT},size=${S3_SIZE},bucket=${S3_BUCKET}" \
+		rocm-ernic -s "${SOCK}" -b "${BACKEND}" \
 			-m "${mac}" >/dev/null
 
 	restart_guest
 	echo
-	echo "vm${VM} rail ${RAIL} now serves S3 at http://${S3_IP}:${S3_PORT}/${S3_BUCKET}/"
+	echo "vm${VM} rail ${RAIL} now serves ${MODE} at ${ENDPOINT}"
 	echo "next: make cluster-gpu ANSIBLE_ARGS='--limit vm${VM}'"
+	[[ "${MODE}" == "kv" || "${MODE}" == "mixed" ]] && cat <<-EOF
+
+		Then, in the guest -- the neighbour entry is the unobvious one. The
+		controller is not a host on the segment and has no MAC, so address
+		resolution has nothing to resolve to and the connect fails with
+		"rdma connection establishment failed (-104)" and nothing at all in
+		the target's log. Any link-layer address will do; the emulator routes
+		by queue pair, not by MAC.
+
+		  sudo ip neigh replace ${KV_IP} lladdr 02:00:00:00:c0:01 dev <rail> nud permanent
+		  sudo nvme connect -t rdma -a ${KV_IP} -s ${KV_PORT} -n ${KV_NQN}
+
+		Linux hides the block device for a CSI 1 namespace and keeps /dev/ngXnY,
+		which is what the NVME_KV plugin opens.
+	EOF
+	return 0
 }
 
 do_restore() {
@@ -128,7 +202,7 @@ do_restore() {
 		echo "ERROR: no ${SAVED} to restore" >&2; exit 1; }
 	echo "restoring vm${VM} rail ${RAIL} to the TCP mesh"
 	docker stop "${QEMU}" >/dev/null 2>&1 || true
-	docker rm -f "${S3C}" >/dev/null 2>&1 || true
+	drop_services
 	docker run --rm -v "${PROJECT}_vfu-sockets:/run/vfu" alpine rm -f "${SOCK}"
 	docker rename "${SAVED}" "${MESH}"
 	docker start "${MESH}" >/dev/null
@@ -165,8 +239,8 @@ add_route() {
 	local dev
 	dev="$(ssh_guest "ip -br -4 a | awk '\$3 ~ /^$(guest_rail_ip)\//{print \$1}'" || true)"
 	[[ -n "${dev}" ]] || { echo "WARNING: no guest interface holds $(guest_rail_ip)" >&2; return; }
-	ssh_guest "sudo ip route replace ${S3_IP}/32 dev ${dev} src $(guest_rail_ip)"
-	echo "vm${VM}: ${S3_IP} pinned to ${dev}"
+	ssh_guest "sudo ip route replace ${TARGET_IP}/32 dev ${dev} src $(guest_rail_ip)"
+	echo "vm${VM}: ${TARGET_IP} pinned to ${dev}"
 }
 
 # The key comes out of the artifacts tree named for VM_BACKING_IMAGE's build
@@ -188,5 +262,5 @@ case "${1-}" in
 	start)   do_start ;;
 	restore) do_restore ;;
 	route)   add_route ;;
-	*) echo "usage: VM=4 RAIL=2 $0 {start|restore|route}" >&2; exit 2 ;;
+	*) echo "usage: [MODE=s3|kv|mixed] VM=4 RAIL=2 $0 {start|restore|route}" >&2; exit 2 ;;
 esac
