@@ -283,6 +283,48 @@ RUN --mount=type=cache,target=/root/.cache,sharing=locked \
         bash /tmp/scripts/build-hipfile.sh && rm -rf /tmp/hipfile-src; \
     fi
 
+# ----- 1b1. hipObject (ROCm), the S3-over-RDMA client ------------------------
+# FROM base: it needs HIP and hsa-runtime64 and nothing else in this image.
+#
+# The client half of an S3-over-RDMA path whose server half rocm-ernic already
+# provides (`--backend s3`). See docker/scripts/build-hipobject.sh for why it
+# is here and what is still missing above it.
+#
+# HIPOBJECT_REF empty skips the stage and leaves /opt/hipobject empty, the
+# same escape hatch the other optional components have.
+FROM base AS hipobject
+
+ARG HIPOBJECT_GIT_URL=https://github.com/ROCm/hipObject.git
+ARG HIPOBJECT_REF=5e93b85af350df1076b4dadb5f0f74705d3599f1
+
+ENV HIPOBJECT_PREFIX=/opt/hipobject
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    if [ -n "${HIPOBJECT_REF}" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends \
+            cmake ninja-build pkg-config libcurl4-openssl-dev libssl-dev; \
+    fi
+
+COPY docker/scripts/clone-src.sh docker/scripts/build-hipobject.sh /tmp/scripts/
+
+RUN mkdir -p /opt/hipobject && \
+    if [ -z "${HIPOBJECT_REF}" ]; then \
+        echo "HIPOBJECT_REF empty -- no hipObject in this image"; \
+    else \
+        SRC_NAME=hipobject \
+        SRC_GIT_URL="${HIPOBJECT_GIT_URL}" \
+        SRC_REF="${HIPOBJECT_REF}" \
+        SRC_DEST=/tmp/hipobject-src \
+        bash /tmp/scripts/clone-src.sh; \
+    fi
+
+RUN --mount=type=cache,target=/root/.cache,sharing=locked \
+    if [ -n "${HIPOBJECT_REF}" ]; then \
+        HIPOBJECT_SRC=/tmp/hipobject-src \
+        bash /tmp/scripts/build-hipobject.sh && rm -rf /tmp/hipobject-src; \
+    fi
+
 # ----- 1b2. perftest (linux-rdma), ROCm-enabled ------------------------------
 # FROM base: perftest depends on libibverbs and ROCm, not on UCX, libfabric or
 # hipFile, so it builds concurrently with all of them.
@@ -538,6 +580,7 @@ COPY --from=hipfile /opt/hipfile     /opt/hipfile
 COPY --from=libfabric /opt/libfabric /opt/libfabric
 # Both are symlink trees or empty when FIO_REF is unset; /opt/fio-hipfile is
 # the prefix fio's rpath points at, so it has to come along with the binary.
+COPY --from=hipobject /opt/hipobject /opt/hipobject
 COPY --from=perftest /opt/perftest   /opt/perftest
 COPY --from=fio     /opt/fio         /opt/fio
 COPY --from=fio     /opt/fio-hipfile /opt/fio-hipfile
@@ -570,6 +613,7 @@ ENV NIXL_PREFIX=/opt/nixl \
     PYTHONPATH=/opt/nixl/lib/python3/dist-packages \
     FIO_PREFIX=/opt/fio \
     PERFTEST_PREFIX=/opt/perftest \
+    HIPOBJECT_PREFIX=/opt/hipobject \
     LIBFABRIC_PREFIX=/opt/libfabric \
     PATH=/opt/nixlbench/bin:/opt/hsa-snoop/bin:/opt/perftest/bin:/opt/fio/bin:/opt/rocnixl-ucx/bin:/opt/libfabric/bin:${PATH}
 
@@ -794,6 +838,7 @@ COPY --from=runtime-slim-deps /slim/opt/rocm /opt/rocm
 COPY --from=ucx       /opt/rocnixl-ucx /opt/rocnixl-ucx
 COPY --from=libfabric /opt/libfabric   /opt/libfabric
 COPY --from=hipfile   /opt/hipfile     /opt/hipfile
+COPY --from=hipobject /opt/hipobject   /opt/hipobject
 COPY --from=perftest  /opt/perftest    /opt/perftest
 COPY --from=fio       /opt/fio         /opt/fio
 COPY --from=fio       /opt/fio-hipfile /opt/fio-hipfile
@@ -812,6 +857,7 @@ ENV ROCM_PATH=/opt/rocm \
     LIBFABRIC_PREFIX=/opt/libfabric \
     FIO_PREFIX=/opt/fio \
     PERFTEST_PREFIX=/opt/perftest \
+    HIPOBJECT_PREFIX=/opt/hipobject \
     FI_UNIVERSE_SIZE=16 \
     UCX_ROCM_COPY_DMABUF=try \
     PATH=/opt/nixlbench/bin:/opt/hsa-snoop/bin:/opt/perftest/bin:/opt/fio/bin:/opt/rocnixl-ucx/bin:/opt/libfabric/bin:/opt/rocm/bin:${PATH}
