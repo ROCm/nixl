@@ -66,7 +66,7 @@ FROM ${ERNIC_BASE_IMAGE} AS build
 # A SHA, not a branch. `develop` would make this image's contents depend on
 # the day it was built, and the whole point is a device whose behaviour is
 # known. Move it deliberately, and re-test LIBFABRIC when you do.
-ARG ERNIC_REF=461dbbd5762c9485a4918d3cad7e616aaaedcda0
+ARG ERNIC_REF=8e43a0c11e7df700b0ea1c5846af9b6dc421c4e6
 ARG ERNIC_GIT_URL=https://github.com/ROCm/rocm-ernic.git
 
 # The commit that makes guest-to-guest rdma_cm work. Asserted below rather

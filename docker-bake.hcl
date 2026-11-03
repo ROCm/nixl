@@ -105,10 +105,15 @@ target "wheels" {
 // as absent rather than as an error.
 variable "ERNIC_BASE_IMAGE" { default = "docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-ernic-sbates-fork:20261030.gadc94af-ernic.8f35f4a-vfu.3719c3a" }
 
-// A SHA, not a branch. Contains daa7d94 (ROCm/rocm-ernic#315), which is what
-// makes guest-to-guest rdma_cm work and therefore what makes NIXL's LIBFABRIC
-// backend work at all on this cluster.
-variable "ERNIC_REF" { default = "461dbbd5762c9485a4918d3cad7e616aaaedcda0" }
+// A SHA, not a branch. Still contains daa7d94 (ROCm/rocm-ernic#315), which is
+// what makes guest-to-guest rdma_cm work and therefore what makes NIXL's
+// LIBFABRIC backend work at all on this cluster.
+//
+// This is develop's tip plus one commit: the NVMe KV command set, on
+// origin/feat/nvmeof-kv. `--backend nvmeof:kv=1` is what NIXL's NVME_KV
+// plugin talks to, and the ref is pushed, so this builds from a clean
+// checkout rather than from a local tree.
+variable "ERNIC_REF" { default = "8e43a0c11e7df700b0ea1c5846af9b6dc421c4e6" }
 
 variable "ERNIC_IMAGE_NAME" { default = "nixl-mori-ernic" }
 

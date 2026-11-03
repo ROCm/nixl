@@ -386,6 +386,19 @@ Installed under /opt/nixl-stack/opt. To run nixlbench there:
 
 Run the same command on both guests; whichever binds first is the target, and
 it is the one that prints the results table.
+
+LIBFABRIC additionally requires --enable_pt --progress_threads 1. Without a
+progress thread the two ranks deadlock: the first fi_senddata of the handshake
+returns EAGAIN until the peer accepts the ofi_rxm connection, the peer is
+blocked in the ASIO rendezvous and so accepts nothing, and NIXL retries that
+EAGAIN forever without reporting an error. It looks like a hang after "All
+processes are ready to proceed", and the peer dies on ASIO Receive timeout.
+
+  /opt/nixl-stack/opt/nixlbench/bin/nixlbench --backend LIBFABRIC \\
+      --runtime_type ASIO --asio_address ${SUBNET}.11 --asio_port 9500 \\
+      --initiator_seg_type DRAM --target_seg_type DRAM \\
+      --total_buffer_size 1073741824 \\
+      --enable_pt --progress_threads 1
 EOF
 }
 

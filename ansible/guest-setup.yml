@@ -258,7 +258,22 @@
             echo "$(basename "$d")" > /sys/bus/pci/drivers/amdgpu/bind 2>/dev/null || true
           done
         else
-          /usr/local/bin/amdgpu-probe >/dev/null 2>&1 || true
+          # amdgpu-probe ships in the guest image, from the same build as the
+          # patched amdgpu-dkms, because the parameters it passes belong with
+          # the driver rather than with whoever calls it. It is the only
+          # supported way to load the module: a bare modprobe gets emu_mode=0
+          # and finds no GPU. If it is absent the image is wrong, and saying so
+          # here is worth more than the KFD check failing three tasks later
+          # with nothing to point at.
+          if [ ! -x /usr/local/bin/amdgpu-probe ]; then
+            echo "amdgpu-probe missing -- this guest image does not carry the" >&2
+            echo "patched amdgpu-dkms helper, so the GPU cannot be brought up." >&2
+            exit 2
+          fi
+          # Not discarded: when the probe half-works the oops or the missing
+          # firmware line is the only evidence, and it used to go to /dev/null.
+          /usr/local/bin/amdgpu-probe 2>&1 ||
+            echo "amdgpu-probe exited $?; continuing to the KFD check" >&2
         fi
         sleep 14
       when: kfd_node.stdout | trim == ''
@@ -355,6 +370,39 @@
       when: perftest_state.stdout is defined
             and 'ok rocm+dmabuf' not in perftest_state.stdout
       tags: [perftest]
+
+    # ---- LIBFABRIC invocation --------------------------------------------
+    # LIBFABRIC needs --enable_pt and it is not optional. Without a progress
+    # thread the two ranks deadlock: the first fi_senddata of the handshake
+    # returns EAGAIN until the peer accepts the ofi_rxm connection, the peer is
+    # sitting in the ASIO rendezvous and so accepts nothing, and NIXL's retry
+    # loop spins on that EAGAIN forever without reporting an error. Both sides
+    # print "All processes are ready to proceed" and then one dies on "ASIO
+    # Receive timeout" while the other logs nothing at all. It reads as a NIC,
+    # naming or rdma_cm fault -- fi_eq_readerr even says "Connection refused" --
+    # and fabtests pass throughout, because both fabtest ranks poll actively.
+    #
+    # This requirement was established twice before and lost twice, because it
+    # lived only in prose. A wrapper is the smallest thing that cannot be
+    # forgotten by whoever types the next command.
+    - name: Install the nixlbench LIBFABRIC wrapper
+      become: true
+      ansible.builtin.copy:
+        dest: /usr/local/bin/nixlbench-libfabric
+        mode: "0755"
+        content: |
+          #!/bin/bash
+          # Installed by ansible/guest-setup.yml. Run the same command on both
+          # guests; whichever binds first is the target and prints the table.
+          #   nixlbench-libfabric --asio_address <ip> --initiator_seg_type VRAM ...
+          set -euo pipefail
+          export NIXL_PLUGIN_DIR="{{ nixl_stack }}/nixl/lib/x86_64-linux-gnu/plugins"
+          export FI_UNIVERSE_SIZE="${FI_UNIVERSE_SIZE:-16}"
+          export UCX_ROCM_COPY_DMABUF="${UCX_ROCM_COPY_DMABUF:-try}"
+          exec "{{ nixl_stack }}/nixlbench/bin/nixlbench" \
+              --backend LIBFABRIC --runtime_type ASIO \
+              --enable_pt --progress_threads 1 "$@"
+      tags: [prep, nixl]
 
     # ---- Report ----------------------------------------------------------
     # The stock provider is 55688 bytes and the patched one about 67416, which
