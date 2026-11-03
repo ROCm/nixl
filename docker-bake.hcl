@@ -103,12 +103,12 @@ target "wheels" {
 // One line, like every other variable here: the Makefile and pins-check both
 // read this file with a single-line regex, and a multi-line declaration reads
 // as absent rather than as an error.
-variable "ERNIC_BASE_IMAGE" { default = "docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-ernic:20261021.g742e8e2-ernic.31d3114-vfu.8039244" }
+variable "ERNIC_BASE_IMAGE" { default = "docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-ernic-sbates-fork:20261030.gadc94af-ernic.8f35f4a-vfu.3719c3a" }
 
 // A SHA, not a branch. Contains daa7d94 (ROCm/rocm-ernic#315), which is what
 // makes guest-to-guest rdma_cm work and therefore what makes NIXL's LIBFABRIC
 // backend work at all on this cluster.
-variable "ERNIC_REF" { default = "051ff6d540e095021553fe59913e0c4039ee0972" }
+variable "ERNIC_REF" { default = "461dbbd5762c9485a4918d3cad7e616aaaedcda0" }
 
 variable "ERNIC_IMAGE_NAME" { default = "nixl-mori-ernic" }
 

@@ -56,7 +56,7 @@
 # belongs in gen-compose, which should check both files. Until then see
 # cluster/README.md for the start order that works.
 
-ARG ERNIC_BASE_IMAGE=docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-ernic:20261021.g742e8e2-ernic.31d3114-vfu.8039244
+ARG ERNIC_BASE_IMAGE=docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-ernic-sbates-fork:20261030.gadc94af-ernic.8f35f4a-vfu.3719c3a
 
 # ---------------------------------------------------------------------------
 # Build the server against the base image's own libvfio-user.
@@ -66,7 +66,7 @@ FROM ${ERNIC_BASE_IMAGE} AS build
 # A SHA, not a branch. `develop` would make this image's contents depend on
 # the day it was built, and the whole point is a device whose behaviour is
 # known. Move it deliberately, and re-test LIBFABRIC when you do.
-ARG ERNIC_REF=051ff6d540e095021553fe59913e0c4039ee0972
+ARG ERNIC_REF=461dbbd5762c9485a4918d3cad7e616aaaedcda0
 ARG ERNIC_GIT_URL=https://github.com/ROCm/rocm-ernic.git
 
 # The commit that makes guest-to-guest rdma_cm work. Asserted below rather

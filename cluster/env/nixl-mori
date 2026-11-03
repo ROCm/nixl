@@ -91,7 +91,7 @@ VM_NAME_PREFIX=nixl-mori
 # was written against qemu.d757fa6, which does not. aa4344e shares both the
 # 20261021.g742e8e2 build stamp and the vfu.8039244 revision with ERNIC_IMAGE,
 # so the coherence check still passes.
-QEMU_IMAGE=docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20261021.g742e8e2-qemu.aa4344e-vfu.8039244
+QEMU_IMAGE=docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20261030.gadc94af-qemu.f91f120-vfu.3719c3a
 # Our own build, not a published one. The published ernic at this build stamp
 # predates ROCm/rocm-ernic#315, so guest-to-guest rdma_cm does not work on it
 # and NIXL's LIBFABRIC backend hangs rather than transfers. Every published
@@ -104,8 +104,18 @@ QEMU_IMAGE=docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sb
 # It has no build stamp, so gen-compose's coherence check warns and excludes
 # it rather than refusing -- which is the behaviour that check documents for a
 # locally built image carrying a fix under test.
-ERNIC_IMAGE=nixl-mori-ernic:051ff6d
-ROCJITSU_IMAGE=docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20261021.g742e8e2-rocjitsu.84fb06b
+ERNIC_IMAGE=nixl-mori-ernic:461dbbd
+# Bumped from rocjitsu.84fb06b for the large BAR. 84fb06b predates
+# batesste-ci-images 668a48f, which moved rocjitsu_vram_aperture from `keep`
+# to `max` -- its image carries an empty vram-aperture label, this one says
+# `max`, and on this profile `max` is a 256 GiB BAR0.
+#
+# A large BAR is what lets amdgpu register VRAM with the kernel's PCI
+# P2PDMA, which is what hipFile's fastpath needs. Without it the guest
+# reports "Detected VRAM RAM=442368M, BAR=256M", no device publishes p2pmem,
+# and AIS/AIS_MT fall back to staging -- `HIPFILE_ALLOW_COMPAT_MODE=false`
+# fails there with "hipFileWrite failed: No such device".
+ROCJITSU_IMAGE=docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20261030.gadc94af-rocjitsu.73c3cf3
 
 # So the three vfio-user servers stay on one stamp and only the guest moves.
 # Safe for the GPU specifically: `vfio_guest_firmware.py --generation gfx1250`
@@ -181,6 +191,16 @@ VM_VFIO_USER_ROOT_PORT=true
 # alone. Expect per-pair throughput to fall even where nothing is wrong.
 ERNIC_PER_VM=2
 ROCJITSU_PER_VM=2
+
+# The two options rocjitsu's 256 GiB BAR0 cannot be assigned without, and
+# they have to move together. qemu-tool defaults to `-cpu EPYC`, which is 40
+# physical address bits and a 256 GiB + 2 MiB window; the guest then fails to
+# assign BOTH BAR0 and BAR2 and ends up with no VRAM window at all -- worse
+# than the small-BAR default, and silent. 41 bits with a 512 GiB hole is the
+# smallest combination measured to work, and 512G is already the largest a
+# 40-bit space would accept. See batesste-ci-images 668a48f.
+VM_CPU_PHYS_BITS=41
+VM_PCI_HOLE64_SIZE=512G
 
 # The scale-out profile's default, gfx1250_mi455x.json, is not drivable by the
 # guest's amdgpu. It carries no `ip_versions` table, so IP discovery hands the

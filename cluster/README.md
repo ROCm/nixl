@@ -366,6 +366,76 @@ plugin copies into it before a Store and out of it after a Retrieve --
 exactly what hipObject does when a device pointer cannot be registered with
 the NIC. DOCA_MEMOS sidesteps the question by taking DRAM only.
 
+### Large BAR, p2pdma, and where it stops
+
+The emulated GPU can be made to publish PCI P2PDMA, and it takes three
+things together:
+
+* `ROCJITSU_IMAGE` at `rocjitsu.73c3cf3` or later. Earlier images predate
+  batesste-ci-images `668a48f`, which moved `rocjitsu_vram_aperture` from
+  `keep` to `max`; their `vram-aperture` label is empty and the BAR is
+  256 MiB.
+* `VM_CPU_PHYS_BITS=41` and `VM_PCI_HOLE64_SIZE=512G`. qemu-tool otherwise
+  defaults to `-cpu EPYC`, 40 physical address bits and a 256 GiB window,
+  and the guest then fails to assign **both** BAR0 and BAR2 and ends up
+  with no VRAM window at all -- worse than the small BAR, and silent.
+* A qcow2 built from qemu-minimal `ae551b3` or later, which is where those
+  two run-vm options came from.
+
+With all three, the guest reports what it should:
+
+```
+amdgpu: [drm] Detected VRAM RAM=442368M, BAR=262144M
+Memory at 4000000000 (64-bit, prefetchable) [size=256G]
+/sys/bus/pci/devices/0000:02:00.0/p2pmem
+```
+
+256 GiB of BAR against 256 MiB before, and **both GPUs now publish a
+p2pmem provider**, which they did not at all previously.
+
+**And the kernel path can use it -- my earlier claim that it could not was
+wrong.** The out-of-tree amdgpu carries AIS-specific P2PDMA support:
+
+```
+AIS: Failed to add PCI P2PDMA resource for VRAM %d
+AIS: NVMeoF %s -> RDMA NIC %s
+AIS: P2P DMA not accessible
+pci_p2pdma_add_resource    pci_p2pdma_distance_many
+```
+
+hipFile does not hand the kernel a VRAM user pointer and hope `get_user_pages`
+works -- it cannot, and that is what misled me. It calls into amdgpu, which
+returns **p2pdma-backed pages**, and builds the bvec and sgtable from those.
+They are real `struct page`s, so `ib_dma_map_sg()` maps them through
+`pci_p2pdma_map_sg()` to bus addresses and the ordinary nvme-rdma path works.
+amdgpu even resolves an NVMe-oF device to the RDMA NIC behind it and validates
+P2P to that NIC, which is exactly the fabrics case. With the large BAR in
+place the GPU publishes 1 GiB:
+
+```
+/sys/bus/pci/devices/0000:02:00.0/p2pmem/{allocate,available,published}
+size = 1073741824
+```
+
+So GPU-direct NVMe KV does not need a userspace initiator. It needs the
+buffer described by that ioctl rather than by a user virtual address.
+
+**Driving storage I/O through it hangs the guest, for now.** With
+`HIPFILE_ALLOW_COMPAT_MODE=false`, so hipFile must use its p2p fastpath
+rather than staging, an AIS_MT VRAM run does not fail -- it wedges:
+
+```
+INFO: task kworker/u32:5:213 blocked for more than 245 seconds.
+INFO: task jbd2/vda1-8:318 blocked in I/O wait for more than 245 seconds.
+systemd[1]: Failed to start systemd-journald.service
+```
+
+The registration is real and the I/O path is not. So the honest position
+is that p2pdma is now *available* here and not yet *usable*, and the thing
+to debug is the emulated NVMe controller servicing a DMA into the GPU's
+BAR. Until then `HIPFILE_ALLOW_COMPAT_MODE=true` remains required, which is
+what the AIS/AIS_MT numbers above were measured with.
+
 **The limit is the kernel client, not the fabric.** rocm-ernic's NVMe-oF
 target reaches guest memory with `dp_nvmeof_from_host()`, which is
 `dp_sge_to_host()` -- the same rkey path the S3 backend uses, and the one
