@@ -113,11 +113,20 @@
 # an iovec of user addresses too.
 #
 # Nor would p2pdma help on the transports used here even if it existed. Over
-# nvme-rdma and nvme-tcp the HOST moves the data -- nvme-rdma registers MRs
-# over the request's pages, nvme-tcp sends from them -- so the bytes have to
-# be in host memory at some point regardless. GPU-direct against a KV
-# namespace needs a local PCIe KV device and a p2p provider, which is not
-# what this cluster has.
+# nvme-rdma and nvme-tcp the HOST moves the data -- nvme_rdma_map_data()
+# builds an sg_table from the request's bio pages and contains no dmabuf path
+# at all, nvme-tcp sends from those same pages -- so the bytes have to be in
+# host memory at some point regardless.
+#
+# THE LIMIT IS THE KERNEL CLIENT, NOT THE FABRIC, and the distinction is
+# worth keeping straight. rocm-ernic's NVMe-oF target reaches guest memory
+# with dp_nvmeof_from_host(), which is dp_sge_to_host() -- the same rkey path
+# its S3 backend uses, and the one that already RDMAs straight into GPU
+# memory for the hipObject engine. The emulated hardware can therefore do
+# GPU-direct KV today. What cannot get there is any client that goes through
+# the kernel's NVMe stack, because that stack can only describe host pages.
+# Closing it needs a userspace initiator that registers VRAM with
+# ibv_reg_dmabuf_mr and puts that rkey in the command's keyed SGL itself.
 #
 # So a VRAM registration gets a pinned host staging buffer (hipHostMalloc, so
 # the pages are already pinned when the kernel maps them again for the NVMe

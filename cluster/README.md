@@ -213,9 +213,53 @@ That works because Linux attaches a KV namespace and hides only its *block*
 device: `nvme nvme3: block device for nsid 1 not supported (csi 1)`, and
 `/dev/ng3n1` appears and takes passthrough.
 
-### Serving one
+### Serving one: rocm-ernic, one VM and one rail
 
-SPDK's `kvdev_mem` is the target. The published
+`--backend nvmeof:kv=1` turns the NVMe-oF target's namespace into a Key
+Value one. One guest and one rail are then a complete KV fabric -- no SPDK,
+no second VM -- exactly as the S3 backend is for objects:
+
+```
+rocm-ernic -s /run/vfu/ernic-4-2.sock -m <mac> \
+    -b nvmeof:kv=1,size=256M,keys=4096,maxval=1M,ip=192.168.80.201
+```
+
+In the guest, the neighbour entry is the unobvious step: the controller is
+not a host on the segment and has no MAC, so address resolution has nothing
+to resolve to and the connect fails with `rdma connection establishment
+failed (-104)` and nothing at all in the target's log. Any link-layer
+address will do -- the emulator routes by queue pair, not by MAC.
+
+```
+sudo ip neigh replace 192.168.80.201 lladdr 02:00:00:00:c0:01 \
+    dev enp3s0np0 nud permanent
+sudo ip route replace 192.168.80.201/32 dev enp3s0np0 src 192.168.80.18
+sudo nvme connect -t rdma -a 192.168.80.201 -s 4420 -n nvmet-test
+```
+
+Measured 2026-11-03, vm4, 128 KiB values, GB/s and average latency:
+
+| | Store | Retrieve |
+|---|---|---|
+| DRAM | 6.141 / 21 us | 5.072 / 26 us |
+| VRAM | 0.062 / 2118 us | 2.126 / 62 us |
+
+Three to four times the SPDK path below, with latency flat in size (21 to 30
+us from 4 KiB to 128 KiB) rather than climbing, because the data never
+leaves the host: `dp_sge_to_host()` is a copy within the emulator's own
+address space.
+
+**The VRAM Store number is the staging copy, and it is the argument for
+finishing the job.** 6.1 GB/s against 0.062 is a factor of a hundred, and
+all of it is the device-to-host copy (`post` is 2115 us of the 2118).
+The target can already RDMA straight into GPU memory -- it reaches guest
+memory by rkey, and that is the same path the hipObject S3 engine uses
+GPU-direct. What stages is the *client*, because it goes through the kernel
+NVMe stack. A userspace initiator would close it.
+
+### Serving one: SPDK
+
+SPDK's `kvdev_mem` is the other target. The published
 `ubuntu-spdk-libvfio-user` image is built `CONFIG_RDMA=n`, so it can serve KV
 over TCP but not over RDMA; `--with-rdma` and `libibverbs-dev librdmacm-dev`
 are what the RDMA build needs.
@@ -315,11 +359,23 @@ than a missing feature. NVMe passthrough maps its data buffer with
 `blk_rq_map_user_io()` or `io_uring_cmd_import_fixed()`, both of which pin
 *user pages*; a device pointer has none, and there is no dmabuf or p2pdma
 path in `drivers/nvme/host/ioctl.c` to take one instead. Nor would p2pdma
-help over nvme-rdma or nvme-tcp, where the host moves the data from those
-same pages. So a VRAM registration gets a pinned host staging buffer and the
+help over nvme-rdma, whose `nvme_rdma_map_data()` builds an sg_table from the
+request's bio pages (`blk_rq_map_sg`, then `ib_dma_map_sg`) and has no dmabuf
+path at all. So a VRAM registration gets a pinned host staging buffer and the
 plugin copies into it before a Store and out of it after a Retrieve --
 exactly what hipObject does when a device pointer cannot be registered with
 the NIC. DOCA_MEMOS sidesteps the question by taking DRAM only.
+
+**The limit is the kernel client, not the fabric.** rocm-ernic's NVMe-oF
+target reaches guest memory with `dp_nvmeof_from_host()`, which is
+`dp_sge_to_host()` -- the same rkey path the S3 backend uses, and the one
+that already RDMAs straight into GPU memory for the hipObject engine. So
+GPU-direct KV is reachable on exactly this emulated hardware; what cannot get
+there is a client that goes through the kernel's NVMe stack, because that
+stack can only describe host pages. Closing the gap needs a userspace
+initiator that registers VRAM with `ibv_reg_dmabuf_mr` and puts that rkey in
+the command's keyed SGL itself -- which is what `tests/s3_rdma_client.c` in
+rocm-ernic already does for S3.
 
 **On this cluster the staging copy dominates everything else**, and that is
 the emulated GPU rather than the design. Store, RDMA:
