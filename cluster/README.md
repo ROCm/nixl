@@ -457,49 +457,48 @@ size = 1073741824
 So GPU-direct NVMe KV does not need a userspace initiator. It needs the
 buffer described by that ioctl rather than by a user virtual address.
 
-**It no longer hangs, and it never took the fastpath.** This file used to
-say that `HIPFILE_ALLOW_COMPAT_MODE=false` wedged the guest with blocked
-kworkers and a stalled jbd2, and that the thing to debug was the emulated
-NVMe controller servicing a DMA into the GPU's BAR. Neither half survived
-being re-tested on a freshly booted fleet.
+**It no longer hangs, and the fastpath now works -- and is five times
+slower than staging.** This file used to say that
+`HIPFILE_ALLOW_COMPAT_MODE=false` wedged the guest. It does not: more than a
+dozen AIS and AIS_MT VRAM runs completed normally, with
+`dmesg | grep -c "blocked for more than"` at zero afterwards.
 
-More than a dozen AIS and AIS_MT VRAM runs with the flag false completed
-normally, with `dmesg | grep -c "blocked for more than"` at zero. And the
-flag changes nothing that can be measured -- 1 MiB blocks, three runs each:
+**Use FORCE, not ALLOW, to tell the two paths apart.**
+`HIPFILE_ALLOW_COMPAT_MODE=true` *permits* the staging fallback, it does not
+select it, so with a working fastpath both settings of ALLOW take the
+fastpath and read identically -- which is not evidence of anything.
+`HIPFILE_FORCE_COMPAT_MODE=true` is the control. 1 MiB blocks, three runs:
 
-| | AIS_MT | AIS |
+| | GB/s | latency |
 |---|---|---|
-| `HIPFILE_ALLOW_COMPAT_MODE=false` | 0.075, 0.076, 0.075 | 0.072, 0.075, 0.074 |
-| `HIPFILE_ALLOW_COMPAT_MODE=true` | 0.076, 0.074, 0.067 | 0.069, 0.068, 0.071 |
+| `HIPFILE_ALLOW_COMPAT_MODE=false` (p2p fastpath) | 0.082, 0.087, 0.086 | 14738 us |
+| `HIPFILE_FORCE_COMPAT_MODE=true` (staging) | 0.422, 0.429, 0.459 | 2476 us |
 
-The reason is that the GPU's p2p pool is never touched in either case.
-Polling `/sys/bus/pci/devices/0000:02:00.0/p2pmem/available` four times a
-second across a whole run, the lowest value seen is 1073741824 -- the full
-pool, never allocated from. hipFile stages both ways; the flag is not
-being ignored so much as it has no second path to select.
+**This also explains the AIS numbers above.** The 0.400 GB/s recorded for
+1 MiB AIS_MT is staging -- it matches the FORCE column, not the fastpath --
+because at the time it was measured the fastpath did not work and
+`ALLOW=true` fell back. Now that the fastpath engages, the same command
+reads ~0.085. That is not a regression in the fabric; it is the fastpath
+arriving and being slower than the thing it replaces.
 
-**The driver advertises the resource and cannot hand it out.** The
-out-of-tree amdgpu references exactly two p2pdma symbols:
+So the original position in this file was right about where to look and
+wrong only about the hang: **the thing to debug is the emulated NVMe
+controller servicing a DMA into the GPU's BAR**, which is a vfio-user
+region belonging to rocjitsu. 14.7 ms to move 1 MiB is about 14 us per
+4 KiB page, which is round-trip shaped rather than copy shaped.
 
-```
-$ nm -u amdgpu.ko | grep p2p
-                 U pci_p2pdma_add_resource
-                 U pci_p2pdma_distance_many
-```
-
-`pci_p2pdma_add_resource` is what makes `p2pmem/` appear with its 1 GiB,
-and `pci_p2pdma_distance_many` answers whether two devices could do P2P at
-all. Neither hands out memory. `pci_p2pmem_publish` is absent, which is why
-`published` reads 0 -- and `pci_has_p2pmem()` returns exactly that flag, so
-every consumer that looks for a provider through `pci_p2pmem_find()` skips
-this GPU. `pci_alloc_p2pmem` is absent too, so nothing in this build draws
-from the pool, which is what the `available` counter has been saying.
-
-So p2pdma here is an advertisement. The emulated NVMe controller is not the
-thing to debug: it never receives a P2P bus address, because none is ever
-produced. `HIPFILE_ALLOW_COMPAT_MODE=true` remains the setting to use, not
-because the fastpath is dangerous but because there is no fastpath to
-choose.
+**What is NOT evidence, recorded so it is not re-derived.** `published`
+reads 0 and `p2pmem/available` never drops during a transfer, and neither
+means the fastpath is unused. `pci_p2pmem_publish()` only sets the flag
+`pci_has_p2pmem()` reports, which exists so OTHER drivers can discover a
+provider through `pci_p2pmem_find()`; a driver consuming its own pages has
+no reason to call it. Likewise the `available` counter tracks the genalloc
+pool that `pci_alloc_p2pmem()` draws from, so a driver handing out its own
+pages by another route leaves it untouched. amdgpu referencing only
+`pci_p2pdma_add_resource` and `pci_p2pdma_distance_many` is consistent with
+exactly that -- it registers the resource, checks reachability, and consumes
+the pages internally; the DMA mapping of those pages happens in the
+consumer, not in amdgpu.
 
 **The limit is the kernel client, not the fabric.** rocm-ernic's NVMe-oF
 target reaches guest memory with `dp_nvmeof_from_host()`, which is
@@ -765,9 +764,8 @@ image change.
 
 * **AIS and AIS_MT work**, against VRAM, through hipFile. They did not on the
   previous guest image, where I/O failed with `hipFileWrite failed: Success`
-  and `hipFileBatchIOSubmit failed: err=5030`. Registration still needs
-  `HIPFILE_ALLOW_COMPAT_MODE=true`. Two-rail cluster, consistency-checked,
-  `--filepath` on a local NVMe, GB/s:
+  and `hipFileBatchIOSubmit failed: err=5030`. Two-rail cluster,
+  consistency-checked, `--filepath` on a local NVMe, GB/s:
 
   | Block | AIS_MT | AIS | POSIX (DRAM) |
   |---|---|---|---|
@@ -775,13 +773,14 @@ image change.
   | 512 KiB | 0.199 | 0.196 | 1.031 |
   | 1 MiB | 0.400 | 0.406 | 1.361 |
 
-  Those figures are from the previous pin set and did NOT reproduce on
-  ernic 128bad7: 1 MiB AIS_MT re-measured 0.069 to 0.085 GB/s across
-  16 MiB, 64 MiB and 256 MiB buffers, consistency-checked, which is about a
-  fifth of the 0.400 above. Three runs each rather than eight, and on a
-  different pin set from the original, so this is recorded as unreconciled
-  rather than as a regression -- see the warning further down about what a
-  small sample is worth on this host. The table is left as measured.
+  **These are the STAGING numbers, and they are the ones to want.** At the
+  time they were taken the p2p fastpath did not work, so
+  `HIPFILE_ALLOW_COMPAT_MODE=true` fell back to staging; forcing staging
+  today with `HIPFILE_FORCE_COMPAT_MODE=true` reproduces them (1 MiB AIS_MT
+  0.422, 0.429, 0.459). The fastpath works now and reads ~0.085 at 1 MiB,
+  five times slower, so leaving the flag alone silently costs you the
+  difference. Use `HIPFILE_FORCE_COMPAT_MODE=true` to get this table until
+  the DMA into the GPU's BAR is fixed; see "VRAM over the fabric" above.
 
   AIS and AIS_MT are indistinguishable from each other at every size, so
   hipFile's threading is buying nothing here. POSIX is on DRAM and is NOT a
