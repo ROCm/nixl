@@ -1,69 +1,69 @@
-# rdma-core: the ionic provider the guests need
+# rdma-core: the ionic provider lives in rocm-ernic, not here
 
-Unlike `patches/nixl`, `patches/ucx` and `patches/hipfile`, nothing here is
-applied during the image build. rdma-core lives in the **guest**, not in the
-image: the NIXL stack bundles no rdma-core of its own, so its libfabric and UCX
-resolve providers through the guest's `/usr/lib/x86_64-linux-gnu/libibverbs/`.
-This directory is therefore built and installed separately, onto the cluster
-guests.
+This directory used to build and install a patched ionic provider onto the
+cluster guests. It no longer does, because the premise it was built on is
+false. It is kept as a pointer, since the false premise is an easy one to
+arrive at twice.
 
-## What it fixes
+## The provider the guests actually load
 
-`01-ionic-honour-sq-sig-all.patch` makes the ionic provider honour
-`sq_sig_all`. libfabric's verbs provider never sets `IBV_SEND_SIGNALED` and
-relies entirely on queue pairs created with `sq_sig_all = 1` for its
-completions. v61.0's ionic provider accepts that flag, stores it nowhere, and
-consults it never, so the device completes the send and the provider discards
-the completion in `ionic_poll_send`.
+`rocm-ernic`, role `ernic_srq_provider`, series
+`ansible/files/patches/rdma-core/`. It builds upstream rdma-core pinned at
+`bd3282a1cf1025c7869a8664c2d54266a4dded44` — a master SHA declaring version
+66.0, not a release — plus 20 patches, and installs the whole tree to
+**`/usr/local`**:
 
-The visible effect is a hard cutoff at the inject limit rather than an error:
-payloads of 255 bytes and under go through `fi_inject`, need no completion, and
-work forever; at 256 bytes `rxm_emulate_inject` takes a tx-pool buffer it can
-only return on a completion that never arrives, and every send after that is
-`-FI_EAGAIN` with nothing logging it.
+| Patches | What |
+| --- | --- |
+| 0001–0006 | ionic SRQ support (upstream [#1799][srqpr] + two local fixes) |
+| 0007–0020 | ionic direct verbs / GDA (upstream [#1771][dvpr], rebased) |
 
-This is not specific to the emulated device -- any libfabric-over-ionic
-deployment has it. It is fixed upstream after v61.0 (present at
-`bd3282a1cf1025c7869a8664c2d54266a4dded44`); this is that change backported.
-
-## Why v61.0 and not upstream
-
-libibverbs loads providers by a private ABI version. The guests run rdma-core
-61.0, whose libibverbs looks for `libionic-rdmav59.so`. Building upstream
-master produces `libionic-rdmav65.so`, which it will not load at all -- so the
-newer tree is not a shortcut, even though the fix is in it.
-
-## Building and installing
+To rebuild and reinstall it on the guests:
 
 ```sh
-mkdir -p /tmp/out
-docker run --rm -v "$PWD/patches/rdma-core:/patches:ro" -v /tmp/out:/out \
-    ubuntu:26.04 bash /patches/build-ionic-provider.sh
+cd ~/Projects/rocm-ernic/ansible
+ansible-playbook -i ../../nixl-mori-test/ansible/inventory.py \
+    playbooks/srq-dkms-build.yml --tags srq-provider -e srq_dkms_hosts=cluster
 ```
 
-Then on each guest, keeping the original alongside:
+`ansible/guest-setup.yml` here only asserts the result; it does not build it.
 
-```sh
-T=/usr/lib/x86_64-linux-gnu/libionic.so.1.0.61.0
-[ -f "$T.orig" ] || sudo cp -a "$T" "$T.orig"
-sudo install -m 0644 libionic.so.1.0.61.0 "$T"
-```
+## What was wrong before
 
-The stock provider is 55688 bytes and the patched one about 67416, which is the
-quickest way to tell which is installed.
+**The guests do not load the distro rdma-core.** They run 66.0 from
+`/usr/local`, which wins the `ld.so` search. This directory patched
+`/usr/lib/x86_64-linux-gnu/libionic.so.1.0.61.0`, in a 61.0 stack that nothing
+ever `dlopen`s — so it looked installed and did nothing. Everything the old
+README said about ABI version `rdmav59` and "why v61.0 and not upstream"
+followed from that mistake.
 
-## It is necessary, not sufficient
+Two further traps, both of which cost a rebuild here:
 
-LIBFABRIC still does not work on this cluster with this in place. RDMA CM does
-not work on the published rocm-ernic -- `rping` hangs in both directions -- and
-libfabric's `verbs;ofi_rxm` establishes its connections through RDMA CM. See
-`cluster/README.md`.
+- **The SONAME link is not the one that matters.** libibverbs `dlopen`s
+  `lib/libibverbs/libionic-rdmav<ABI>.so` by private ABI version. Repointing
+  `libionic.so.1` alone changes nothing that loads.
+- **`ldconfig` re-elects `libionic.so.1`** from *any* file in a scanned
+  directory carrying that SONAME, so a `.orig` backup left beside the
+  installed provider is not inert — it gets chosen, silently undoing the
+  install on the next `ldconfig` run.
 
-## SRQ is a separate matter
+## Do not build the provider on a different base
 
-qemu-minimal carries a six-patch SRQ series for this same provider
-(`qemu/docker/lmcache/rdma-core-patches/`), which would let UCX use `rc_verbs`
-instead of `ud_verbs`. It is deliberately not vendored here: it is written
-against the post-v61 master tree, so it does not apply to the v61.0 the guests'
-ABI requires, and the published ERNIC device reports `max_srq: 0` regardless,
-so the provider half alone would change nothing.
+A provider carrying the DV series but not the SRQ series loads, brings both
+ports up, exports all 20 DV symbols, benchmarks LIBFABRIC at full speed, and
+takes UCX out fleet-wide with `ibv_create_srq() failed: Operation not
+supported` — while `ibv_devinfo -v` reports `max_srq: 256`. LIBFABRIC does not
+use SRQ, so it keeps working and hides it. The rocm-ernic README documents this
+at length; the short version is that both halves ship together or neither does.
+
+## `sq_sig_all` (the old `01-` patch) is obsolete
+
+The v61.0 ionic provider accepted `sq_sig_all`, stored it nowhere and consulted
+it never, so libfabric — which never sets `IBV_SEND_SIGNALED` and relies
+entirely on that flag — lost every completion over 255 bytes to
+`ionic_poll_send`. The backport is deleted because the fix is **already in the
+base** the guests now run: `v65.0` onward honours it natively, and applying the
+old patch there fails with `duplicate member 'sig_all'`.
+
+[srqpr]: https://github.com/linux-rdma/rdma-core/pull/1799
+[dvpr]: https://github.com/linux-rdma/rdma-core/pull/1771

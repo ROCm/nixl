@@ -26,7 +26,9 @@
     # Built on the controller in a container, not in the guest: the guests have
     # no compiler and no reason to grow one.
     rdma_build_dir: "{{ playbook_dir }}/../build/guest-artifacts"
-    ionic_target: /usr/lib/x86_64-linux-gnu/libionic.so.1.0.61.0
+    # The guests load rdma-core from /usr/local, NOT the distro tree, and it is
+    # rocm-ernic that puts it there. See the ionic provider block below.
+    ionic_prefix: /usr/local
     nixl_stack: /opt/nixl-stack/opt
 
   tasks:
@@ -186,54 +188,57 @@
           {{ ernic_rdma_active.stdout | trim }} RDMA device(s) ACTIVE
       tags: [net, prep, rdma]
 
-    # ---- rdma-core ionic provider ---------------------------------------
-    # The stock Ubuntu 61.0 provider accepts sq_sig_all, stores it nowhere and
-    # consults it never. libfabric's verbs provider never sets
-    # IBV_SEND_SIGNALED and relies entirely on sq_sig_all for its completions,
-    # so the device completes the send and the provider discards the completion
-    # in ionic_poll_send.
+    # ---- rdma-core ionic provider (SRQ + direct verbs) -------------------
+    # ASSERTED HERE, BUILT IN rocm-ernic. The guests' rdma-core is owned by
+    # rocm-ernic's ernic_srq_provider role, which builds upstream pinned at
+    # bd3282a1 (a master SHA declaring 66.0, not a release) plus 20 patches --
+    # 0001-0006 ionic SRQ, 0007-0020 ionic direct verbs -- and installs the
+    # whole tree to /usr/local. To (re)build it:
     #
-    # The visible effect is a cutoff at the inject limit, not an error: 255
-    # bytes and under go through fi_inject, need no completion and work
-    # forever; at 256 bytes rxm takes a tx-pool buffer it can only return on a
-    # completion that never comes, and every send after that is -FI_EAGAIN with
-    # nothing logging it.
+    #   cd ~/Projects/rocm-ernic/ansible && ansible-playbook \
+    #       -i ../../nixl-mori-test/ansible/inventory.py \
+    #       playbooks/srq-dkms-build.yml --tags srq-provider \
+    #       -e srq_dkms_hosts=cluster
     #
-    # See patches/rdma-core/ for the patch and why it is built against v61.0
-    # rather than upstream master.
-    - name: Build the patched ionic provider on the controller
-      delegate_to: localhost
-      run_once: true
-      become: false
+    # This playbook used to build its own provider here and install it to
+    # /usr/lib/x86_64-linux-gnu/libionic.so.1.0.61.0. That was a no-op: the
+    # guests load /usr/local, which wins the ld.so search, and nothing ever
+    # dlopens the distro tree. See patches/rdma-core/README.md.
+    #
+    # Both halves are asserted because losing either is silent here and loud
+    # somewhere else:
+    #
+    #   no SRQ -> UCX's rc_verbs declines the device and falls back to
+    #             ud_verbs, which has no one-sided RDMA. LIBFABRIC does not
+    #             use SRQ, so it keeps benchmarking at full speed and hides it.
+    #   no DV  -> nothing fails until something calls a DV entry point and
+    #             does not link.
+    #
+    # dv=20 exactly: the pinned base already exports 6 DV symbols of its own
+    # (the udma and cmb setters) and the series adds 14, so 6 means the DV
+    # patches stopped applying.
+    - name: Verify the guest rdma-core provider has SRQ and direct verbs
       ansible.builtin.shell: |
-        set -euo pipefail
-        mkdir -p "{{ rdma_build_dir }}"
-        docker run --rm \
-          -v "{{ playbook_dir }}/../patches/rdma-core:/patches:ro" \
-          -v "{{ rdma_build_dir }}:/out" \
-          ubuntu:26.04 bash /patches/build-ionic-provider.sh
+        set -o pipefail
+        plugin=$(readlink -f {{ ionic_prefix }}/lib/libibverbs/libionic-rdmav*.so)
+        printf 'dv=%s srq=%s active=%s\n' \
+          "$(nm -D --defined-only "${plugin}" | grep -c ' T ionic_dv_')" \
+          "$(strings "${plugin}" | grep -c ionic_create_srq)" \
+          "$(ibv_devinfo 2>/dev/null | grep -c PORT_ACTIVE)"
       args:
-        creates: "{{ rdma_build_dir }}/libionic.so.1.0.61.0"
         executable: /bin/bash
-      tags: [rdma]
+      register: ionic_dv_check
+      changed_when: false
+      failed_when: >-
+        ionic_dv_check.stdout is not search('dv=20')
+        or ionic_dv_check.stdout is search('srq=0')
+        or ionic_dv_check.stdout is search('active=0')
+      tags: [rdma, gda]
 
-    - name: Keep the distro provider alongside the patched one
-      become: true
-      ansible.builtin.copy:
-        src: "{{ ionic_target }}"
-        dest: "{{ ionic_target }}.orig"
-        remote_src: true
-        force: false
-        mode: "0644"
-      tags: [rdma]
-
-    - name: Install the patched ionic provider
-      become: true
-      ansible.builtin.copy:
-        src: "{{ rdma_build_dir }}/libionic.so.1.0.61.0"
-        dest: "{{ ionic_target }}"
-        mode: "0644"
-      tags: [rdma]
+    - name: Report the ionic provider state
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: {{ ionic_dv_check.stdout | trim }}"
+      tags: [rdma, gda]
 
     # ---- GPU -------------------------------------------------------------
     # Needed once per boot. Without it MORI_IO cannot start at all: mori::io
@@ -452,8 +457,9 @@
       tags: [prep, nixl]
 
     # ---- Report ----------------------------------------------------------
-    # The stock provider is 55688 bytes and the patched one about 67416, which
-    # is the quickest way to tell which is installed.
+    # ionic= is the provider file the plugin symlink resolves to, not its
+    # size: the one that matters is the one libibverbs dlopens, and the file
+    # it points at is the quickest way to see which tree the guest is on.
     - name: Collect guest state
       ansible.builtin.shell: |
         printf 'gpus=%s memlock=%s rdma=%s rails=%s ionic=%s' \
@@ -461,7 +467,7 @@
           "$(ulimit -l)" \
           "$(grep -l ACTIVE /sys/class/infiniband/*/ports/*/state 2>/dev/null | wc -l)" \
           "$(ip -br addr show | awk '/192\.168\./ {printf "%s ", $3}')" \
-          "$(stat -c%s {{ ionic_target }} 2>/dev/null)"
+          "$(basename "$(readlink -f {{ ionic_prefix }}/lib/libibverbs/libionic-rdmav*.so)" 2>/dev/null)"
       register: guest_state
       changed_when: false
       tags: [gpu, net, prep, rdma]
