@@ -521,6 +521,40 @@ confirms it. vm4 with `x-max-bounce-buffer-size=16M`:
 property nowhere, so every emulated NVMe in this fleet runs at the 4096
 default; `run-vm`'s literal `--nvme` form is how the above was tested.
 
+**Why 4096, and why it bounces at all.** Neither is a vfio-user thing and
+neither needs the fork.
+
+QEMU refuses direct access to *any* `ram_device` region -- the class that
+covers an mmap'd device BAR, vfio-user or real VFIO passthrough alike --
+because of commit `4a2e242bbb`, "memory: Don't use memcpy for ram_device
+regions". A variable-length `memcpy` can split one 4-byte guest access into
+several byte-sized ones, which breaks real MMIO registers. So
+`memory_access_is_direct()` returns false for these regions and
+`address_space_map()` falls back to a bounce buffer, for correctness
+reasons that have nothing to do with us.
+
+The 4096 is the historical bounce buffer size. QEMU used to have exactly
+one per `AddressSpace`, clamped to `TARGET_PAGE_SIZE`. Mattias Nissler's
+"softmmu: Support concurrent bounce buffers" (commit `637b0aa1`, 9.1.1 and
+9.2) made them dynamic and per-device and set the default budget to 4096
+*to match that previous maximum*. It is a budget rather than a per-mapping
+size, so one large map can take all of it.
+
+This is a known upstream problem with a fix in flight: the same shape is
+reported for a passed-through GPU's BAR used as a DMA target, including the
+guest hangs that this file once recorded, and Gavin Shan's series (v5,
+reviewed by Peter Maydell) replaces the `memmove` with a `qemu_ram_move()`
+that uses qatomics for small aligned accesses and then reverts
+`4a2e242bbb`, making ram device regions directly accessible again. If that
+lands, the bounce disappears rather than merely getting bigger.
+
+So the answer to "do we need the sbates fork for this" is no. The
+vfio-user client is upstream from QEMU 10.1, and `use_region_fds` /
+`vfio_device_get_region_fd()` are part of that same upstream series, not
+fork additions. `pci-mmio-bridge` is the only fork-only piece here and it
+is a tracing device. Stock QEMU 10.1 or newer behaves identically, and the
+`x-max-bounce-buffer-size` workaround applies there too.
+
 It is still a copy, so the fastpath remains ~22% under staging (0.321
 against 0.412). Closing that needs the BAR to be RAM from the DMA path's
 point of view rather than something to bounce through. The fork carries
