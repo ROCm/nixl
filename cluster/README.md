@@ -568,6 +568,44 @@ millisecond, with `-trace enable=pci_mmio_*` -- and qemu-tool notes that it
 forces `ioeventfd=off,dbcs=off` on the NVMe, which would make this slower
 rather than faster.
 
+### Which p2pdma path you are on decides everything
+
+Measured 2026-11-03, vm4. The emulated GPU can be a DMA peer for three
+different things, and they differ by more than an order of magnitude --
+not because of p2pdma support, but because of WHO performs the copy:
+
+| Path | The copy is done by | GB/s |
+|---|---|---|
+| GPU <-> emulated NIC (ernic) | the ernic process, in its own address space | 1.05 - 1.21 |
+| GPU -> host -> GPU | rocjitsu, as host memcpys | 0.615 |
+| GPU -> GPU, peer | rocjitsu, through its compute path | 0.362 |
+| GPU -> QEMU emulated NVMe | QEMU, through a 4096-byte bounce | 0.077 |
+| GPU -> GPU, same device | rocjitsu, through its compute path | 0.043 |
+
+**The NIC path is the fast one because the ernic holds the GPU's memory
+directly.** `rocm-ernic` maps BOTH `/memfd:rocjitsu-vram` descriptors, 256
+GiB each, exactly as QEMU does. So an RDMA transfer to or from VRAM is a
+memcpy inside the ernic process and QEMU is not in the data path at all.
+That is why VRAM transports run at the same speed as DRAM ones rather than
+at the 75 MB/s the bounce path imposes.
+
+**The NVMe path is the slow one because the NVMe is inside QEMU.** A QEMU
+device model reaching VRAM goes through `address_space_map()`, hits the
+`ram_device` rule above, and bounces. Nothing about the GPU or p2pdma
+differs between the two cases; only the identity of the copier does.
+
+**GPU-to-GPU peer access is wired but is not a win here.** Each rocjitsu
+maps the other's VRAM memfd, `hipDeviceCanAccessPeer` reports 1 in both
+directions, and `hipMemcpyPeer` works -- at 0.362 GB/s against 0.615 for
+staging the same 64 MiB through host memory. Same-device
+`hipMemcpyDeviceToDevice` is slower still at 0.043. Both of those go
+through the emulated compute path, while the host round trip is two
+memcpys the emulator does natively, so on this device "direct" costs more
+than "staged". That is an emulator property and says nothing about real
+hardware; it does mean a benchmark that assumes peer copies are free will
+mislead here. `tests/` has no permanent home for this; the probe used is
+60 lines of HIP around `hipMemcpyPeer`.
+
 **What is NOT evidence, recorded so it is not re-derived.** `published`
 reads 0 and `p2pmem/available` never drops during a transfer, and neither
 means the fastpath is unused. `pci_p2pmem_publish()` only sets the flag
