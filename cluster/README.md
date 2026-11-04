@@ -457,21 +457,49 @@ size = 1073741824
 So GPU-direct NVMe KV does not need a userspace initiator. It needs the
 buffer described by that ioctl rather than by a user virtual address.
 
-**Driving storage I/O through it hangs the guest, for now.** With
-`HIPFILE_ALLOW_COMPAT_MODE=false`, so hipFile must use its p2p fastpath
-rather than staging, an AIS_MT VRAM run does not fail -- it wedges:
+**It no longer hangs, and it never took the fastpath.** This file used to
+say that `HIPFILE_ALLOW_COMPAT_MODE=false` wedged the guest with blocked
+kworkers and a stalled jbd2, and that the thing to debug was the emulated
+NVMe controller servicing a DMA into the GPU's BAR. Neither half survived
+being re-tested on a freshly booted fleet.
+
+More than a dozen AIS and AIS_MT VRAM runs with the flag false completed
+normally, with `dmesg | grep -c "blocked for more than"` at zero. And the
+flag changes nothing that can be measured -- 1 MiB blocks, three runs each:
+
+| | AIS_MT | AIS |
+|---|---|---|
+| `HIPFILE_ALLOW_COMPAT_MODE=false` | 0.075, 0.076, 0.075 | 0.072, 0.075, 0.074 |
+| `HIPFILE_ALLOW_COMPAT_MODE=true` | 0.076, 0.074, 0.067 | 0.069, 0.068, 0.071 |
+
+The reason is that the GPU's p2p pool is never touched in either case.
+Polling `/sys/bus/pci/devices/0000:02:00.0/p2pmem/available` four times a
+second across a whole run, the lowest value seen is 1073741824 -- the full
+pool, never allocated from. hipFile stages both ways; the flag is not
+being ignored so much as it has no second path to select.
+
+**The driver advertises the resource and cannot hand it out.** The
+out-of-tree amdgpu references exactly two p2pdma symbols:
 
 ```
-INFO: task kworker/u32:5:213 blocked for more than 245 seconds.
-INFO: task jbd2/vda1-8:318 blocked in I/O wait for more than 245 seconds.
-systemd[1]: Failed to start systemd-journald.service
+$ nm -u amdgpu.ko | grep p2p
+                 U pci_p2pdma_add_resource
+                 U pci_p2pdma_distance_many
 ```
 
-The registration is real and the I/O path is not. So the honest position
-is that p2pdma is now *available* here and not yet *usable*, and the thing
-to debug is the emulated NVMe controller servicing a DMA into the GPU's
-BAR. Until then `HIPFILE_ALLOW_COMPAT_MODE=true` remains required, which is
-what the AIS/AIS_MT numbers above were measured with.
+`pci_p2pdma_add_resource` is what makes `p2pmem/` appear with its 1 GiB,
+and `pci_p2pdma_distance_many` answers whether two devices could do P2P at
+all. Neither hands out memory. `pci_p2pmem_publish` is absent, which is why
+`published` reads 0 -- and `pci_has_p2pmem()` returns exactly that flag, so
+every consumer that looks for a provider through `pci_p2pmem_find()` skips
+this GPU. `pci_alloc_p2pmem` is absent too, so nothing in this build draws
+from the pool, which is what the `available` counter has been saying.
+
+So p2pdma here is an advertisement. The emulated NVMe controller is not the
+thing to debug: it never receives a P2P bus address, because none is ever
+produced. `HIPFILE_ALLOW_COMPAT_MODE=true` remains the setting to use, not
+because the fastpath is dangerous but because there is no fastpath to
+choose.
 
 **The limit is the kernel client, not the fabric.** rocm-ernic's NVMe-oF
 target reaches guest memory with `dp_nvmeof_from_host()`, which is
@@ -746,6 +774,14 @@ image change.
   | 256 KiB | 0.140 | 0.137 | 0.732 |
   | 512 KiB | 0.199 | 0.196 | 1.031 |
   | 1 MiB | 0.400 | 0.406 | 1.361 |
+
+  Those figures are from the previous pin set and did NOT reproduce on
+  ernic 128bad7: 1 MiB AIS_MT re-measured 0.069 to 0.085 GB/s across
+  16 MiB, 64 MiB and 256 MiB buffers, consistency-checked, which is about a
+  fifth of the 0.400 above. Three runs each rather than eight, and on a
+  different pin set from the original, so this is recorded as unreconciled
+  rather than as a regression -- see the warning further down about what a
+  small sample is worth on this host. The table is left as measured.
 
   AIS and AIS_MT are indistinguishable from each other at every size, so
   hipFile's threading is buying nothing here. POSIX is on DRAM and is NOT a
