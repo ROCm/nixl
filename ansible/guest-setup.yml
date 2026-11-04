@@ -139,6 +139,53 @@
       changed_when: true
       tags: [net, prep]
 
+    # ---- the fabric actually exists --------------------------------------
+    #
+    # Everything above this point configures the guest; nothing above it
+    # checks that the device came up. The distinction is not academic: an
+    # ernic restarted under a live guest wedges the driver --
+    #
+    #     ionic 0000:01:00.0: FW stopped 0xff
+    #     ionic 0000:01:00.0: FW Down: Stopping LIFs
+    #
+    # -- and every RDMA device disappears while the NETWORK interface keeps
+    # its address. So the rails still look right, this play still reports
+    # changed=0, and the first thing to notice is an unrelated benchmark
+    # failing with "No route to host" some time later.
+    #
+    # Assert the thing itself. sysfs rather than ibv_devinfo so this does
+    # not depend on a tool being installed in the guest.
+    - name: Count RDMA devices whose port is ACTIVE
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -o pipefail
+          n=0
+          for f in /sys/class/infiniband/*/ports/*/state; do
+            [ -r "${f}" ] || continue
+            if grep -q ACTIVE "${f}"; then n=$((n + 1)); fi
+          done
+          echo "${n}"
+      register: ernic_rdma_active
+      changed_when: false
+      tags: [net, prep, rdma]
+
+    - name: Fail when the guest has no active RDMA device
+      ansible.builtin.assert:
+        that:
+          - ernic_rdma_active.stdout | trim | int >= 1
+        fail_msg: >-
+          {{ inventory_hostname }} has no RDMA device in state ACTIVE, so
+          nothing will cross the fabric however well the rails are
+          addressed. The usual cause is an ernic server restarted under
+          this running guest, which wedges ionic with "FW stopped 0xff":
+          check `sudo dmesg | grep ionic`. The fix is to restart the guest
+          after the servers, not to re-run this play -- `make cluster-down`
+          then `make cluster-up`.
+        success_msg: >-
+          {{ ernic_rdma_active.stdout | trim }} RDMA device(s) ACTIVE
+      tags: [net, prep, rdma]
+
     # ---- rdma-core ionic provider ---------------------------------------
     # The stock Ubuntu 61.0 provider accepts sq_sig_all, stores it nowhere and
     # consults it never. libfabric's verbs provider never sets
@@ -409,9 +456,10 @@
     # is the quickest way to tell which is installed.
     - name: Collect guest state
       ansible.builtin.shell: |
-        printf 'gpus=%s memlock=%s rails=%s ionic=%s' \
+        printf 'gpus=%s memlock=%s rdma=%s rails=%s ionic=%s' \
           "$(cat /sys/class/kfd/kfd/topology/nodes/*/name 2>/dev/null | grep -cv '^$')" \
           "$(ulimit -l)" \
+          "$(grep -l ACTIVE /sys/class/infiniband/*/ports/*/state 2>/dev/null | wc -l)" \
           "$(ip -br addr show | awk '/192\.168\./ {printf "%s ", $3}')" \
           "$(stat -c%s {{ ionic_target }} 2>/dev/null)"
       register: guest_state
