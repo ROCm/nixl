@@ -1,0 +1,278 @@
+---
+# Reproduce GFX-initiated RDMA against rocm-ernic, end to end.
+#
+#   ansible-playbook gfx-initiated-rdma.yml -e gfx_node=4
+#
+# WHAT THIS DEMONSTRATES
+#
+# A GFX kernel starts an RDMA operation and sees its completion, with the CPU
+# doing nothing on the data path:
+#
+#   CPU    builds the WQE (ibv_post_send) and advances prod. Because
+#          ionic_dv_qp_set_gda() is set, the provider does NOT ring.
+#   GFX    writes the doorbell. That store starts the IO.
+#   ernic  sees the doorbell, performs the RDMA WRITE, posts the CQE itself.
+#   GFX    reads the CQ and sees the completion.
+#
+# THE TWO THINGS THAT MAKE IT WORK, NEITHER OBVIOUS
+#
+# 1. The doorbell does not go to BAR2. A GFX kernel cannot reach BAR2 even
+#    when it is a shared memfd: QEMU maps a vfio-user device's BAR as a
+#    ram_device region and does not offer ram_device windows to peer
+#    vfio-user devices, so rocjitsu is never given the window and the store
+#    is dropped with NO error -- every HIP call succeeds and the value is
+#    simply not there. Guest RAM QEMU does share, and a kernel's store there
+#    lands. So the GPU rings a proxy doorbell page in guest RAM and the
+#    device DMA-polls it. The guest publishes that page's physical address
+#    through the last page of BAR2, which the guest CPU can still write.
+#
+# 2. BAR2 page 0 must stay trapped. Trapping is edge-triggered -- every write
+#    dispatches -- while polling a shared page is value-change triggered, so
+#    a doorbell written twice with the SAME value is invisible. Arming
+#    doorbells are exactly that. Sharing all of BAR2 brings Ethernet up (its
+#    producer indices advance monotonically) and hangs RDMA bring-up:
+#
+#      ionic 0000:03:00.0: IONIC_CMD_RDMA_CREATE_EQ (51) failed: TIMEOUT
+#      ionic 0000:01:00.0: IONIC_CMD_Q_INIT (40) failed: TIMEOUT
+#
+#    with the port stuck PORT_DOWN. rocm-ernic therefore shares from page 1.
+#
+# The device side of both lives in rocm-ernic (--share-doorbells and the
+# proxy doorbell poller). This playbook builds that server, swaps one node
+# onto it, and runs the test.
+- name: GFX-initiated RDMA against rocm-ernic
+  hosts: "vm{{ gfx_node | default(4) }}"
+  gather_facts: false
+  # Stated rather than left to default: the build and restart tasks are
+  # run_once and delegated, and run_once does not mean what it says under the
+  # free strategy.
+  strategy: linear
+
+  vars:
+    gfx_node: 4
+    gfx_ernic_image: nixl-mori-ernic:sharedb
+    gfx_ernic_src: "{{ lookup('env', 'HOME') }}/Projects/rocm-ernic"
+    gfx_stack_dir: /data/qemu-tool-stebates/stacks/nixl-mori
+    gfx_compose: "{{ gfx_stack_dir }}/docker-compose.yml"
+    gfx_env_files:
+      - "{{ lookup('env', 'HOME') }}/Projects/qemu-minimal/qemu/env/scale-out"
+      - "{{ playbook_dir }}/../cluster/env/nixl-mori"
+    gfx_build_ctx: /data/qemu-tool-stebates/ernic-sharedb/ctx
+    gfx_rdma_dev: rocep1s0
+    gfx_pci_slot: "0000:01:00.0"
+
+  tasks:
+
+    # ---- build the device ------------------------------------------------
+    # From the working tree, not a SHA: --share-doorbells and the proxy
+    # doorbell poller are what is under test, and pinning a published ref
+    # would build a server without them.
+    - name: Stage the rocm-ernic working tree
+      delegate_to: localhost
+      run_once: true
+      become: false
+      ansible.builtin.shell: |
+        set -euo pipefail
+        mkdir -p "{{ gfx_build_ctx }}"
+        cd "{{ gfx_ernic_src }}"
+        git ls-files -z | tar --null -T - -cf - | tar -xf - -C "{{ gfx_build_ctx }}"
+        cp "{{ playbook_dir }}/../docker/rocm-ernic/Dockerfile.local" \
+           "{{ gfx_build_ctx }}/Dockerfile.local"
+      args:
+        executable: /bin/bash
+      changed_when: true
+      tags: [build]
+
+    # The Dockerfile asserts --share-doorbells is in the built binary's help,
+    # so a tree without it fails here rather than three restarts later as a
+    # doorbell that silently never arrives.
+    - name: Build the rocm-ernic image with shared and proxy doorbells
+      delegate_to: localhost
+      run_once: true
+      become: false
+      ansible.builtin.command:
+        cmd: >-
+          docker build -q -f {{ gfx_build_ctx }}/Dockerfile.local
+          -t {{ gfx_ernic_image }} {{ gfx_build_ctx }}
+      changed_when: true
+      tags: [build]
+
+    # ---- point this node's rails at it -----------------------------------
+    - name: Back up the generated compose file
+      delegate_to: localhost
+      run_once: true
+      become: false
+      ansible.builtin.copy:
+        src: "{{ gfx_compose }}"
+        dest: "{{ gfx_compose }}.pre-gfx"
+        remote_src: true
+        force: false
+        mode: "0644"
+      tags: [swap]
+
+    - name: Put this node's ernic rails on the image, with --share-doorbells
+      delegate_to: localhost
+      run_once: true
+      become: false
+      ansible.builtin.shell: |
+        set -euo pipefail
+        python3 - "{{ gfx_compose }}" "{{ gfx_node }}" "{{ gfx_ernic_image }}" <<'PY'
+        import re, sys
+        path, node, image = sys.argv[1], sys.argv[2], sys.argv[3]
+        s = open(path).read()
+        for rail in (1, 2):
+            svc = "ernic-%s-%d" % (node, rail)
+            pat = re.compile(
+                r"(exec rocm-ernic [^\n]*?/run/vfu/%s\.sock[^\n]*?'tap0')"
+                % re.escape(svc))
+            if "--share-doorbells" not in pat.search(s).group(1):
+                s = pat.sub(lambda m: m.group(1) + " '--share-doorbells'", s, 1)
+            head = "  %s:\n    <<: *ernic-common\n" % svc
+            if head in s:
+                s = s.replace(head, head + "    image: %s\n" % image, 1)
+        open(path, "w").write(s)
+        PY
+      args:
+        executable: /bin/bash
+      changed_when: true
+      tags: [swap]
+
+    # Order matters and is not compose's. ernic waits for tap0 before it
+    # execs; recreating it gives a fresh netns with no tap0, so tapsetup has
+    # to follow it every time. rocjitsu cannot rebind a stale socket, so its
+    # sockets are removed first. qemu goes last, once every socket exists.
+    # Compose's own healthcheck for ernic never passes (it greps
+    # /proc/net/tcp for a v4 LISTEN and the server binds tcp6), so each
+    # service is brought up with --no-deps.
+    - name: Restart the node in dependency order
+      delegate_to: localhost
+      run_once: true
+      become: false
+      ansible.builtin.shell: |
+        set -euo pipefail
+        cd "{{ gfx_stack_dir }}"
+        export CONTAINER_USER="$(id -u):$(id -g)"
+        export CONTAINER_KVM_GID="$(stat -c %g /dev/kvm)"
+        DC="docker compose {% for f in gfx_env_files %}--env-file {{ f }} {% endfor %}"
+        N={{ gfx_node }}
+
+        # `up` is best-effort and `start` is not. compose gates every
+        # service on the ernic healthcheck, which can never pass: it greps
+        # /proc/net/tcp for a v4 LISTEN and the server binds tcp6 -- so `up`
+        # reports "dependency failed to start" and leaves containers merely
+        # Created. It still creates them, so starting them by name afterwards
+        # is what actually brings the node up. Without this the node ends up
+        # with ernic running and rocjitsu and qemu stopped, and the only
+        # symptom is the guest never coming back.
+        up() { ${DC} up -d --no-deps --force-recreate "$@" >/dev/null 2>&1 || true; }
+        start() {
+            for c in "$@"; do
+                docker start "$c" >/dev/null 2>&1 || true
+            done
+            for c in "$@"; do
+                # -q, not --format: a Go template here would have to be
+                # escaped past Jinja, and ansible-lint cannot parse the task
+                # when it is.
+                [ -n "$(docker ps -q --filter name=^${c}$)" ] \
+                    || { echo "FAILED to start $c" >&2; exit 1; }
+            done
+        }
+
+        docker stop nixl-mori-qemu-${N}-1 \
+                    nixl-mori-rocjitsu-${N}-1-1 nixl-mori-rocjitsu-${N}-2-1 \
+                    >/dev/null 2>&1 || true
+        up ernic-${N}-1 ernic-${N}-2
+        start nixl-mori-ernic-${N}-1-1 nixl-mori-ernic-${N}-2-1
+        sleep 3
+        up tapsetup-${N}-1 tapsetup-${N}-2
+        sleep 3
+        docker exec nixl-mori-ernic-${N}-1-1 sh -c \
+            'rm -f /run/vfu/rocjitsu-'"${N}"'-1.sock /run/vfu/rocjitsu-'"${N}"'-2.sock'
+        up rocjitsu-${N}-1 rocjitsu-${N}-2
+        start nixl-mori-rocjitsu-${N}-1-1 nixl-mori-rocjitsu-${N}-2-1
+        sleep 6
+        up qemu-${N}
+        start nixl-mori-qemu-${N}-1
+        docker logs nixl-mori-ernic-${N}-1-1 2>&1 | grep -i 'shared by descriptor'
+      args:
+        executable: /bin/bash
+      changed_when: true
+      tags: [swap]
+
+    # search_regex, not a bare port check. QEMU forwards the port, so it is
+    # listening from the moment the container starts and a port check returns
+    # long before the guest has an sshd. The next task then dies on
+    # "kex_exchange_identification: read: Connection reset by peer", which
+    # reads like a broken guest rather than an early one. Waiting for the
+    # banner waits for sshd.
+    - name: Wait for the guest sshd to answer
+      delegate_to: localhost
+      run_once: true
+      become: false
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host | default('localhost') }}"
+        port: "{{ ansible_port | default(22) }}"
+        search_regex: OpenSSH
+        timeout: 900
+      tags: [swap]
+
+    # Even a banner is not the condition that matters. qemu is still settling
+    # when it first answers, and the next task -- which shells out to another
+    # ansible-playbook -- then fails UNREACHABLE on its single attempt, with
+    # an error that names ssh and reads like a broken guest. This retries the
+    # real connection until it works.
+    - name: Wait until the guest actually accepts a connection
+      ansible.builtin.wait_for_connection:
+        delay: 5
+        sleep: 5
+        timeout: 900
+      tags: [swap]
+
+    # GPUs need the per-boot amdgpu probe and the rails need addressing, and
+    # guest-setup.yml asserts both plus the DV provider -- so a node that did
+    # not come back cleanly fails there rather than in the test.
+    - name: Bring the guest to its known state
+      delegate_to: localhost
+      run_once: true
+      become: false
+      ansible.builtin.command:
+        cmd: >-
+          ansible-playbook {{ playbook_dir }}/guest-setup.yml
+          -l vm{{ gfx_node }}
+      changed_when: true
+      tags: [swap]
+
+    # ---- run it ----------------------------------------------------------
+    - name: Install the test
+      ansible.builtin.copy:
+        src: files/gfx-initiated-rdma.cpp
+        dest: /tmp/gfx-initiated-rdma.cpp
+        mode: "0644"
+      tags: [test]
+
+    - name: Build the test
+      ansible.builtin.command:
+        cmd: >-
+          /opt/rocm/bin/hipcc -O2 -I/usr/local/include
+          -o /tmp/gfx-initiated-rdma /tmp/gfx-initiated-rdma.cpp
+          -L/usr/local/lib -libverbs -lionic -Wl,-rpath,/usr/local/lib
+        creates: /tmp/gfx-initiated-rdma
+      tags: [test]
+
+    # Root for two reasons, both about addressing: /proc/self/pagemap to
+    # resolve the proxy page's physical address, and the sysfs PCI resource
+    # to reach the BAR2 slot that publishes it.
+    - name: Run GFX-initiated RDMA
+      become: true
+      ansible.builtin.command:
+        cmd: >-
+          /tmp/gfx-initiated-rdma {{ gfx_rdma_dev }} {{ gfx_pci_slot }}
+      register: gfx_result
+      changed_when: false
+      failed_when: gfx_result.rc != 0
+      tags: [test]
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: "{{ gfx_result.stdout_lines }}"
+      tags: [test]

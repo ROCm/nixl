@@ -1,0 +1,15 @@
+ARG ERNIC_BASE_IMAGE=docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-ernic-sbates-fork:20261030.gadc94af-ernic.8f35f4a-vfu.3719c3a
+FROM ${ERNIC_BASE_IMAGE} AS build
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+COPY . /src
+RUN cmake -G Ninja -S /src -B /src/build \
+        -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DERNIC_BUILD_DOCS=OFF \
+    && ninja -C /src/build rocm-ernic
+# Fail here rather than shipping a server that cannot talk to this QEMU, or
+# one built from a tree without the flag this image exists to carry.
+RUN ldd /src/build/rocm-ernic | grep -q 'libvfio-user\.so' \
+    && /src/build/rocm-ernic --help 2>&1 | grep -q -- --share-doorbells
+
+FROM ${ERNIC_BASE_IMAGE}
+COPY --from=build /src/build/rocm-ernic /usr/local/bin/rocm-ernic
+LABEL io.batesste.ernic.source-ref="local-working-tree+share-doorbells"

@@ -699,8 +699,76 @@ so that QEMU could hand that fd to rocjitsu the way it already does for
 VRAM. That is a change in `src/rocm_ernic_server.c`, not in QEMU or in HIP,
 and it would trade the ernic's ability to see every doorbell write (which
 is how its stats and its queue scheduling work) for the ability to let a
-kernel write them. Worth knowing before anyone plans GPU-initiated
-networking on this cluster.
+kernel write them.
+
+That was written before it was tried, and the second half of it is wrong:
+the memfd is necessary and **not sufficient**, because the missing piece is
+in QEMU after all. See the next section.
+
+### GFX-initiated RDMA works, through a proxy doorbell in guest RAM
+
+Tested 2026-11-04 on vm4. A GFX kernel starts an RDMA WRITE and reads its
+completion, with no CPU on the data path:
+
+```
+post_send: BAR2 doorbell 0x0 -> 0x0 (UNRUNG, as GDA intends)
+GFX writing doorbell 0x2000001 into the proxy page
+proxy slot after GFX store: 0x2000001 (GPU STORE LANDED)
+GFX poll:  CQE SEEN (cqe[0]=0x100000000000000)
+payload at +4096: "GFX-INITIATED-RDMA-PAYLO"  MATCH
+```
+
+Reproduce with `ansible/gfx-initiated-rdma.yml`, which builds the server,
+swaps one node onto it and runs the test.
+
+**The doorbell does not go to BAR2, and cannot.** Exporting BAR2 as a memfd
+does make the guest CPU's doorbells stop trapping -- the device's poller
+finds them, `uar_writes` advances -- and a GFX kernel's store to it is still
+dropped. QEMU maps a vfio-user device's BAR as a `ram_device` region and
+does not offer `ram_device` windows to peer vfio-user devices, so rocjitsu
+is never given the window. Confirmed directly: BAR2 sits at guest-physical
+`0xfdc00000`, and the only window rocjitsu was ever offered is the ROM at
+`0xfffc0000`. This is the same `ram_device` rule that forces the 4096-byte
+bounce buffer described above, and it is why `x-max-bounce-buffer-size`
+exists on the device at all.
+
+Guest RAM, QEMU does share. So the GPU rings a **proxy doorbell page in
+guest RAM** and the device DMA-polls it; the guest publishes that page's
+physical address through the last page of BAR2, which the CPU can still
+write. The page is laid out as a doorbell page, so slot *i* is qtype *i* and
+the device dispatches it with no special case. `--share-doorbells` in
+rocm-ernic carries both halves.
+
+**BAR2 page 0 must stay trapped.** Trapping is edge-triggered -- every write
+dispatches -- while polling a shared page is value-change triggered, so a
+doorbell written twice with the *same* value is invisible. Arming doorbells
+are exactly that. Sharing all of BAR2 brings Ethernet up, because its
+producer indices advance monotonically and every write therefore differs,
+and hangs RDMA bring-up:
+
+```
+ionic 0000:03:00.0: IONIC_CMD_RDMA_CREATE_EQ (51) failed: TIMEOUT (-110)
+ionic 0000:01:00.0: IONIC_CMD_Q_INIT (40) failed: TIMEOUT (-110)
+```
+
+with the port stuck `PORT_DOWN` and nothing logged device-side. Sharing from
+page 1 leaves the kernel LIF's doorbells trapped and correct, and shares the
+per-PID pages a userspace QP uses -- which is all the GPU needs.
+
+**The direct verbs are what made it assemblable.** `ionic_dv_get_ctx()`
+gives the doorbell page and `sq_qtype`, `ionic_dv_get_qp()` the SQ and its
+`db_val`, `ionic_dv_get_cq()` the completion queue, and
+`ionic_dv_qp_set_gda()` stops the provider ringing so the GPU's store is the
+only one. Before that series the provider exported six DV symbols and no way
+to reach any of those addresses.
+
+**Two things that will bite.** `ionic_dv_qp_set_gda()` never talks to the
+device -- it is a userspace flag -- so it returns 0 against any ionic
+context and its success says nothing about GDA support. And do not write a
+single kernel that rings and then spins for the completion: this GPU is
+emulated, every spin iteration costs real wall-clock, and such a kernel
+outlives any timeout while holding rocjitsu at 100% CPU, blocking every
+later GPU call on that node until the node is restarted.
 
 **What is NOT evidence, recorded so it is not re-derived.** `published`
 reads 0 and `p2pmem/available` never drops during a transfer, and neither
