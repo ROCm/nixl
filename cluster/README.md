@@ -237,19 +237,29 @@ sudo ip route replace 192.168.80.201/32 dev enp3s0np0 src 192.168.80.18
 sudo nvme connect -t rdma -a 192.168.80.201 -s 4420 -n nvmet-test
 ```
 
-Measured 2026-11-03, vm4, 128 KiB values, GB/s and average latency:
+Measured 2026-11-03, vm4, 128 KiB values, GB/s:
 
 | | Store | Retrieve |
 |---|---|---|
-| DRAM | 6.787 / 19.3 us | 9.290 / 14.1 us |
-| VRAM | 0.330 / 396.9 us | 7.049 / 18.6 us |
+| DRAM | 6.991 (1.28x) | 7.551 (1.91x) |
+| VRAM | 0.330 (1.03x) | 5.660 (1.46x) |
 
-Median of three runs each -- fewer than the eight the transport table below
-uses, so treat these as indicative and re-measure in one burst before
-quoting them against anything. Re-measured on ernic 8e43a0c, which moved
-every figure: against the 461dbbd numbers this table used to carry, Retrieve DRAM
-is up from 5.072 and Retrieve VRAM from 2.126, and Store VRAM from 0.062.
-Only Store DRAM is close to where it was, at 6.141 before.
+Median of eight consecutive runs, with the min-to-max spread of those eight
+in brackets. Taken with `cluster/scripts/bench.sh NVME_KV`, on ernic
+128bad7. Against the 461dbbd numbers this table used to carry -- Store DRAM
+6.141, Retrieve DRAM 5.072, Store VRAM 0.062, Retrieve VRAM 2.126 -- every
+figure is up, Store VRAM by a factor of five.
+
+**Read the spreads before the medians.** Retrieve varies by 1.9x across
+eight back-to-back runs on a quiet-looking host, so a single Retrieve number
+from this cluster means very little; an earlier three-run sample of this
+same table reported 9.290 and 7.049 for the two Retrieve cases, both near
+the top of the range rather than the middle.
+
+Store VRAM is the exception at 1.03x, and the reason is worth noting: it is
+almost entirely a device-to-host copy, which is CPU work of a fixed size and
+does not care what the fabric or the neighbours are doing. The paths that
+vary are the ones that actually cross the emulator.
 
 Many times the SPDK path below, with latency flat in size -- 13.2, 12.3,
 13.8, 14.0, 14.1 and 13.9 us from 4 KiB to 128 KiB, so bandwidth is just the
@@ -258,7 +268,7 @@ leaves the host: `dp_sge_to_host()` is a copy within the emulator's own
 address space.
 
 **The VRAM Store number is still the staging copy, and it is still the
-argument for finishing the job.** 6.8 GB/s against 0.330 is a factor of
+argument for finishing the job.** 7.0 GB/s against 0.330 is a factor of
 twenty, and essentially all of it is the device-to-host copy: `post` is
 375.6 us of the 376.9. The large BAR and p2pdma registration landing did not
 move it, which is consistent -- this client does not take that path.

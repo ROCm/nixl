@@ -26,6 +26,7 @@
 #   cluster/scripts/bench.sh UCX VRAM
 #   RUNS=16 BLOCK=262144 cluster/scripts/bench.sh LIBFABRIC DRAM
 #   cluster/scripts/bench.sh MORI_IO VRAM
+#   OP=READ BLOCK=131072 cluster/scripts/bench.sh NVME_KV DRAM
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,6 +48,15 @@ BUFFER="${BUFFER:-16777216}"
 T_VM="${T_VM:-1}"
 I_VM="${I_VM:-2}"
 PORT_BASE="${PORT_BASE:-9900}"
+
+# NVME_KV is not a transport and does not take a pair of guests: one VM and
+# one in-process target are the whole fabric, so it runs a single process
+# against a namespace character device. OP is WRITE (Store) or READ
+# (Retrieve); a READ needs block == value size, because a KV value is atomic
+# and there is no ranged Retrieve.
+KV_VM="${KV_VM:-4}"
+KV_DEV="${KV_DEV:-/dev/ng2n1}"
+OP="${OP:-WRITE}"
 
 SUBNET="$(envget ERNIC_GUEST_SUBNET 192.168.80)"
 ERNIC_PER_VM="$(envget ERNIC_PER_VM 1)"
@@ -89,7 +99,11 @@ extra_for() {
 GUEST_ENV="NIXL_PLUGIN_DIR=${STACK}/nixl/lib/x86_64-linux-gnu/plugins"
 GUEST_ENV="${GUEST_ENV} FI_UNIVERSE_SIZE=16 UCX_ROCM_COPY_DMABUF=try"
 
-echo "${BACKEND} ${SEG}, ${BLOCK} B blocks, ${BUFFER} B buffer, vm${T_VM} <-> vm${I_VM}"
+if [[ "${BACKEND}" == "NVME_KV" ]]; then
+	echo "${BACKEND} ${OP} ${SEG}, ${BLOCK} B values, vm${KV_VM} ${KV_DEV}"
+else
+	echo "${BACKEND} ${SEG}, ${BLOCK} B blocks, ${BUFFER} B buffer, vm${T_VM} <-> vm${I_VM}"
+fi
 echo "load before: $(cut -d' ' -f1-3 /proc/loadavg)"
 
 vals=()
@@ -101,14 +115,26 @@ for i in $(seq 1 "${RUNS}"); do
 	# defaults (an 8 GiB registration) rather than on these arguments.
 	common="--backend ${BACKEND} --runtime_type ASIO --asio_address ${T_IP} --asio_port ${port} --initiator_seg_type ${SEG} --target_seg_type ${SEG} --start_block_size ${BLOCK} --max_block_size ${BLOCK} --total_buffer_size ${BUFFER}"
 
-	timeout 240 ssh "${SSH_OPTS[@]}" -p "${T_PORT}" ubuntu@localhost \
-		"env ${GUEST_ENV} ${STACK}/nixlbench/bin/nixlbench ${common} $(extra_for "${T_IP}")" \
-		>/tmp/bench-t.log 2>&1 &
-	sleep 4
-	timeout 240 ssh "${SSH_OPTS[@]}" -p "${I_PORT}" ubuntu@localhost \
-		"env ${GUEST_ENV} ${STACK}/nixlbench/bin/nixlbench ${common} $(extra_for "${I_IP}")" \
-		>/tmp/bench-i.log 2>&1 || true
-	wait 2>/dev/null || true
+	if [[ "${BACKEND}" == "NVME_KV" ]]; then
+		# Root-only: passthrough needs it, and sudo drops the
+		# environment, so the plugin directory goes through explicitly
+		# rather than through sudo -E.
+		kv="--backend NVME_KV --nvme_kv_device=${KV_DEV} --op_type ${OP} --initiator_seg_type ${SEG} --start_block_size ${BLOCK} --max_block_size ${BLOCK} --total_buffer_size ${BLOCK} --num_iter 64 --warmup_iter 16"
+		timeout 240 ssh "${SSH_OPTS[@]}" -p "$(ssh_port "${KV_VM}")" \
+			ubuntu@localhost \
+			"sudo env ${GUEST_ENV} ${STACK}/nixlbench/bin/nixlbench ${kv}" \
+			>/tmp/bench-t.log 2>&1 || true
+		: >/tmp/bench-i.log
+	else
+		timeout 240 ssh "${SSH_OPTS[@]}" -p "${T_PORT}" ubuntu@localhost \
+			"env ${GUEST_ENV} ${STACK}/nixlbench/bin/nixlbench ${common} $(extra_for "${T_IP}")" \
+			>/tmp/bench-t.log 2>&1 &
+		sleep 4
+		timeout 240 ssh "${SSH_OPTS[@]}" -p "${I_PORT}" ubuntu@localhost \
+			"env ${GUEST_ENV} ${STACK}/nixlbench/bin/nixlbench ${common} $(extra_for "${I_IP}")" \
+			>/tmp/bench-i.log 2>&1 || true
+		wait 2>/dev/null || true
+	fi
 
 	# Whichever side bound first prints the table; the other prints none.
 	# `|| true` is load-bearing: under `set -e` with `pipefail` a grep that
