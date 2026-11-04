@@ -104,7 +104,7 @@ QEMU_IMAGE=docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sb
 # It has no build stamp, so gen-compose's coherence check warns and excludes
 # it rather than refusing -- which is the behaviour that check documents for a
 # locally built image carrying a fix under test.
-ERNIC_IMAGE=nixl-mori-ernic:8e43a0c
+ERNIC_IMAGE=nixl-mori-ernic:128bad7
 # Bumped from rocjitsu.84fb06b for the large BAR. 84fb06b predates
 # batesste-ci-images 668a48f, which moved rocjitsu_vram_aperture from `keep`
 # to `max` -- its image carries an empty vram-aperture label, this one says

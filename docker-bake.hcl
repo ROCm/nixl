@@ -109,11 +109,14 @@ variable "ERNIC_BASE_IMAGE" { default = "docker.io/sbates130272/batesste-ci-imag
 // what makes guest-to-guest rdma_cm work and therefore what makes NIXL's
 // LIBFABRIC backend work at all on this cluster.
 //
-// This is develop's tip plus one commit: the NVMe KV command set, on
-// origin/feat/nvmeof-kv. `--backend nvmeof:kv=1` is what NIXL's NVME_KV
-// plugin talks to, and the ref is pushed, so this builds from a clean
-// checkout rather than from a local tree.
-variable "ERNIC_REF" { default = "8e43a0c11e7df700b0ea1c5846af9b6dc421c4e6" }
+// origin/feat/nvmeof-kv, which is develop's tip plus the NVMe KV command
+// set and then per-namespace command sets. `--backend nvmeof:kv=1` is what
+// NIXL's NVME_KV plugin talks to; `ns=N` beside it serves a block namespace
+// and a Key Value one from the SAME controller, which is what
+// `MODE=mixed cluster/scripts/s3-server.sh` needs and what 8e43a0c could
+// not do. Pushed, so this builds from a clean checkout rather than a local
+// tree.
+variable "ERNIC_REF" { default = "128bad74f031660b7fe7406d9955edeee236d98d" }
 
 variable "ERNIC_IMAGE_NAME" { default = "nixl-mori-ernic" }
 

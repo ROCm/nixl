@@ -765,21 +765,24 @@ wrong question of it. Measured vm1 <-> vm2, 16 MiB buffer, GB/s:
 All three transports move VRAM now. LIBFABRIC needed `patches/libfabric/01`
 as well as `patches/nixl/07`; see the transport list below for why.
 
-Re-measured on ernic 8e43a0c, 1 MiB blocks, 16 MiB buffer, vm1 <-> vm2.
-**Eight consecutive runs each, median reported** -- see the warning below
-about why two is not enough here:
+1 MiB blocks, 16 MiB buffer, vm1 <-> vm2. **Eight consecutive runs each,
+median reported** -- see the warning below about why two is not enough here.
+On the pinned ernic 128bad7:
 
-| Backend | VRAM median | VRAM min-max | previously recorded |
-|---|---|---|---|
-| UCX | 2.103 | 2.070 - 2.129 | 2.333 |
-| LIBFABRIC | 2.174 | 2.116 - 2.385 | 2.247 |
-| MORI_IO | 0.944 | 0.739 - 1.005 | 0.816 |
+| Backend | VRAM median | VRAM min-max | on 8e43a0c | previously recorded |
+|---|---|---|---|---|
+| UCX | 1.826 | 1.522 - 1.872 | 2.103 | 2.333 |
+| LIBFABRIC | 1.978 | 1.491 - 2.002 | 2.174 | 2.247 |
+| MORI_IO | 0.985 | 0.823 - 1.009 | 0.944 | 0.816 |
 
-UCX DRAM over the same eight runs: median 2.162, range 2.093 - 2.253.
+UCX DRAM on 8e43a0c over eight runs: median 2.162, range 2.093 - 2.253.
 
-So nothing regressed. Two are a few per cent under what this file recorded
-and MORI_IO is above it, which is the spread of the measurement rather than
-a change in the cluster.
+Nothing here supports a regression at any step. The 8e43a0c column was taken
+on a host at load 50-177 and the 128bad7 column at load ~30, and the
+differences between the two columns are smaller than the swing this file
+measured between two bursts of the SAME configuration. Read them as one
+band, roughly 1.8-2.2 GB/s for UCX and LIBFABRIC and 0.9-1.0 for MORI_IO,
+not as three dated points on a trend.
 
 **THIS HOST IS SHARED, AND THE NUMBERS MOVE WITH ITS LOAD.** It has 32
 threads and several hundred logged-in users, and during the runs above its
