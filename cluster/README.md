@@ -641,6 +641,67 @@ does it once, from the real VRAM, with no staging buffer and no QEMU.
 QEMU's NVMe copies twice, into and out of a bounce buffer, which is the
 entire difference between the two rows.
 
+### A GFX kernel cannot ring another device's doorbell, and fails silently
+
+This is the GPUDirect Async / DOCA GPUNetIO shape: a kernel on the GPU
+writes the NIC's doorbell to post work without waking the CPU. Tested
+2026-11-03 on vm4. It does not work here, and nothing tells you so.
+
+Every API call succeeds:
+
+```
+mmap ernic BAR2            ok
+hipHostRegister(IoMemory)  ok          <- 0x4, hipHostRegisterIoMemory
+hipHostGetDevicePointer    ok
+kernel -> ernic doorbell   no error    <- launch and synchronize both clean
+```
+
+And the data is gone:
+
+```
+BAR2[4] seeded by CPU        : 0x11110000
+kernel 5000 stores           : no error
+BAR2[4] after kernel stores  : 0x11110000   LOST
+```
+
+The ernic's own counters agree: `mmio_writes_total` moves by 2 across a run
+with ZERO kernel stores and by 4 across a run with 5000 of them. The stores
+never reached the device.
+
+The control in the same binary rules out the measurement: a kernel store to
+the *peer GPU's* VRAM lands every time and reads back correctly, and a CPU
+store to the very same doorbell address lands immediately. So kernels can
+write to another vfio-user device -- just not this one.
+
+**Why.** `rocm-ernic` registers both BARs with no mmap areas and no fd:
+
+```c
+vfu_setup_region(vfu_ctx, VFU_PCI_DEV_BAR2_REGION_IDX, IONIC_BAR2_DB_SIZE,
+                 bar2_access, VFU_REGION_FLAG_RW | VFU_REGION_FLAG_MEM,
+                 NULL, 0, -1, 0);
+```
+
+so the doorbell page is trap-only: every access must become a vfio-user
+message to the ernic process. The guest CPU can do that, because its
+accesses trap through KVM to QEMU, which owns the vfio-user connection.
+rocjitsu cannot: its shared mappings are the two `rocjitsu-vram` memfds and
+guest RAM, and nothing else. It has no mapping of the ernic's BAR and no
+channel to the ernic, so a store that resolves there in the emulated GPU's
+address space is simply dropped.
+
+That is also why the peer-VRAM case works and this one does not. VRAM is
+shared by descriptor and really is the same pages in both processes; a
+trap-only BAR is not shared at all.
+
+**What it would take.** The ernic would have to export its doorbell region
+with a real fd -- `vfu_setup_region` with an mmap area backed by a memfd --
+so that QEMU could hand that fd to rocjitsu the way it already does for
+VRAM. That is a change in `src/rocm_ernic_server.c`, not in QEMU or in HIP,
+and it would trade the ernic's ability to see every doorbell write (which
+is how its stats and its queue scheduling work) for the ability to let a
+kernel write them. Worth knowing before anyone plans GPU-initiated
+networking on this cluster.
+
 **What is NOT evidence, recorded so it is not re-derived.** `published`
 reads 0 and `p2pmem/available` never drops during a transfer, and neither
 means the fastpath is unused. `pci_p2pmem_publish()` only sets the flag
