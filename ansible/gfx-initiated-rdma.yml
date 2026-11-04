@@ -127,9 +127,15 @@
                 % re.escape(svc))
             if "--share-doorbells" not in pat.search(s).group(1):
                 s = pat.sub(lambda m: m.group(1) + " '--share-doorbells'", s, 1)
+            # Insert the image override only if this service does not
+            # already carry one. Testing for the two-line head alone is not
+            # enough: it still matches after the override has been added, so
+            # a second run inserts a second "image:" and compose then refuses
+            # the whole file with 'mapping key "image" already defined'.
             head = "  %s:\n    <<: *ernic-common\n" % svc
-            if head in s:
-                s = s.replace(head, head + "    image: %s\n" % image, 1)
+            already = head + "    image: %s\n" % image
+            if head in s and already not in s:
+                s = s.replace(head, already, 1)
         open(path, "w").write(s)
         PY
       args:
