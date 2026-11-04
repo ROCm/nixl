@@ -487,6 +487,53 @@ controller servicing a DMA into the GPU's BAR**, which is a vfio-user
 region belonging to rocjitsu. 14.7 ms to move 1 MiB is about 14 us per
 4 KiB page, which is round-trip shaped rather than copy shaped.
 
+**The cost is QEMU's bounce buffer, and it is a four-line fix away.**
+Chased down 2026-11-03. The DMA works and the data is correct; what is slow
+is how QEMU moves it.
+
+QEMU *does* map the GPU BAR -- two 256 GiB shared mappings of
+`/memfd:rocjitsu-vram` are in its address space, so the vfio-user region fd
+is being shared and mapped as designed. But the emulated NVMe does not get
+a direct pointer to it for DMA. It falls back to QEMU's bounce-buffer path,
+and that path is capped:
+
+```
+$ qemu-system-x86_64 -device nvme,help | grep bounce
+  x-max-bounce-buffer-size=<size> - Maximum buffer size allocated for bounce
+    buffers used for mapped access to indirect DMA memory (default: 4096)
+```
+
+4096 bytes. A 1 MiB write from the BAR becomes 256 map/copy/unmap cycles,
+and the throughput becomes buffer-size over per-cycle cost -- a constant,
+independent of how much you ask for. That is exactly the shape measured:
+0.072 GB/s at 256 KiB and 0.077 at 1 MiB, flat where staging scales.
+
+Raising it on the NVMe -- the DMA *initiator*, not the vfio-user device --
+confirms it. vm4 with `x-max-bounce-buffer-size=16M`:
+
+| Block | bounce 4096 | bounce 16M |
+|---|---|---|
+| 256 KiB | 0.072 | 0.210 |
+| 1 MiB | 0.077 | 0.321 (5 runs, 0.314-0.323) |
+| 4 MiB | -- | 0.369 |
+
+4.2x at 1 MiB, and the flat ceiling becomes a curve. `qemu-tool` sets this
+property nowhere, so every emulated NVMe in this fleet runs at the 4096
+default; `run-vm`'s literal `--nvme` form is how the above was tested.
+
+It is still a copy, so the fastpath remains ~22% under staging (0.321
+against 0.412). Closing that needs the BAR to be RAM from the DMA path's
+point of view rather than something to bounce through. The fork carries
+`use_region_fds` and `vfio_device_get_region_fd` and clearly uses them for
+the guest's own access to the BAR; it is the device-DMA path that still
+bounces.
+
+`--pci-mmio-bridge` is NOT that mechanism and is worth not confusing with
+it: it is an MMIO *tracing* device -- an 8 KiB shadow window polled every
+millisecond, with `-trace enable=pci_mmio_*` -- and qemu-tool notes that it
+forces `ioeventfd=off,dbcs=off` on the NVMe, which would make this slower
+rather than faster.
+
 **What is NOT evidence, recorded so it is not re-derived.** `published`
 reads 0 and `p2pmem/available` never drops during a transfer, and neither
 means the fastpath is unused. `pci_p2pmem_publish()` only sets the flag
