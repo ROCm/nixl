@@ -186,30 +186,68 @@ jobs:
 
           # The names end up in artifact names, release tags and paths, so only
           # plain ones are accepted, and a rejected name is never echoed.
+          valid_name() {
+            [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$ ]] \
+              && [[ "$1" != *..* && "$1" != *//* && "$1" != */ && "$1" != *.lock ]]
+          }
+
+          # An entry ending in "/*" stands for every branch under that prefix.
           entries='[]'
           number=0
           while IFS= read -r line || [ -n "$line" ]; do
             number=$((number + 1))
             line=${line%%#*}
-            branch=$(tr -d '[:space:]' <<< "$line")
-            if [ -z "$branch" ]; then continue; fi
-            if [[ ! "$branch" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$ ]] \
-                || [[ "$branch" == *..* || "$branch" == *//* || "$branch" == */ || "$branch" == *.lock ]]; then
-              echo "::error::entry ${number} of the branch list is not a branch name this workflow accepts (letters, digits, '.', '_', '-' and '/')"
-              exit 1
+            entry=$(tr -d '[:space:]' <<< "$line")
+            if [ -z "$entry" ]; then continue; fi
+            if [[ "$entry" == *'/*' ]]; then
+              pattern=true
+              prefix=${entry%'*'}
+              if ! valid_name "${prefix%/}"; then
+                echo "::error::entry ${number} of the branch list is not a prefix this workflow accepts (letters, digits, '.', '_', '-' and '/', then '/*')"
+                exit 1
+              fi
+              if ! names=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/git/matching-refs/heads/${prefix}" \
+                  --jq '.[].ref | sub("^refs/heads/"; "")'); then
+                echo "::error::the branches under ${prefix} could not be listed"
+                exit 1
+              fi
+              if [ -z "$names" ]; then
+                echo "::notice title=No branch matched::no branch of this repository is under ${prefix}"
+                continue
+              fi
+            else
+              pattern=false
+              if ! valid_name "$entry"; then
+                echo "::error::entry ${number} of the branch list is not a branch name this workflow accepts (letters, digits, '.', '_', '-' and '/')"
+                exit 1
+              fi
+              names=$entry
             fi
-            slug=${branch//\//-}
-            if jq -e --arg s "$slug" 'any(.[]; .slug == $s)' <<< "$entries" > /dev/null; then
-              echo "::error::${branch} is listed twice, or shares the name ${slug} with another branch once '/' becomes '-'"
-              exit 1
-            fi
-            if ! sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${branch}" --jq .object.sha 2>/dev/null) \
-                || [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
-              echo "::warning title=Branch skipped::${branch} is in the branch list but is not a branch of this repository"
-              continue
-            fi
-            entries=$(jq -c --arg b "$branch" --arg s "$slug" --arg h "$sha" \
-              '. + [{branch: $b, slug: $s, sha: $h}]' <<< "$entries")
+
+            while IFS= read -r branch; do
+              if [ -z "$branch" ]; then continue; fi
+              if ! valid_name "$branch"; then
+                echo "::warning title=Branch skipped::a branch matched by entry ${number} has a name this workflow does not accept"
+                continue
+              fi
+              if jq -e --arg b "$branch" 'any(.[]; .branch == $b)' <<< "$entries" > /dev/null; then
+                if [ "$pattern" = true ]; then continue; fi
+                echo "::error::${branch} is listed twice"
+                exit 1
+              fi
+              slug=${branch//\//-}
+              if jq -e --arg s "$slug" 'any(.[]; .slug == $s)' <<< "$entries" > /dev/null; then
+                echo "::error::${branch} shares the name ${slug} with another branch once '/' becomes '-'"
+                exit 1
+              fi
+              if ! sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${branch}" --jq .object.sha 2>/dev/null) \
+                  || [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+                echo "::warning title=Branch skipped::${branch} is in the branch list but is not a branch of this repository"
+                continue
+              fi
+              entries=$(jq -c --arg b "$branch" --arg s "$slug" --arg h "$sha" \
+                '. + [{branch: $b, slug: $s, sha: $h}]' <<< "$entries")
+            done <<< "$names"
           done < list.txt
 
           count=$(jq length <<< "$entries")

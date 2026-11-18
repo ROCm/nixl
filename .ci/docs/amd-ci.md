@@ -177,6 +177,13 @@ artifact names, in the release tag `nightly-<slug>` and in the site's paths.
 At most six branches are built in one run. A listed branch that does not exist
 is skipped with a warning.
 
+A line ending in `/*` stands for every branch under that prefix. The list has
+`for-upstream/*`, so a branch pushed as `for-upstream/<name>` is built and
+tested the same night with no change to the list. Anyone who can push a branch
+under a listed prefix can therefore have it built; see the note on trust above.
+The limit of six counts the branches a prefix matches, and the run fails when
+it is exceeded.
+
 A new branch is tested and shown on the results site. Whether its wheels are
 published is the wheel publisher's decision; see [amd-wheels.md](amd-wheels.md).
 

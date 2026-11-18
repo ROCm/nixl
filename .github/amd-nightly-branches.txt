@@ -6,3 +6,5 @@
 # See .ci/docs/amd-ci.md.
 main-amd
 main
+# Every branch being prepared for upstream NIXL.
+for-upstream/*
