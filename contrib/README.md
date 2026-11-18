@@ -42,7 +42,7 @@ every supported ROCm version (7.14 and 10.1, x86_64 only); `import nixl`
 selects the backend matching the installed ROCm. It is built in three steps,
 all run from the repository root.
 
-1. Build the backend wheels, one image per ROCm version. `Dockerfile.manylinux`
+1. Build the backend wheels, one build per ROCm version. `Dockerfile.manylinux`
    builds CUDA wheels by default; `--gpu-stack rocm` builds against a ROCm
    release instead:
 
@@ -52,15 +52,23 @@ all run from the repository root.
            --dockerfile contrib/Dockerfile.manylinux \
            --gpu-stack rocm --rocm-version "$rocm" \
            --python-versions 3.10,3.11,3.12,3.13,3.14 \
-           --tag "nixl-wheel:rocm$rocm"
-       cid=$(docker create "nixl-wheel:rocm$rocm")
-       docker cp "$cid:/workspace/nixl/dist" "./dist-rocm$rocm"
-       docker rm "$cid"
+           --wheel-output-dir "dist-rocm$rocm"
    done
    ```
 
+   `--wheel-output-dir DIR` writes only the wheels to `DIR` (the `wheel_dist`
+   stage, exported as a BuildKit local output) and creates no image. Without
+   it the build produces the image named by `--tag`, with the wheels in
+   `/workspace/nixl/dist`, as for CUDA.
+
    Behind a TLS-intercepting proxy, add `--proxy-ca-cert FILE` to pass the
    proxy's root CA certificate to the build as a BuildKit secret.
+
+   The ROCm in the build image is not a usable ROCm install: it has the
+   runtime, the HIP, HSA and hipFile headers and `hipify-perl`, but of ROCm's
+   LLVM only the libraries the runtime links (no compiler, no
+   `amdrocm-llvm-devel`). NIXL and its dependencies are compiled with the
+   image's GCC.
 
    Each `dist-rocm<version>` then holds the intermediate backend wheels
    `nixl_rocm<X>_<Y>-<version>-cp3*-cp3*-manylinux_2_28_x86_64.whl`
@@ -127,10 +135,9 @@ into `--output-dir` (default `dist`):
 
 The wheel is tagged for `--platform` (default `manylinux_2_39_x86_64`); pass
 the tag matching the glibc of the build environment, e.g.
-`--platform manylinux_2_28_x86_64` in the manylinux image.
-`--rocm-version X.Y[.Z]` overrides the version read from
-`<rocm-path>/.info/version` (or `<rocm-path>/core/.info/version`). The script
-rewrites `pyproject.toml` (name `nixl-rocm<X>.<Y>`, `torch` removed from the
+`--platform manylinux_2_28_x86_64` in the manylinux image. The ROCm version is
+read from `<rocm-path>/.info/version` (or `<rocm-path>/core/.info/version`).
+The script rewrites `pyproject.toml` (name `nixl-rocm<X>.<Y>`, `torch` removed from the
 dependencies), keeps the ROCm runtime out of the repaired wheel and fails if a
 ROCm library was vendored or the wheel contains the `nixl` dispatcher or
 `nixl_ep`.

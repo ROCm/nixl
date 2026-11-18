@@ -18,13 +18,6 @@
 #
 # Built on top of a public ROCm image (e.g. rocm/dev-ubuntu-24.04:7.14.0-full).
 #
-# ROCm 10.1 needs a matching torch, which lives on a different wheel index:
-#   DOCKER_BUILDKIT=1 docker build -f .ci/dockerfiles/Dockerfile.rocm \
-#       --build-arg ROCM_BASE_IMAGE=rocm/dev-ubuntu-24.04:10.1.0-full \
-#       --build-arg TORCH_VERSION=2.14.0 \
-#       --build-arg TORCH_INDEX_URL=https://stable.repo.amd.com/rocm/whl-next/ \
-#       -t nixl-rocm:10.1 .
-#
 # ============================================================================
 # Dependency version refs (kept identical to build-rocm.sh; see mutability notes)
 # ----------------------------------------------------------------------------
@@ -167,11 +160,11 @@ RUN apt-get -qq update && \
     apt-mark hold liburing2 liburing-dev && \
     rm -rf /var/lib/apt/lists/*
 
-# Optional: builds behind a TLS-intercepting proxy pass its root CA as the
-# "proxy_ca" build secret (docker build --secret id=proxy_ca,src=<file>). It goes
-# into the system store, which the ENV block above already points pip, git, curl,
-# cargo and node at. Without the secret this step changes nothing.
-# Must run after ca-certificates is installed and before any HTTPS fetch below.
+# Trusts the root CA of a TLS-intercepting proxy, passed as the "proxy_ca" build
+# secret; a no-op without it. Must follow the ca-certificates install and precede
+# the HTTPS fetches below. Secrets are not part of the layer cache key; the
+# checksum argument is.
+ARG PROXY_CA_SHA256=""
 RUN --mount=type=secret,id=proxy_ca,required=false \
     if [ -s /run/secrets/proxy_ca ]; then \
         install -m 0644 /run/secrets/proxy_ca /usr/local/share/ca-certificates/proxy-root-ca.crt && \
@@ -211,7 +204,7 @@ RUN pip3 --no-cache-dir install --break-system-packages \
 # The wheel's local-version tag (+rocmX.Y.Z) is version-embedded, so we derive X.Y.Z from
 # the base image's ROCm install (/opt/rocm/core/.info/version, "X.Y.Z" with an optional
 # "-<build>" suffix). TORCH_VERSION/TORCH_INDEX_URL must name a torch that exists for
-# that ROCm version (see the ROCm 10.1 example at the top of this file).
+# that ROCm version (docs/rocm-ci.md has the ROCm 10.1 values).
 ARG TORCH_VERSION=2.11.0
 ARG TORCH_INDEX_URL=https://repo.amd.com/rocm/whl-multi-arch/
 RUN set -eux; \
@@ -366,8 +359,7 @@ RUN set -eux; \
 # ============================================================================
 # libfabric-build  (independent, parallel with the abseil chain)
 # Release tarball, not a clone. Installs to ${NIXL_INSTALL_DIR}.
-# ROCr (FI_HMEM_ROCR) support uses the same ROCm prefix as ucx-build. ROCM_PATH comes
-# from the ROCm base image ENV. libhsa-runtime64.so is dlopen'ed at runtime, not linked.
+# ROCr (FI_HMEM_ROCR): libhsa-runtime64.so is dlopen'ed at runtime, not linked.
 # ============================================================================
 FROM ${BUILDER_BASE_IMAGE} AS libfabric-build
 ARG NIXL_INSTALL_DIR=/opt/nixl
@@ -631,9 +623,8 @@ RUN chown -R "${_UID}":"${_GID}" ${NIXL_INSTALL_DIR} && ldconfig
 ENV INSTALL_DIR=${NIXL_INSTALL_DIR}
 ENV LIBFABRIC_INSTALL_DIR=${NIXL_INSTALL_DIR}
 ENV UCX_INSTALL_DIR=${NIXL_INSTALL_DIR}
-# ${ROCM_PATH}/core/lib (ROCM_PATH is inherited from the ROCm base image): libfabric
-# dlopen()s libhsa-runtime64.so from it for FI_HMEM_ROCR.
-ENV LD_LIBRARY_PATH="${NIXL_INSTALL_DIR}/lib:${NIXL_INSTALL_DIR}/lib/${ARCH}-linux-gnu:${NIXL_INSTALL_DIR}/lib64:/usr/local/lib:/usr/local/lib/${ARCH}-linux-gnu:${ROCM_PATH}/core/lib"
+# libfabric dlopen()s libhsa-runtime64.so from the ROCm lib directory for FI_HMEM_ROCR.
+ENV LD_LIBRARY_PATH="${NIXL_INSTALL_DIR}/lib:${NIXL_INSTALL_DIR}/lib/${ARCH}-linux-gnu:${NIXL_INSTALL_DIR}/lib64:/usr/local/lib:/usr/local/lib/${ARCH}-linux-gnu:${ROCM_PATH:-/opt/rocm}/core/lib"
 ENV CPATH="${NIXL_INSTALL_DIR}/include:/usr/local/include"
 ENV PATH="${NIXL_INSTALL_DIR}/bin:${_HOME}/.local/bin:${_HOME}/.cargo/bin:/usr/local/bin:${PATH}"
 ENV PKG_CONFIG_PATH="${NIXL_INSTALL_DIR}/lib/pkgconfig:${NIXL_INSTALL_DIR}/lib64/pkgconfig:/usr/local/lib/pkgconfig"
