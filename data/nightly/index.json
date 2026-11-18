@@ -1,0 +1,28 @@
+{
+ "schema": 1,
+ "runs": [
+  {
+   "stamp": "20261118T203406Z",
+   "run_id": 44392248329,
+   "upstream_main_sha": "e4d435d072d503eaee1baf8450b8f4d33c5c6e9f",
+   "branches": [
+    {
+     "branch": "main-amd",
+     "slug": "main-amd",
+     "passed": true,
+     "supported": true,
+     "version": "1.6.0.dev20261118",
+     "sha": "7b1b7f5f1c9d4bfe9ab8d05b552deb80fde0ec64"
+    },
+    {
+     "branch": "main",
+     "slug": "main",
+     "passed": false,
+     "supported": false,
+     "version": "1.6.0",
+     "sha": "e4d435d072d503eaee1baf8450b8f4d33c5c6e9f"
+    }
+   ]
+  }
+ ]
+}
