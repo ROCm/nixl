@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Runs upstream's copyright check on a hosted runner. Upstream's own workflow
+# (copyright-checks.yml) runs it in a container image that forks cannot pull.
+name: AMD Copyright Checks
+
+on:
+  pull_request
+
+permissions:
+  contents: read
+
+jobs:
+  amd-copyright-checks:
+    if: github.repository != 'ai-dynamo/nixl'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - run: .github/workflows/copyright-check.sh
