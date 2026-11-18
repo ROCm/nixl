@@ -5,6 +5,8 @@ name: ROCm Wheels - rocjitsu Smoke Test
 
 # Runs .ci/scripts/rocm_wheel_smoke_test.py with its GPU and AIS checks in a
 # QEMU guest that has an emulated AMD GPU (rocjitsu) and a spare NVMe drive.
+# The script and the fleet overlay are those of the commit this workflow runs
+# at, whatever source the wheels in the artifact were built from.
 #
 # External dependencies besides the actions pinned below and uv from PyPI:
 #   - github.com/sbates130272/qemu-minimal at QEMU_MINIMAL_REF: qemu-tool, the
@@ -29,6 +31,11 @@ on:
         required: false
         type: string
         default: '3.12'
+      artifact-suffix:
+        description: Appended to the names of the artifacts this workflow uploads, for a run that tests several builds.
+        required: false
+        type: string
+        default: ''
   workflow_dispatch:
     inputs:
       rocm-version:
@@ -465,8 +472,24 @@ jobs:
         cd "$HOME/nixl-smoke"
         . venv/bin/activate
         python3 rocm_wheel_smoke_test.py --expect-rocm "$1" --gpu \
-          --ais-dir "$2" --allow-ais-compat 2>&1 | tee smoke-test.log
+          --ais-dir "$2" --allow-ais-compat --json-out smoke.json 2>&1 | tee smoke-test.log
         GUEST
+
+    - name: Collect the test results
+      if: always()
+      run: |
+        mkdir -p "$GITHUB_WORKSPACE/rocjitsu-results"
+        if [ -n "${SSH_CONFIG:-}" ]; then
+          scp -F "$SSH_CONFIG" guest:nixl-smoke/smoke.json "$GITHUB_WORKSPACE/rocjitsu-results/" || true
+        fi
+
+    - name: Upload the test results
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: rocm-check-results-rocjitsu-${{ inputs.rocm-version }}${{ inputs.artifact-suffix }}
+        path: rocjitsu-results/*.json
+        if-no-files-found: ignore
 
     - name: Collect diagnostics
       if: always()
@@ -508,7 +531,7 @@ jobs:
       if: always()
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
-        name: rocjitsu-smoke-${{ inputs.rocm-version }}-py${{ inputs.python-version }}
+        name: rocjitsu-smoke-${{ inputs.rocm-version }}-py${{ inputs.python-version }}${{ inputs.artifact-suffix }}
         path: rocjitsu-diagnostics/
         if-no-files-found: warn
 

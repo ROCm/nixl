@@ -8,14 +8,16 @@ writes a known pattern into it and reads it back. The initiator fetches the
 target's metadata from its listener, so neither etcd nor a shared file is
 needed. Needs only the standard library, numpy, the installed wheel and
 rocm_wheel_smoke_test.py beside this file. Prints one PASS/FAIL/SKIP line per
-check and exits 0 only if every requested check passed.
+check and exits 0 only if every requested check passed. --json-out FILE also
+records the checks as JSON, rewritten after each one so a run that is cut
+short still leaves a valid file.
 
     rocm_wheel_two_node_test.py --role target --listen-port PORT
         [--bind-ip IP] --expect-rocm X.Y [--mem dram|vram] [--size BYTES]
-        [--timeout SECONDS] [--require-transport NAME]
+        [--timeout SECONDS] [--require-transport NAME] [--json-out FILE]
     rocm_wheel_two_node_test.py --role initiator --peer-ip IP --peer-port PORT
         --expect-rocm X.Y [--mem dram|vram] [--size BYTES] [--timeout SECONDS]
-        [--require-transport NAME]
+        [--require-transport NAME] [--json-out FILE]
 
 The transport reported is the one UCX selected for ucp_put and ucp_get on the
 endpoint between the two agents (UCX_PROTO_INFO). It is UCX's protocol
@@ -55,6 +57,7 @@ try:
         check_import,
         expected_backend,
         load_api,
+        moved,
         pattern,
         require_equal,
         site_dir,
@@ -146,6 +149,11 @@ def parse_args() -> argparse.Namespace:
         "UCX_TLS is set, and on the initiator fail unless UCX selected it for "
         f"the transfer ({', '.join(sorted(REQUIRED_FAMILIES))}; rdma is any "
         "verbs transport). Give it to both roles",
+    )
+    parser.add_argument(
+        "--json-out",
+        metavar="FILE",
+        help="also record the checks in FILE as JSON, rewritten after each check",
     )
     args = parser.parse_args()
     if not re.fullmatch(r"\d+\.\d+", args.expect_rocm):
@@ -428,6 +436,17 @@ def family(lane: str) -> str:
         if transport == name or transport.startswith(name + "_"):
             return name
     return transport
+
+
+def transfer_path(path: str, call: str) -> Optional[str]:
+    """Transport families UCX selected for call towards the peer, or None."""
+    families = {
+        family(lane)
+        for (kind, operation), found in selected_lanes(path).items()
+        if kind != "self" and call in operation
+        for lane in found
+    }
+    return "+".join(sorted(families)) or None
 
 
 def check_transport(
@@ -717,7 +736,11 @@ class Initiator(Node):
         run_transfer(
             self.agent, "WRITE", local, self.remote, WROTE_TAG, self.args.timeout
         )
-        return f"{self.args.size} bytes {self.args.mem} -> the target's {self.args.mem}"
+        return moved(
+            f"{self.args.size} bytes {self.args.mem} -> the target's {self.args.mem}",
+            self.args.size,
+            transfer_path(self.ucx_log, "ucp_put"),
+        )
 
     def read_back(self) -> str:
         assert self.memory is not None
@@ -725,7 +748,11 @@ class Initiator(Node):
         run_transfer(self.agent, "READ", local, self.remote, b"", self.args.timeout)
         received = self.memory.read(self.addresses[1])
         require_equal("the data read back", received, pattern(self.args.size))
-        return f"{self.args.size} bytes read back from the target match the pattern"
+        return moved(
+            f"{self.args.size} bytes read back from the target match the pattern",
+            self.args.size,
+            transfer_path(self.ucx_log, "ucp_get"),
+        )
 
     def finish(self) -> str:
         self.agent.send_notif(TARGET, DONE_TAG)
@@ -848,7 +875,7 @@ def main() -> int:
     signal.signal(signal.SIGALRM, stop_on(f"not finished in {limit:g}s", 1))
     signal.setitimer(signal.ITIMER_REAL, limit)
     faulthandler.dump_traceback_later(limit + 60, exit=True)
-    report = Reporter()
+    report = Reporter("rocm_wheel_two_node_test.py", args.expect_rocm, args.json_out)
     code = 0
     with ucx_log_file() as ucx_log:
         try:
@@ -861,6 +888,7 @@ def main() -> int:
         finally:
             for line in read_ucx_log(ucx_log):
                 print(f"ucx| {line}", flush=True)
+            report.save()
     return code or (1 if report.failed else 0)
 
 

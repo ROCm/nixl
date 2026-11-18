@@ -6,10 +6,12 @@
 The wheel carries one nixl_rocm<X>_<Y> backend per supported ROCm version;
 every check looks at the backend for --expect-rocm. Needs only the standard
 library, numpy and the installed wheel. Prints one PASS/FAIL/SKIP line per
-check and exits 0 only if every requested check passed.
+check and exits 0 only if every requested check passed. --json-out FILE also
+records the checks as JSON, rewritten after each one so a run that is cut
+short still leaves a valid file.
 
     rocm_wheel_smoke_test.py --expect-rocm X.Y [--gpu] [--ais-dir DIR]
-                             [--allow-ais-compat]
+                             [--allow-ais-compat] [--json-out FILE]
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ import glob
 import importlib
 import importlib.metadata
 import importlib.util
+import json
 import multiprocessing
 import os
 import pathlib
@@ -53,16 +56,98 @@ class CheckFailed(Exception):
     pass
 
 
+class Detail(str):
+    """A check's detail, with the bytes it moved and the path they took."""
+
+    moved: Optional[int] = None
+    path: Optional[str] = None
+
+
+def moved(detail: str, size: int, path: Optional[str]) -> Detail:
+    result = Detail(detail)
+    result.moved = size
+    result.path = path
+    return result
+
+
 class Reporter:
-    def __init__(self) -> None:
+    """Prints each check and, with json_out, keeps a JSON record of them.
+
+    A check's duration_s runs from the end of the check before it, so the
+    durations add up to the run and a check cut short still has one.
+    """
+
+    def __init__(
+        self, script: str = "", expect_rocm: str = "", json_out: Optional[str] = None
+    ) -> None:
         self.failed = False
+        self.json_out = json_out
+        self.begun = self.mark = time.monotonic()
+        self.pending: Optional[dict[str, Any]] = None
+        self.record: dict[str, Any] = {
+            "script": script,
+            "expect_rocm": expect_rocm,
+            "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "duration_s": 0.0,
+            "checks": [],
+        }
+        if json_out:
+            try:
+                self.write()
+            except OSError as exc:
+                sys.exit(f"cannot write --json-out {json_out}: {exc}")
+
+    def write(self) -> None:
+        """Replace the JSON file, so a reader never sees half of one."""
+        if not self.json_out:
+            return
+        self.record["duration_s"] = round(time.monotonic() - self.begun, 6)
+        scratch = f"{self.json_out}.tmp"
+        with open(scratch, "w", encoding="utf-8") as stream:
+            json.dump(self.record, stream, indent=1)
+            stream.write("\n")
+        os.replace(scratch, self.json_out)
+
+    def save(self) -> None:
+        try:
+            self.write()
+        except OSError as exc:
+            sys.stderr.write(f"cannot write --json-out {self.json_out}: {exc}\n")
 
     def line(self, status: str, name: str, detail: str) -> None:
         if status == "FAIL":
             self.failed = True
         print(f"{status} {name}: {detail}", flush=True)
+        now = time.monotonic()
+        if self.pending is not None and self.pending["name"] == name:
+            self.record["checks"].remove(self.pending)
+            self.pending = None
+        self.record["checks"].append(
+            {
+                "name": name,
+                "status": status,
+                "detail": str(detail),
+                "duration_s": round(now - self.mark, 6),
+                "bytes": getattr(detail, "moved", None),
+                "path": getattr(detail, "path", None),
+            }
+        )
+        self.mark = now
+        self.save()
 
     def run(self, name: str, check: Callable[[], str]) -> bool:
+        # Recorded as failed until it reports, so a check that crashes or is
+        # killed does not leave a record that looks like a clean partial run.
+        self.pending = {
+            "name": name,
+            "status": "FAIL",
+            "detail": "started but did not finish",
+            "duration_s": 0.0,
+            "bytes": None,
+            "path": None,
+        }
+        self.record["checks"].append(self.pending)
+        self.save()
         try:
             detail = check()
         except Exception as exc:
@@ -94,6 +179,11 @@ def parse_args() -> argparse.Namespace:
         "--allow-ais-compat",
         action="store_true",
         help="accept an AIS transfer that cannot use the hipFile fast path",
+    )
+    parser.add_argument(
+        "--json-out",
+        metavar="FILE",
+        help="also record the checks in FILE as JSON, rewritten after each check",
     )
     args = parser.parse_args()
     if not re.fullmatch(r"\d+\.\d+", args.expect_rocm):
@@ -303,7 +393,11 @@ def check_posix_transfer() -> str:
         on_disk = np.fromfile(path, dtype=np.uint8)
     require_equal("file content", on_disk, src)
     require_equal("buffer read back from the file", dst, src)
-    return f"{BUFFER_SIZE} bytes DRAM -> file -> DRAM through POSIX"
+    return moved(
+        f"{BUFFER_SIZE} bytes DRAM -> file -> DRAM through POSIX",
+        2 * BUFFER_SIZE,
+        "posix",
+    )
 
 
 def load_hip_library() -> ctypes.CDLL:
@@ -410,7 +504,11 @@ def check_ucx_vram_transfer() -> str:
         hip.free(src)
         hip.free(dst)
     require_equal("GPU buffer on the target agent", received, data)
-    return f"{BUFFER_SIZE} bytes VRAM -> VRAM between two agents through UCX"
+    return moved(
+        f"{BUFFER_SIZE} bytes VRAM -> VRAM between two agents through UCX",
+        BUFFER_SIZE,
+        "ucx",
+    )
 
 
 def ais_round_trip(directory: str, direct: bool) -> None:
@@ -486,9 +584,11 @@ def check_ais_transfer(directory: str, allow_compat: bool) -> str:
     what = f"{BUFFER_SIZE} bytes VRAM -> file -> VRAM through AIS in {directory}"
     fast_error = ais_attempt(directory, AIS_FAST_ENV, direct=True)
     if fast_error is None:
-        return (
+        return moved(
             f"{what}; hipFile fast path (O_DIRECT file, "
-            "HIPFILE_ALLOW_COMPAT_MODE=false so no POSIX fallback was possible)"
+            "HIPFILE_ALLOW_COMPAT_MODE=false so no POSIX fallback was possible)",
+            2 * BUFFER_SIZE,
+            "ais-fast-path",
         )
     if not allow_compat:
         raise CheckFailed(
@@ -501,18 +601,20 @@ def check_ais_transfer(directory: str, allow_compat: bool) -> str:
             f"hipFile fast path failed ({fast_error}) and the compat attempt "
             f"failed too ({compat_error})"
         )
-    return (
+    return moved(
         f"{what}; NOT the hipFile fast path, which failed ({fast_error}); passed "
         "with HIPFILE_ALLOW_COMPAT_MODE=true and "
         "HIPFILE_UNSUPPORTED_FILE_SYSTEMS=true on a buffered file, where hipFile "
-        "is free to use its POSIX fallback"
+        "is free to use its POSIX fallback",
+        2 * BUFFER_SIZE,
+        "ais-compat",
     )
 
 
 def main() -> int:
     args = parse_args()
     backend = expected_backend(args.expect_rocm)
-    report = Reporter()
+    report = Reporter("rocm_wheel_smoke_test.py", args.expect_rocm, args.json_out)
 
     def after_import(name: str, check: Callable[[], str]) -> None:
         if imported:
@@ -536,6 +638,7 @@ def main() -> int:
         )
     else:
         report.line("SKIP", "ais-transfer", "--ais-dir not given")
+    report.save()
     return 1 if report.failed else 0
 
 

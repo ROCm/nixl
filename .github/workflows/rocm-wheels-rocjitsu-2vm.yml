@@ -17,6 +17,8 @@ name: ROCm Wheels - rocjitsu Two-Guest Test
 # Stages 1 and 2 run on the guest image as published. UCX cannot open an RDMA
 # device whose name has a "-" or "_" in it, which the image's has, so the
 # device is renamed between stages 2 and 3.
+# The scripts and the fleet overlay are those of the commit this workflow runs
+# at, whatever source the wheels in the artifact were built from.
 #
 # With allow-failure, a failure is reported as a warning and in the job
 # summary and the job still succeeds: a job that calls a reusable workflow
@@ -52,6 +54,11 @@ on:
         required: false
         type: boolean
         default: true
+      artifact-suffix:
+        description: Appended to the names of the artifacts this workflow uploads, for a run that tests several builds.
+        required: false
+        type: string
+        default: ''
   workflow_dispatch:
     inputs:
       rocm-version:
@@ -633,7 +640,8 @@ jobs:
         required=$3
         transport=${4:-}
         DIAGNOSTICS="$GITHUB_WORKSPACE/rocjitsu-2vm-diagnostics"
-        mkdir -p "$DIAGNOSTICS"
+        RESULTS="$GITHUB_WORKSPACE/rocjitsu-2vm-results"
+        mkdir -p "$DIAGNOSTICS" "$RESULTS"
         tlog="$DIAGNOSTICS/stage-${stage}-target.log"
         ilog="$DIAGNOSTICS/stage-${stage}-initiator.log"
         port=$((NIXL_PORT + stage))
@@ -672,16 +680,16 @@ jobs:
         # process killed in the middle of RDMA leaves the guest's RDMA device
         # unusable. timeout is the last resort behind the test's own limits.
         ssh -F "$SSH_CONFIG" guest1 bash -s -- \
-          "$ROCM_XY" "$port" "$TARGET_IP" "$mem" "$STAGE_TIMEOUT" "$XFER_SIZE" "$transport" > "$tlog" 2>&1 <<'GUEST' &
+          "$ROCM_XY" "$port" "$TARGET_IP" "$mem" "$STAGE_TIMEOUT" "$XFER_SIZE" "stage${stage}-target.json" "$transport" > "$tlog" 2>&1 <<'GUEST' &
         set -euo pipefail
         cd "$HOME/nixl-2vm"
         . venv/bin/activate
-        # ssh drops an empty last argument, so $7 may be unset.
+        # ssh drops an empty last argument, so $8 may be unset.
         extra=()
-        if [ -n "${7:-}" ]; then extra=(--require-transport "$7"); fi
+        if [ -n "${8:-}" ]; then extra=(--require-transport "$8"); fi
         exec timeout -k 10 "$((3 * $5 + 120))" python3 rocm_wheel_two_node_test.py \
           --role target --listen-port "$2" --bind-ip "$3" --expect-rocm "$1" \
-          --mem "$4" --timeout "$5" --size "$6" "${extra[@]}"
+          --mem "$4" --timeout "$5" --size "$6" --json-out "$7" "${extra[@]}"
         GUEST
         target=$!
 
@@ -697,15 +705,15 @@ jobs:
         if [ "$ready" = true ]; then
           echo "::group::${title}: initiator in guest 2"
           ssh -F "$SSH_CONFIG" guest2 bash -s -- \
-            "$ROCM_XY" "$port" "$TARGET_IP" "$mem" "$STAGE_TIMEOUT" "$XFER_SIZE" "$transport" 2>&1 <<'GUEST' | tee "$ilog"
+            "$ROCM_XY" "$port" "$TARGET_IP" "$mem" "$STAGE_TIMEOUT" "$XFER_SIZE" "stage${stage}-initiator.json" "$transport" 2>&1 <<'GUEST' | tee "$ilog"
         set -euo pipefail
         cd "$HOME/nixl-2vm"
         . venv/bin/activate
         extra=()
-        if [ -n "${7:-}" ]; then extra=(--require-transport "$7"); fi
+        if [ -n "${8:-}" ]; then extra=(--require-transport "$8"); fi
         timeout -k 10 "$((3 * $5 + 120))" python3 rocm_wheel_two_node_test.py \
           --role initiator --peer-ip "$3" --peer-port "$2" --expect-rocm "$1" \
-          --mem "$4" --timeout "$5" --size "$6" "${extra[@]}"
+          --mem "$4" --timeout "$5" --size "$6" --json-out "$7" "${extra[@]}"
         GUEST
           irc=${PIPESTATUS[0]}
           echo "::endgroup::"
@@ -717,6 +725,8 @@ jobs:
         echo "::group::${title}: target in guest 1"
         cat "$tlog"
         echo "::endgroup::"
+        scp -F "$SSH_CONFIG" "guest1:nixl-2vm/stage${stage}-target.json" "$RESULTS/" 2>/dev/null || true
+        scp -F "$SSH_CONFIG" "guest2:nixl-2vm/stage${stage}-initiator.json" "$RESULTS/" 2>/dev/null || true
 
         moved1=$(delta "$before1" "$(rdma_bytes 1)")
         moved2=$(delta "$before2" "$(rdma_bytes 2)")
@@ -885,9 +895,18 @@ jobs:
       if: always()
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
-        name: rocjitsu-2vm-${{ inputs.rocm-version }}-py${{ inputs.python-version }}
+        name: rocjitsu-2vm-${{ inputs.rocm-version }}-py${{ inputs.python-version }}${{ inputs.artifact-suffix }}
         path: rocjitsu-2vm-diagnostics/
         if-no-files-found: warn
+
+    - name: Upload the test results
+      id: upload-results
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: rocm-check-results-rocjitsu-2vm-${{ inputs.rocm-version }}${{ inputs.artifact-suffix }}
+        path: rocjitsu-2vm-results/*.json
+        if-no-files-found: ignore
 
     - name: Take the stack down
       id: down
