@@ -16,7 +16,8 @@ over qemu/stacks/rocm-golden.xml of the qemu-minimal commit that workflow pins.
   <ernic-ref>docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-ernic:20261112.gdca6903-ernic.90434a2-vfu.05bb5e5@sha256:4759a71b191b9082190c4ac7a185bba3603d8d3b395fca054cedde1574c7bc4c</ernic-ref>
   <rocjitsu-ref>docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20261112.gdca6903-rocjitsu.50be05a@sha256:1e005700d1a3d030581969489fe42adbffedb461b7f2a4e44cc2b973c3bad3d6</rocjitsu-ref>
   <backing-ref>docker.io/sbates130272/qemu-tool-rocm-golden:20261117.g80c17f8@sha256:14f0b5d30e199277a27d34b12e296b7feb0a23dc9b7ff946043b6be0cd1fe3cb</backing-ref>
-  <sdxi-image>docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-sdxi:20261113.g379fbf6-sdxi.dfd76f2@sha256:887b3571d32e037d13ab103b77332600abc108cd0b64b7550f0135da8148796b</sdxi-image>
+  <!-- The smoke test uses no SDXI device, so its server image is not pulled. -->
+  <sdxi-per-vm>0</sdxi-per-vm>
   <!-- One guest reached over the qemu container's forwarded SSH port needs no
        inter-guest L2 path. -->
   <ernic-tap>false</ernic-tap>
