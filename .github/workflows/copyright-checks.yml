@@ -5,6 +5,8 @@ on:
 
 jobs:
   copyright-checks:
+      # The container image is private to ai-dynamo; forks cannot pull it.
+      if: github.repository == 'ai-dynamo/nixl'
       runs-on: ubuntu-24.04
       timeout-minutes: 10
       container:
