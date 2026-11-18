@@ -65,11 +65,11 @@ empty):
 `build-rocm.sh` does not pass `-Dwheel_variant`. With `-Drocm_path` set and no
 CUDA present, meson derives the variant from the ROCm install as
 `rocm<major>_<minor>`, so the Python bindings are installed as
-`nixl_rocm7_14` on a ROCm 7.14 image and `nixl_rocm10_1` on a ROCm 10.1 image
-(previously `nixl_rocm`). To force a name, pass `-Dwheel_variant=<variant>` in
-the script's third argument (`EXTRA_BUILD_ARGS`).
+`nixl_rocm7_14` on a ROCm 7.14 image and `nixl_rocm10_1` on a ROCm 10.1 image.
+To force a name, pass `-Dwheel_variant=<variant>` in the script's third
+argument (`EXTRA_BUILD_ARGS`).
 
-The build also produces upstream's pure-Python `nixl` meta wheel (the `nixl`
+The build also produces the pure-Python `nixl` meta wheel (the `nixl`
 dispatcher), exactly as a CUDA build does, and the script copies it to
 `dist/nixl-<version>-py3-none-any.whl`. It depends on the backend of the ROCm
 version it was built against (`nixl-rocm7.14` or `nixl-rocm10.1`) and is for
@@ -88,16 +88,19 @@ Both `Dockerfile.rocm` and `contrib/Dockerfile.manylinux` accept the proxy's
 root CA certificate as an optional BuildKit secret named `proxy_ca`. When it is
 given, the certificate is added to the image's system trust store before the
 first HTTPS fetch that follows the base package install; without it the step
-does nothing.
+does nothing. A secret is not part of the layer cache key, so also pass the
+certificate's checksum as the `PROXY_CA_SHA256` build argument; otherwise a
+layer cached from a build without the certificate is reused.
 
 ```bash
 DOCKER_BUILDKIT=1 docker build -f .ci/dockerfiles/Dockerfile.rocm \
     --secret id=proxy_ca,src=/path/to/proxy-root-ca.pem \
+    --build-arg PROXY_CA_SHA256="$(sha256sum < /path/to/proxy-root-ca.pem | cut -d' ' -f1)" \
     -t nixl-rocm .
 ```
 
 For the wheel build, `contrib/build-container.sh --proxy-ca-cert FILE` forwards
-the same secret.
+the same secret and build argument.
 
 ## AIS on AMD GPU (docker + nixlbench)
 

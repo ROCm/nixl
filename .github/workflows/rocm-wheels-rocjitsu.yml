@@ -3,16 +3,15 @@
 
 name: ROCm Wheels - rocjitsu Smoke Test
 
-# Installs the merged rocm-nixl wheel in a QEMU guest that sees an emulated AMD
-# GPU (rocjitsu, served over vfio-user) and one spare emulated NVMe drive, then
-# runs .ci/scripts/rocm_wheel_smoke_test.py with the GPU and AIS checks.
-# GitHub-hosted runners have no GPU, so this is what exercises the
-# install-and-run flow there.
+# Runs .ci/scripts/rocm_wheel_smoke_test.py with its GPU and AIS checks in a
+# QEMU guest that has an emulated AMD GPU (rocjitsu) and a spare NVMe drive.
 #
-# The stack is the one sbates130272/qemu-minimal's own lanes boot on hosted
-# runners: its rocm-golden fleet at the commit pinned below, cut down to one
-# guest by .ci/rocjitsu/fleet-overlay.xml. That fleet file names the guest
-# image and the device server images, so one pin moves them together.
+# External dependencies besides the actions pinned below and uv from PyPI:
+#   - github.com/sbates130272/qemu-minimal at QEMU_MINIMAL_REF: qemu-tool, the
+#     rocm-golden fleet file and the nonroot-user action.
+#   - The Docker Hub images under docker.io/sbates130272 that
+#     .ci/rocjitsu/fleet-overlay.xml pins by digest (QEMU, the device servers
+#     and the guest disk); the QEMU image is also the job container.
 
 on:
   workflow_call:
@@ -59,13 +58,10 @@ permissions:
   actions: read
 
 env:
-  # The ROCm line inside the guest image. 'import nixl' selects the backend
-  # for the installed ROCm, so no other backend of the wheel can run there.
+  # The ROCm release in the guest image; only its backend can be selected.
   GUEST_ROCM: '10.1'
-  # The sbates130272/qemu-minimal commit whose qemu-tool and
-  # qemu/stacks/rocm-golden.xml are used. The nonroot-user action below is
-  # pinned to the same commit and has to be moved with it, as does the job
-  # container image, which is that fleet file's <qemu-ref>.
+  # Move together with the nonroot-user action pin, the job container image
+  # and the digests in .ci/rocjitsu/fleet-overlay.xml.
   QEMU_MINIMAL_REF: 481c892854b25935abb80892c5d16ae6bfea579e
   # Under /var/lib/qemu-tool because the compose bind mounts are resolved by
   # the host daemon. The compose project is the stack directory's basename.
@@ -119,14 +115,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     container:
-      # The <qemu-ref> of qemu/stacks/rocm-golden.xml at QEMU_MINIMAL_REF. It
-      # carries docker, oras, ansible and qemu-img, which quick-start needs.
-      # Pinned by digest; the other images that file names are fixed only by
-      # tag, through the pinned QEMU_MINIMAL_REF.
+      # <qemu-ref> of .ci/rocjitsu/fleet-overlay.xml.
       image: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user:20261112.gdca6903-qemu11.1.3-vfu.05bb5e5@sha256:7e07fe0e696e8cf2fb6bf3151944b0ef5a37c7fef2f3a2e6e12cae12e34cb07d
       # QEMU runs in a sibling container started through the host's docker
-      # socket, so the images directory has to be the same path on both sides
-      # and quick-start has to see host pids.
+      # socket: the images directory must be the same path on both sides and
+      # quick-start must see host pids.
       options: >-
         --device /dev/kvm
         --pid=host
@@ -162,9 +155,7 @@ jobs:
         fi
         df -h / /var/lib/qemu-tool
 
-    # The stack's containers run as the caller's uid. This creates a non-root
-    # user with access to /dev/kvm and the docker socket and exports
-    # CIUSER_UID and CIUSER_HOME.
+    # Exports CIUSER_UID and CIUSER_HOME.
     - name: Run the stack as a non-root user
       uses: sbates130272/qemu-minimal/.github/actions/nonroot-user@481c892854b25935abb80892c5d16ae6bfea579e # qemu-minimal @ 2026-11-17
 
@@ -219,9 +210,8 @@ jobs:
         echo "MERGED_WHEEL=${wheel[0]}" >> "$GITHUB_ENV"
         test -f .ci/scripts/rocm_wheel_smoke_test.py
 
-    # Pulls the guest image and its keypair, renders the stack and starts it.
     # Run from the qemu-minimal checkout so the qemu container installs the
-    # pinned qemu-tool from it and not whatever PyPI has.
+    # pinned qemu-tool from it.
     - name: Boot one guest with an emulated GPU and a spare NVMe
       working-directory: qemu-minimal
       run: |
@@ -237,9 +227,8 @@ jobs:
             --no-metrics \
             --yes
 
-    # The guest's SSH port is published on the host, which a job container
-    # cannot reach. Join the stack's network and use the qemu container's
-    # address, where the guest answers on 2222.
+    # A job container cannot reach the SSH port published on the host; on the
+    # stack's network the guest answers on the qemu container's port 2222.
     - name: Join the stack network
       run: docker network connect "${STACK_NAME}_fleet" "$(cat /etc/hostname)"
 
@@ -312,10 +301,8 @@ jobs:
         esac
         GUEST
 
-    # The published guest carries every gfx1250 firmware file but the ones
-    # that must match the rocjitsu build serving it, and keeps amdgpu
-    # blacklisted until they are staged. This is the by-hand form of
-    # qemu-minimal's rocjitsu_setup firmware tasks.
+    # The guest keeps amdgpu blacklisted until the firmware files that must
+    # match the rocjitsu build serving it are staged.
     - name: Stage the GPU firmware and load amdgpu
       run: |
         set -euo pipefail
@@ -469,8 +456,8 @@ jobs:
         echo "torch is not installed"
         GUEST
 
-    # --allow-ais-compat: hipFile's fast path has not been shown to work
-    # against the emulated GPU and NVMe. The test reports which path ran.
+    # --allow-ais-compat: hipFile's fast path is unproven on the emulated GPU
+    # and NVMe. The test reports which path ran.
     - name: Run the smoke test
       run: |
         ssh -F "$SSH_CONFIG" guest bash -s -- "$ROCM_XY" "$NVME_MOUNT" <<'GUEST'

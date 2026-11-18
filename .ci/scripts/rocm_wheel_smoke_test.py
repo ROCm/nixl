@@ -53,10 +53,6 @@ class CheckFailed(Exception):
     pass
 
 
-class CheckSkipped(Exception):
-    pass
-
-
 class Reporter:
     def __init__(self) -> None:
         self.failed = False
@@ -69,9 +65,6 @@ class Reporter:
     def run(self, name: str, check: Callable[[], str]) -> bool:
         try:
             detail = check()
-        except CheckSkipped as exc:
-            self.line("SKIP", name, str(exc))
-            return False
         except Exception as exc:
             self.line("FAIL", name, f"{type(exc).__name__}: {exc}")
             return False

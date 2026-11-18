@@ -427,8 +427,7 @@ else
     # This image is CUDA-free. Restrict building to plugins that do not require cuFile.
     # POSIX alone is enough to produce libnixl and nixlbench.
     NIXL_ENABLE_PLUGINS="${NIXL_ENABLE_PLUGINS:-POSIX}"
-    # wheel_variant is left unset: meson derives rocm<X>_<Y> from the ROCm install
-    # (import package nixl_rocm<X>_<Y>). Override with -Dwheel_variant=... in EXTRA_BUILD_ARGS.
+    # wheel_variant unset: meson derives rocm<X>_<Y> from the ROCm install.
     # shellcheck disable=SC2086
     meson setup \
         ${NIXL_BUILD_DIR} \
