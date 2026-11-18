@@ -1,0 +1,937 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: ROCm Wheels - rocjitsu Two-Guest Test
+
+# Runs .ci/scripts/rocm_wheel_two_node_test.py between two QEMU guests, each
+# with an emulated AMD GPU (rocjitsu) and an emulated RDMA NIC (rocm-ernic):
+# the target in guest 1, the initiator in guest 2, over the Ethernet segment
+# the two NICs share. Four stages, each reported in the job summary:
+#   1. host memory, UCX choosing the transport         (must pass)
+#   2. GPU memory, UCX choosing the transport          (must pass)
+#   3. host memory, an RDMA transport required         (reported only)
+#   4. GPU memory, an RDMA transport required          (reported only)
+# In stages 3 and 4 the test restricts UCX in both guests to the RDMA
+# transports (UCX_TLS), so a failure there means RDMA did not carry the
+# transfer, not that UCX preferred another transport.
+# Stages 1 and 2 run on the guest image as published. UCX cannot open an RDMA
+# device whose name has a "-" or "_" in it, which the image's has, so the
+# device is renamed between stages 2 and 3.
+#
+# With allow-failure, a failure is reported as a warning and in the job
+# summary and the job still succeeds: a job that calls a reusable workflow
+# cannot carry continue-on-error itself.
+#
+# External dependencies besides the actions pinned below and uv from PyPI:
+#   - github.com/sbates130272/qemu-minimal at QEMU_MINIMAL_REF: qemu-tool, the
+#     rocm-golden fleet file and the nonroot-user action.
+#   - The Docker Hub images under docker.io/sbates130272 that
+#     .ci/rocjitsu/fleet-overlay-2vm.xml pins by digest (QEMU, the device
+#     servers and the guest disk); the QEMU image is also the job container.
+#   - docker.io/library/alpine:3.20 and Alpine's package mirror: qemu-tool
+#     builds the image that bridges the guests' NICs when the stack starts.
+
+on:
+  workflow_call:
+    inputs:
+      rocm-version:
+        description: ROCm version of the backend to exercise, as X.Y.Z.
+        required: true
+        type: string
+      artifact-name:
+        description: Name of the artifact holding the merged rocm-nixl wheels.
+        required: true
+        type: string
+      python-version:
+        description: Python version to install the wheel for, as X.Y.
+        required: false
+        type: string
+        default: '3.12'
+      allow-failure:
+        description: Report a failure as a warning instead of failing the job.
+        required: false
+        type: boolean
+        default: true
+  workflow_dispatch:
+    inputs:
+      rocm-version:
+        description: ROCm version of the backend to exercise, as X.Y.Z.
+        required: true
+        type: string
+        default: '10.1.0'
+      artifact-name:
+        description: Name of the artifact holding the merged rocm-nixl wheels.
+        required: true
+        type: string
+        default: rocm-nixl-wheels
+      python-version:
+        description: Python version to install the wheel for, as X.Y.
+        required: false
+        type: string
+        default: '3.12'
+      run-id:
+        description: Workflow run to download the artifact from.
+        required: true
+        type: string
+      allow-failure:
+        description: Report a failure as a warning instead of failing the job.
+        required: false
+        type: boolean
+        default: true
+
+# actions: read is for the workflow_dispatch path only, which downloads the
+# artifact from another run.
+permissions:
+  contents: read
+  actions: read
+
+env:
+  # The ROCm release in the guest image; only its backend can be selected.
+  GUEST_ROCM: '10.1'
+  # Move together with the nonroot-user action pin, the job container image
+  # and the digests in .ci/rocjitsu/fleet-overlay-2vm.xml.
+  QEMU_MINIMAL_REF: 45941a379b6afb4306902c1206d8d981565b5a5c # v2.0.0
+  # Under /var/lib/qemu-tool because the compose bind mounts are resolved by
+  # the host daemon. The compose project is the stack directory's basename.
+  STACK_DIR: /var/lib/qemu-tool/stacks/nixl-rocjitsu-2vm
+  STACK_NAME: nixl-rocjitsu-2vm
+  KEY_DIR: /var/lib/qemu-tool/nixl-rocjitsu-2vm-key
+  UV_VERSION: 0.13.9
+  # qemu-tool's defaults, which rocm-golden.xml leaves alone: guest N's
+  # emulated NIC has a MAC with this prefix and the address ERNIC_SUBNET.(10+N).
+  ERNIC_MAC_PREFIX: '72:6f:63:6d'
+  ERNIC_SUBNET: 192.168.100
+  TARGET_IP: 192.168.100.11
+  # Stage N listens on NIXL_PORT + N.
+  NIXL_PORT: 18600
+  # Seconds each wait in the test may take. A single RDMA request of 16 MiB
+  # or more tears the emulated NICs' mesh down, so the size stays far below.
+  STAGE_TIMEOUT: 120
+  XFER_SIZE: 1048576
+
+jobs:
+
+  gate:
+    name: Check for a matching guest
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      supported: ${{ steps.decide.outputs.supported }}
+      rocm-xy: ${{ steps.decide.outputs.rocm-xy }}
+    steps:
+    - name: Compare the requested ROCm version with the guest's
+      id: decide
+      shell: bash
+      env:
+        ROCM_VERSION: ${{ inputs.rocm-version }}
+        PYTHON_VERSION: ${{ inputs.python-version }}
+      run: |
+        set -euo pipefail
+        if [[ ! "$ROCM_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "::error::rocm-version must be X.Y.Z, got '${ROCM_VERSION}'"
+          exit 1
+        fi
+        if [[ ! "$PYTHON_VERSION" =~ ^3\.[0-9]+$ ]]; then
+          echo "::error::python-version must be 3.Y, got '${PYTHON_VERSION}'"
+          exit 1
+        fi
+        xy=${ROCM_VERSION%.*}
+        echo "rocm-xy=${xy}" >> "$GITHUB_OUTPUT"
+        if [ "$xy" = "$GUEST_ROCM" ]; then
+          echo "supported=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        echo "supported=false" >> "$GITHUB_OUTPUT"
+        msg="rocjitsu two-guest test skipped for ROCm ${ROCM_VERSION}: the only published rocjitsu guest image carries ROCm ${GUEST_ROCM}, so the rocm-nixl wheel's ROCm ${xy} backend cannot be selected there."
+        echo "::notice title=rocjitsu two-guest test skipped::${msg}"
+        echo "${msg}" >> "$GITHUB_STEP_SUMMARY"
+
+  # Every step has an id, and runs only while no earlier step has failed: with
+  # allow-failure a failed step does not stop the job by itself.
+  two-node-test:
+    name: Two-guest test (ROCm ${{ inputs.rocm-version }}, Python ${{ inputs.python-version }})
+    needs: gate
+    if: needs.gate.outputs.supported == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # For what no step can report, such as the job timing out.
+    continue-on-error: ${{ inputs.allow-failure }}
+    container:
+      # <qemu-ref> of .ci/rocjitsu/fleet-overlay-2vm.xml.
+      image: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user:20261112.gdca6903-qemu11.1.3-vfu.05bb5e5@sha256:7e07fe0e696e8cf2fb6bf3151944b0ef5a37c7fef2f3a2e6e12cae12e34cb07d
+      # QEMU runs in sibling containers started through the host's docker
+      # socket: the images directory must be the same path on both sides and
+      # quick-start must see host pids.
+      options: >-
+        --device /dev/kvm
+        --pid=host
+        -v /var/run/docker.sock:/var/run/docker.sock
+        -v /var/lib/qemu-tool:/var/lib/qemu-tool
+    defaults:
+      run:
+        # A container job defaults to sh, which rejects "set -o pipefail".
+        shell: bash
+    env:
+      ROCM_XY: ${{ needs.gate.outputs.rocm-xy }}
+      PYTHON_VERSION: ${{ inputs.python-version }}
+    steps:
+    - name: Check out code
+      id: checkout
+      continue-on-error: ${{ inputs.allow-failure }}
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+        persist-credentials: false
+
+    - name: Check out qemu-minimal
+      id: checkout-qemu-minimal
+      if: ${{ !contains(steps.*.outcome, 'failure') }}
+      continue-on-error: ${{ inputs.allow-failure }}
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+        repository: sbates130272/qemu-minimal
+        ref: ${{ env.QEMU_MINIMAL_REF }}
+        path: qemu-minimal
+        persist-credentials: false
+
+    - name: Require KVM
+      id: kvm
+      if: ${{ !contains(steps.*.outcome, 'failure') }}
+      continue-on-error: ${{ inputs.allow-failure }}
+      run: |
+        set -euo pipefail
+        if [ ! -c /dev/kvm ] || [ ! -w /dev/kvm ]; then
+          echo "::error::/dev/kvm is not usable on this runner; the guests cannot boot without it"
+          exit 1
+        fi
+        df -h / /var/lib/qemu-tool
+
+    # Exports CIUSER_UID and CIUSER_HOME.
+    - name: Run the stack as a non-root user
+      id: nonroot
+      if: ${{ !contains(steps.*.outcome, 'failure') }}
+      continue-on-error: ${{ inputs.allow-failure }}
+      uses: sbates130272/qemu-minimal/.github/actions/nonroot-user@45941a379b6afb4306902c1206d8d981565b5a5c # qemu-minimal v2.0.0
+
+    - name: Install qemu-tool
+      id: qemu-tool
+      if: ${{ !contains(steps.*.outcome, 'failure') }}
+      continue-on-error: ${{ inputs.allow-failure }}
+      run: |
+        set -euo pipefail
+        # The image ships its own qemu-tool, which would otherwise win on PATH.
+        PIPX_BIN_DIR=/usr/local/bin pipx install --force ./qemu-minimal/qemu
+        resolved=$(readlink -f "$(command -v qemu-tool)")
+        echo "qemu-tool resolves to: ${resolved}"
+        case "$resolved" in
+          /opt/qemu-tool/*)
+            echo "::error::the image's qemu-tool is shadowing the pinned one"
+            exit 1
+            ;;
+        esac
+        qemu-tool quick-start --help >/dev/null
+
+    - name: Download the wheels from this run
+      id: wheels-this-run
+      if: ${{ !contains(steps.*.outcome, 'failure') && !inputs.run-id }}
+      continue-on-error: ${{ inputs.allow-failure }}
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: wheels
+
+    - name: Download the wheels from run ${{ inputs.run-id }}
+      id: wheels-other-run
+      if: ${{ !contains(steps.*.outcome, 'failure') && inputs.run-id }}
+      continue-on-error: ${{ inputs.allow-failure }}
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: wheels
+        run-id: ${{ inputs.run-id }}
+        github-token: ${{ github.token }}
+
+    - name: Check the artifact has the wheel this job installs
+      id: wheel
+      if: ${{ !contains(steps.*.outcome, 'failure') }}
+      continue-on-error: ${{ inputs.allow-failure }}
+      run: |
+        set -euo pipefail
+        shopt -s nullglob
+        ls -l wheels
+        tag="cp${PYTHON_VERSION/./}"
+        wheel=(wheels/rocm_nixl-*-"${tag}"-"${tag}"-*.whl)
+        if [ "${#wheel[@]}" -ne 1 ]; then
+          echo "::error::expected exactly one rocm_nixl wheel for ${tag} in the artifact, found ${#wheel[@]}"
+          exit 1
+        fi
+        backend="nixl_rocm${ROCM_XY/./_}"
+        if ! python3 -I -c 'import sys, zipfile; sys.exit(0 if sys.argv[2] + "/__init__.py" in zipfile.ZipFile(sys.argv[1]).namelist() else 1)' \
+            "${wheel[0]}" "$backend"; then
+          echo "::error::${wheel[0]} does not contain the ${backend} backend"
+          exit 1
+        fi
+        echo "MERGED_WHEEL=${wheel[0]}" >> "$GITHUB_ENV"
+        test -f .ci/scripts/rocm_wheel_two_node_test.py
+        test -f .ci/scripts/rocm_wheel_smoke_test.py
+
+    # Run from the qemu-minimal checkout so the qemu containers install the
+    # pinned qemu-tool from it.
+    - name: Boot two guests, each with an emulated GPU and RDMA NIC
+      id: boot
+      if: ${{ !contains(steps.*.outcome, 'failure') }}
+      continue-on-error: ${{ inputs.allow-failure }}
+      working-directory: qemu-minimal
+      run: |
+        set -euo pipefail
+        setpriv --reuid "$CIUSER_UID" --regid "$CIUSER_UID" --init-groups \
+          env HOME="$CIUSER_HOME" \
+          qemu-tool quick-start up \
+            --xml qemu/stacks/rocm-golden.xml \
+            --xml "$GITHUB_WORKSPACE/.ci/rocjitsu/fleet-overlay-2vm.xml" \
+            --stack-dir "$STACK_DIR" \
+            --key-dir "$KEY_DIR" \
+            --in-network \
+            --no-metrics \
+            --yes
+
+    # A job container cannot reach the SSH ports published on the host; on the
+    # stack's network each guest answers on its qemu container's port 2222.
+    - name: Join the stack network
+      id: network
+      if: ${{ !contains(steps.*.outcome, 'failure') }}
+      continue-on-error: ${{ inputs.allow-failure }}
+      run: docker network connect "${STACK_NAME}_fleet" "$(cat /etc/hostname)"
+
+    - name: Wait for both guests to answer SSH
+      id: ssh
+      if: ${{ !contains(steps.*.outcome, 'failure') }}
+      continue-on-error: ${{ inputs.allow-failure }}
+      run: |
+        set -euo pipefail
+        # The image says which account it was baked with.
+        user=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("username") or "ubuntu")' \
+          "${KEY_DIR}/vm-info.json" 2>/dev/null || echo ubuntu)
+        cfg="${RUNNER_TEMP}/guest-ssh-config"
+        : > "$cfg"
+        for n in 1 2; do
+          qemu=$(docker ps -q \
+            --filter "label=com.docker.compose.project=${STACK_NAME}" \
+            --filter "label=com.docker.compose.service=qemu-${n}")
+          if [ -z "$qemu" ]; then
+            echo "::error::the qemu-${n} container is not running"
+            exit 1
+          fi
+          host=$(docker inspect \
+            -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$qemu")
+          if [ -z "$host" ]; then
+            echo "::error::guest ${n}'s container has no address on the stack network"
+            exit 1
+          fi
+          echo "guest ${n}: ${user}@${host}:2222"
+          cat >> "$cfg" <<EOF
+        Host guest${n}
+          HostName ${host}
+          Port 2222
+          User ${user}
+          IdentityFile ${KEY_DIR}/id_rsa
+          IdentitiesOnly yes
+          BatchMode yes
+          StrictHostKeyChecking no
+          UserKnownHostsFile /dev/null
+          LogLevel ERROR
+          ConnectTimeout 10
+          ServerAliveInterval 15
+        EOF
+        done
+        echo "SSH_CONFIG=${cfg}" >> "$GITHUB_ENV"
+
+        for guest in guest1 guest2; do
+          answered=false
+          for _ in $(seq 1 120); do
+            if ssh -F "$cfg" "$guest" true 2>/dev/null; then
+              answered=true
+              break
+            fi
+            sleep 5
+          done
+          if [ "$answered" != true ]; then
+            echo "::error::${guest} never answered SSH"
+            ssh -v -F "$cfg" "$guest" true 2>&1 | tail -20 || true
+            exit 1
+          fi
+          echo "${guest} answered SSH"
+        done
+
+    - name: Check the guests' ROCm version
+      id: rocm
+      if: ${{ !contains(steps.*.outcome, 'failure') }}
+      continue-on-error: ${{ inputs.allow-failure }}
+      run: |
+        set -euo pipefail
+        for guest in guest1 guest2; do
+          ssh -F "$SSH_CONFIG" "$guest" bash -s -- "$ROCM_XY" "$guest" <<'GUEST'
+        set -euo pipefail
+        want=$1
+        ver=""
+        for f in /opt/rocm/.info/version /opt/rocm/core/.info/version \
+                 /opt/rocm/core-*/.info/version; do
+          if [ -s "$f" ]; then ver=$(head -1 "$f"); break; fi
+        done
+        echo "$2 ROCm version: ${ver:-unknown}"
+        case "$ver" in
+          "$want".*|"$want") ;;
+          *)
+            echo "::error::$2 carries ROCm '${ver:-unknown}', not ${want}; the guest image pin and GUEST_ROCM in this workflow disagree"
+            exit 1
+            ;;
+        esac
+        GUEST
+        done
+
+    # The guests keep amdgpu blacklisted until the firmware files that must
+    # match the rocjitsu build serving them are staged. Both guests' GPUs are
+    # served from one image, so the files are generated once.
+    - name: Stage the GPU firmware and load amdgpu in both guests
+      id: gpu
+      if: ${{ !contains(steps.*.outcome, 'failure') }}
+      continue-on-error: ${{ inputs.allow-failure }}
+      run: |
+        set -euo pipefail
+        image=""
+        for n in 1 2; do
+          served=$(docker ps \
+            --filter "label=com.docker.compose.project=${STACK_NAME}" \
+            --filter "label=com.docker.compose.service=rocjitsu-${n}" \
+            --format '{{.Image}}')
+          if [ -z "$served" ]; then
+            echo "::error::the rocjitsu-${n} container is not running, so guest ${n} has no emulated GPU being served"
+            exit 1
+          fi
+          if [ -n "$image" ] && [ "$served" != "$image" ]; then
+            echo "::error::the two guests' GPUs are served from different images (${image} and ${served})"
+            exit 1
+          fi
+          image=$served
+        done
+        echo "generating firmware with ${image}"
+        fw="${RUNNER_TEMP}/rocjitsu-firmware"
+        mkdir -p "$fw"
+        # Streamed as a tar: a bind mount would be resolved by the host daemon.
+        docker run --rm --entrypoint /bin/sh "$image" -c \
+          'python3 /usr/local/bin/vfio_guest_firmware.py --generation gfx1250 --set gap --output /out && tar -cf - -C /out .' \
+          | tar -xf - -C "$fw"
+        ls -l "$fw"
+        test -s "$fw/ip_discovery.bin"
+        test -s "$fw/gc_12_1_0_imu.bin"
+
+        for guest in guest1 guest2; do
+          echo "::group::${guest}"
+          ssh -F "$SSH_CONFIG" "$guest" 'rm -rf /tmp/rocjitsu-firmware && mkdir -p /tmp/rocjitsu-firmware'
+          scp -F "$SSH_CONFIG" "$fw"/*.bin "${guest}:/tmp/rocjitsu-firmware/"
+
+          ssh -F "$SSH_CONFIG" "$guest" bash -s -- "$guest" <<'GUEST'
+        set -euo pipefail
+        guest=$1
+        stage=/tmp/rocjitsu-firmware
+        base=/lib/firmware/amdgpu
+        upd=/lib/firmware/updates/amdgpu
+        sudo -n install -d -m 0755 "$base" "$upd"
+        for f in "$stage"/*.bin; do
+          n=$(basename "$f")
+          if [ "$n" = ip_discovery.bin ]; then
+            sudo -n install -o root -g root -m 0644 "$f" "$base/$n"
+          elif [ ! -e "$upd/$n" ] && [ ! -e "$upd/$n.xz" ]; then
+            # Never over a packaged blob: a stub is worse than real microcode.
+            sudo -n install -o root -g root -m 0644 "$f" "$upd/$n"
+          fi
+        done
+
+        probe=/usr/local/bin/amdgpu-probe
+        if [ ! -x "$probe" ]; then
+          echo "::error::the guest image has no ${probe}"
+          exit 1
+        fi
+        status=$("$probe" --status)
+        echo "amdgpu-probe --status: ${status}"
+        case "$status" in
+          absent)
+            echo "::error::no emulated AMD GPU on ${guest}'s PCI bus: the rocjitsu vfio-user device was not attached. Not continuing without a GPU in both guests."
+            exit 1
+            ;;
+          ready|unbound)
+            sudo -n "$probe"
+            ;;
+          loaded)
+            ;;
+          *)
+            echo "::error::amdgpu cannot be probed in ${guest} (amdgpu-probe --status: ${status})"
+            exit 1
+            ;;
+        esac
+
+        # /dev/kfd exists after a probe that bound nothing; a bound GPU is a
+        # named node in the KFD topology.
+        gpus=0
+        for _ in $(seq 40); do
+          gpus=$(cat /sys/class/kfd/kfd/topology/nodes/*/name 2>/dev/null | grep -c . || true)
+          if [ "${gpus:-0}" -ge 1 ]; then break; fi
+          sleep 3
+        done
+        if [ "${gpus:-0}" -lt 1 ]; then
+          echo "::error::amdgpu did not bind the emulated GPU in ${guest}: no GPU node in the KFD topology after 120 s (amdgpu-probe --status: $("$probe" --status))"
+          sudo -n dmesg | grep -i amdgpu | tail -40 || true
+          exit 1
+        fi
+        echo "${gpus} GPU node(s) in the KFD topology of ${guest}"
+        if [ ! -r /dev/kfd ] || [ ! -w /dev/kfd ]; then
+          echo "::error::$(id -un) cannot open /dev/kfd in ${guest} (groups: $(id -nG)); HIP would see no device"
+          exit 1
+        fi
+        GUEST
+          echo "::endgroup::"
+        done
+
+    # The guests reach each other only through the Ethernet side of their
+    # emulated RDMA NICs; the other NIC each has is QEMU user-mode networking
+    # with the same address in both. The image addresses the NIC at boot; the
+    # address is asserted here and added if it is missing. The RDMA device is
+    # reported, not required: stages 3 and 4 say whether it carried anything.
+    - name: Check the path between the guests
+      id: path
+      if: ${{ !contains(steps.*.outcome, 'failure') }}
+      continue-on-error: ${{ inputs.allow-failure }}
+      run: |
+        set -euo pipefail
+        DIAGNOSTICS="$GITHUB_WORKSPACE/rocjitsu-2vm-diagnostics"
+        mkdir -p "$DIAGNOSTICS"
+        for n in 1 2; do
+          ssh -F "$SSH_CONFIG" "guest${n}" bash -s -- "$n" "$ERNIC_SUBNET" "$ERNIC_MAC_PREFIX" <<'GUEST' | tee "$DIAGNOSTICS/guest${n}-path.txt"
+        set -euo pipefail
+        n=$1
+        want="$2.$((10 + n))"
+        iface=$(ip -br link | awk -v mac="$3" '$0 ~ mac {print $1; exit}')
+        if [ -z "$iface" ]; then
+          echo "::error::guest ${n} has no network interface with a $3 MAC: its emulated RDMA NIC is missing"
+          ip -br link
+          exit 1
+        fi
+        sudo -n ip link set "$iface" up
+        if ! ip -4 -br addr show dev "$iface" | grep -qF "${want}/"; then
+          echo "::warning::guest ${n} had not given ${iface} the address ${want}; adding it"
+          sudo -n ip addr add "${want}/24" dev "$iface"
+        fi
+        ip -4 -br addr show dev "$iface"
+
+        ib=""
+        for _ in $(seq 30); do
+          ib=$(ls "/sys/class/net/${iface}/device/infiniband" 2>/dev/null | head -1 || true)
+          if [ -n "$ib" ]; then break; fi
+          sleep 2
+        done
+        if [ -z "$ib" ]; then
+          echo "::warning::guest ${n}: ${iface} has no RDMA device, so no RDMA transport is possible"
+          echo "guest ${n}: interface ${iface}, address ${want}, no RDMA device"
+          exit 0
+        fi
+        state=unknown
+        for _ in $(seq 30); do
+          state=$(cat "/sys/class/infiniband/${ib}/ports/1/state" 2>/dev/null || echo unknown)
+          case "$state" in *ACTIVE*) break ;; esac
+          sleep 2
+        done
+        case "$state" in
+          *ACTIVE*) ;;
+          *) echo "::warning::guest ${n}: port 1 of RDMA device ${ib} is '${state}', not ACTIVE" ;;
+        esac
+        # 0 means UCX has no rc transport on this device.
+        srq=$(ibv_devinfo -v -d "$ib" 2>/dev/null | awk '/max_srq:/ {print $2; exit}' || true)
+        echo "guest ${n}: interface ${iface}, address ${want}, RDMA device ${ib}, port 1 ${state}, max_srq ${srq:-unknown}"
+        GUEST
+        done
+
+        reach() {
+          ssh -F "$SSH_CONFIG" "$1" bash -s -- "$2" <<'GUEST'
+        set -euo pipefail
+        for _ in $(seq 10); do
+          if ping -c 1 -W 2 "$1" >/dev/null 2>&1 \
+              || timeout 5 bash -c "exec 3<>/dev/tcp/$1/22" 2>/dev/null; then
+            echo "reached $1"
+            exit 0
+          fi
+          sleep 2
+        done
+        exit 1
+        GUEST
+        }
+        for pair in "guest1 ${ERNIC_SUBNET}.12" "guest2 ${ERNIC_SUBNET}.11"; do
+          # shellcheck disable=SC2086
+          if ! reach $pair; then
+            echo "::error::${pair% *} cannot reach ${pair#* } over the emulated NICs' Ethernet segment; nothing can be transferred between the guests"
+            exit 1
+          fi
+        done
+
+    - name: Install the wheel in both guests
+      id: install
+      if: ${{ !contains(steps.*.outcome, 'failure') }}
+      continue-on-error: ${{ inputs.allow-failure }}
+      run: |
+        set -euo pipefail
+        for guest in guest1 guest2; do
+          echo "::group::${guest}"
+          ssh -F "$SSH_CONFIG" "$guest" 'rm -rf "$HOME/nixl-2vm" && mkdir -p "$HOME/nixl-2vm/wheels"'
+          scp -F "$SSH_CONFIG" "$MERGED_WHEEL" "${guest}:nixl-2vm/wheels/"
+          # The test imports its helpers from the smoke test beside it.
+          scp -F "$SSH_CONFIG" .ci/scripts/rocm_wheel_two_node_test.py \
+            .ci/scripts/rocm_wheel_smoke_test.py "${guest}:nixl-2vm/"
+
+          ssh -F "$SSH_CONFIG" "$guest" bash -s -- "$PYTHON_VERSION" "$UV_VERSION" <<'GUEST'
+        set -euo pipefail
+        shopt -s nullglob
+        py=$1
+        uv_version=$2
+        work="$HOME/nixl-2vm"
+        venv="$work/venv"
+
+        # uv supplies the requested interpreter when the guest's own python3
+        # is another version.
+        python3 -m venv "$work/uv-bootstrap"
+        "$work/uv-bootstrap/bin/pip" install --quiet "uv==${uv_version}"
+        uv="$work/uv-bootstrap/bin/uv"
+        "$uv" venv --python "$py" "$venv"
+
+        # numpy is the wheel's only unconditional dependency and the only
+        # package taken from an index. The wheel is installed from the copied
+        # file with no index, so it can pull nothing else in.
+        "$uv" pip install --python "$venv/bin/python" numpy
+        wheel=("$work"/wheels/rocm_nixl-*.whl)
+        "$uv" pip install --python "$venv/bin/python" --no-index "${wheel[@]}"
+        "$uv" pip list --python "$venv/bin/python" | tee "$work/pip-list.txt"
+
+        if ! "$venv/bin/python" -c 'import importlib.util, sys; sys.exit(0 if importlib.util.find_spec("torch") is None else 1)'; then
+          echo "::error::torch is installed in the guest environment; rocm-nixl must not bring it in"
+          exit 1
+        fi
+        echo "torch is not installed"
+        GUEST
+          echo "::endgroup::"
+        done
+
+    # usage: run-stage.sh NUMBER dram|vram REQUIRED [TRANSPORT]
+    # Exits non-zero only when a stage with REQUIRED=true fails.
+    - name: Write the stage runner
+      id: runner
+      if: ${{ !contains(steps.*.outcome, 'failure') }}
+      continue-on-error: ${{ inputs.allow-failure }}
+      run: |
+        set -euo pipefail
+        cat > "${RUNNER_TEMP}/run-stage.sh" <<'STAGE'
+        #!/bin/bash
+        set -uo pipefail
+        stage=$1
+        mem=$2
+        required=$3
+        transport=${4:-}
+        DIAGNOSTICS="$GITHUB_WORKSPACE/rocjitsu-2vm-diagnostics"
+        mkdir -p "$DIAGNOSTICS"
+        tlog="$DIAGNOSTICS/stage-${stage}-target.log"
+        ilog="$DIAGNOSTICS/stage-${stage}-initiator.log"
+        port=$((NIXL_PORT + stage))
+        case "$mem" in dram) what="host memory" ;; *) what="GPU memory" ;; esac
+        if [ -n "$transport" ]; then
+          title="Stage ${stage}: ${what}, the ${transport} transport required"
+        else
+          title="Stage ${stage}: ${what}, UCX choosing the transport"
+        fi
+
+        # Bytes guest N's emulated NIC has counted in RDMA operations (send,
+        # receive, read and write), from the NIC's own server. Ethernet frames
+        # between the guests are not counted.
+        rdma_bytes() {
+          local container
+          container=$(docker ps -q \
+            --filter "label=com.docker.compose.project=${STACK_NAME}" \
+            --filter "label=com.docker.compose.service=ernic-$1")
+          if [ -z "$container" ]; then echo unknown; return; fi
+          docker exec "$container" awk \
+            '/total_bytes_(sent|received|rdma_read|rdma_write)/ {s += $NF; n++} END {if (n) printf "%.0f\n", s}' \
+            "/run/ernic-stats/ernic-$1.stats" 2>/dev/null \
+            | head -1 | tr -cd '0-9' | grep . || echo unknown
+        }
+        delta() {
+          if [[ "$1" =~ ^[0-9]+$ && "$2" =~ ^[0-9]+$ ]]; then echo $(($2 - $1)); else echo unknown; fi
+        }
+        rdma_name() {
+          ssh -n -F "$SSH_CONFIG" "$1" 'ls /sys/class/infiniband 2>/dev/null | tr "\n" " "' 2>/dev/null || true
+        }
+
+        before1=$(rdma_bytes 1)
+        before2=$(rdma_bytes 2)
+
+        # The target is never killed from here: it ends by itself, and a
+        # process killed in the middle of RDMA leaves the guest's RDMA device
+        # unusable. timeout is the last resort behind the test's own limits.
+        ssh -F "$SSH_CONFIG" guest1 bash -s -- \
+          "$ROCM_XY" "$port" "$TARGET_IP" "$mem" "$STAGE_TIMEOUT" "$XFER_SIZE" "$transport" > "$tlog" 2>&1 <<'GUEST' &
+        set -euo pipefail
+        cd "$HOME/nixl-2vm"
+        . venv/bin/activate
+        # ssh drops an empty last argument, so $7 may be unset.
+        extra=()
+        if [ -n "${7:-}" ]; then extra=(--require-transport "$7"); fi
+        exec timeout -k 10 "$((3 * $5 + 120))" python3 rocm_wheel_two_node_test.py \
+          --role target --listen-port "$2" --bind-ip "$3" --expect-rocm "$1" \
+          --mem "$4" --timeout "$5" --size "$6" "${extra[@]}"
+        GUEST
+        target=$!
+
+        ready=false
+        for _ in $(seq "$STAGE_TIMEOUT"); do
+          if grep -q '^READY target' "$tlog"; then ready=true; break; fi
+          if ! kill -0 "$target" 2>/dev/null; then break; fi
+          sleep 1
+        done
+        if grep -q '^READY target' "$tlog"; then ready=true; fi
+
+        irc=1
+        if [ "$ready" = true ]; then
+          echo "::group::${title}: initiator in guest 2"
+          ssh -F "$SSH_CONFIG" guest2 bash -s -- \
+            "$ROCM_XY" "$port" "$TARGET_IP" "$mem" "$STAGE_TIMEOUT" "$XFER_SIZE" "$transport" 2>&1 <<'GUEST' | tee "$ilog"
+        set -euo pipefail
+        cd "$HOME/nixl-2vm"
+        . venv/bin/activate
+        extra=()
+        if [ -n "${7:-}" ]; then extra=(--require-transport "$7"); fi
+        timeout -k 10 "$((3 * $5 + 120))" python3 rocm_wheel_two_node_test.py \
+          --role initiator --peer-ip "$3" --peer-port "$2" --expect-rocm "$1" \
+          --mem "$4" --timeout "$5" --size "$6" "${extra[@]}"
+        GUEST
+          irc=${PIPESTATUS[0]}
+          echo "::endgroup::"
+        else
+          echo "the target never became ready, so the initiator was not started" | tee "$ilog"
+        fi
+        wait "$target"
+        trc=$?
+        echo "::group::${title}: target in guest 1"
+        cat "$tlog"
+        echo "::endgroup::"
+
+        moved1=$(delta "$before1" "$(rdma_bytes 1)")
+        moved2=$(delta "$before2" "$(rdma_bytes 2)")
+
+        problems=()
+        if [ "$ready" != true ]; then problems+=("the target in guest 1 never reported that it was listening"); fi
+        if [ "$trc" -ne 0 ]; then problems+=("the target in guest 1 exited with status ${trc}"); fi
+        if [ "$ready" = true ] && [ "$irc" -ne 0 ]; then problems+=("the initiator in guest 2 exited with status ${irc}"); fi
+        if ! grep -q '^PASS target-buffer' "$tlog"; then problems+=("the target did not verify the bytes written to it"); fi
+        if ! grep -q '^PASS read-back' "$ilog"; then problems+=("the initiator did not verify the bytes it read back"); fi
+        failures=$(grep -h '^FAIL ' "$ilog" "$tlog" | grep -v '^FAIL transport' | cut -c1-400 || true)
+        selection=$(grep -m1 -E '^(PASS|FAIL|SKIP) transport' "$ilog" | cut -c1-900 || true)
+
+        if [ "${#problems[@]}" -eq 0 ]; then result=PASS; else result=FAIL; fi
+        if [ "$required" = true ]; then kind="must pass"; else kind="reported only"; fi
+        {
+          echo "### ${title}: ${result} (${kind})"
+          echo
+          for problem in "${problems[@]}"; do echo "- ${problem}"; done
+          if [ -n "$failures" ]; then
+            echo '```'
+            echo "$failures"
+            echo '```'
+          fi
+          echo "- UCX's protocol selection on the initiator: \`${selection:-not reported}\`"
+          echo "- Bytes the emulated NICs counted in RDMA operations (send, receive, read and write) during the stage: guest 1 ${moved1}, guest 2 ${moved2}. Zero means nothing went over RDMA; TCP over the NICs' Ethernet side is not counted."
+          echo "- RDMA device names during the stage: guest 1 \`$(rdma_name guest1)\`, guest 2 \`$(rdma_name guest2)\`"
+          echo
+        } | tee -a "$GITHUB_STEP_SUMMARY"
+        echo "${stage}|${required}|${result}|${title}" >> "$DIAGNOSTICS/results.txt"
+
+        if [ "$result" = PASS ]; then exit 0; fi
+        summary="${title} failed: $(IFS=';'; echo "${problems[*]}")"
+        if [ "$required" = true ]; then
+          echo "::error title=rocjitsu two-guest test::${summary}"
+          exit 1
+        fi
+        echo "::warning title=rocjitsu two-guest test::${summary}"
+        exit 0
+        STAGE
+        chmod +x "${RUNNER_TEMP}/run-stage.sh"
+        bash -n "${RUNNER_TEMP}/run-stage.sh"
+
+    - name: 'Stage 1: host memory, UCX choosing the transport'
+      id: stage1
+      if: ${{ !contains(steps.*.outcome, 'failure') }}
+      continue-on-error: ${{ inputs.allow-failure }}
+      run: |
+        "${RUNNER_TEMP}/run-stage.sh" 1 dram true
+
+    # The GPU-memory stages come after the host-memory one of each pair: a
+    # process that hangs on the emulated GPU can leave it unusable.
+    - name: 'Stage 2: GPU memory, UCX choosing the transport'
+      id: stage2
+      if: ${{ !contains(steps.*.outcome, 'failure') }}
+      continue-on-error: ${{ inputs.allow-failure }}
+      run: |
+        "${RUNNER_TEMP}/run-stage.sh" 2 vram true
+
+    # Stages 3 and 4 never fail their step, so they run whatever stage 2 did.
+    - name: Rename the RDMA devices to names UCX can open
+      id: rename
+      if: ${{ !cancelled() && steps.stage1.outcome == 'success' }}
+      run: |
+        set -uo pipefail
+        DIAGNOSTICS="$GITHUB_WORKSPACE/rocjitsu-2vm-diagnostics"
+        for n in 1 2; do
+          ssh -F "$SSH_CONFIG" "guest${n}" bash -s -- "$n" "$ERNIC_MAC_PREFIX" <<'GUEST' | tee "$DIAGNOSTICS/guest${n}-rename.txt" || echo "::warning::could not rename the RDMA device in guest ${n}; UCX may find no RDMA transport there"
+        set -euo pipefail
+        n=$1
+        iface=$(ip -br link | awk -v mac="$2" '$0 ~ mac {print $1; exit}')
+        ib=$(ls "/sys/class/net/${iface}/device/infiniband" 2>/dev/null | head -1 || true)
+        if [ -z "$ib" ]; then
+          echo "guest ${n}: no RDMA device to rename"
+          exit 0
+        fi
+        case "$ib" in
+          *[-_]*) ;;
+          *)
+            echo "guest ${n}: RDMA device ${ib} needs no rename"
+            exit 0
+            ;;
+        esac
+        sudo -n rdma dev set "$ib" name ernic0
+        now=$(ls "/sys/class/net/${iface}/device/infiniband" | head -1)
+        echo "guest ${n}: RDMA device ${ib} renamed to ${now}, port 1 $(cat "/sys/class/infiniband/${now}/ports/1/state")"
+        test "$now" = ernic0
+        GUEST
+        done
+        exit 0
+
+    - name: 'Stage 3: host memory, an RDMA transport required'
+      id: stage3
+      if: ${{ !cancelled() && steps.stage1.outcome == 'success' }}
+      run: |
+        "${RUNNER_TEMP}/run-stage.sh" 3 dram false rdma
+
+    - name: 'Stage 4: GPU memory, an RDMA transport required'
+      id: stage4
+      if: ${{ !cancelled() && steps.stage1.outcome == 'success' }}
+      run: |
+        "${RUNNER_TEMP}/run-stage.sh" 4 vram false rdma
+
+    - name: Collect diagnostics
+      id: diagnostics
+      if: always()
+      run: |
+        out="$GITHUB_WORKSPACE/rocjitsu-2vm-diagnostics"
+        mkdir -p "$out"
+        if [ -n "${SSH_CONFIG:-}" ]; then
+          for guest in guest1 guest2; do
+            g() { ssh -F "$SSH_CONFIG" "$guest" "$@"; }
+            g 'sudo -n dmesg' > "$out/${guest}-dmesg.txt" 2>&1 || true
+            g bash -s > "$out/${guest}-state.txt" 2>&1 <<'GUEST' || true
+        echo "amdgpu-probe --status: $(/usr/local/bin/amdgpu-probe --status 2>&1)"
+        echo "--- KFD topology node names"
+        cat /sys/class/kfd/kfd/topology/nodes/*/name 2>&1
+        echo "--- AMD PCI functions and their drivers"
+        for dev in /sys/bus/pci/devices/*; do
+          [ "$(cat "$dev/vendor" 2>/dev/null)" = 0x1002 ] || continue
+          drv=none
+          [ -e "$dev/driver" ] && drv=$(basename "$(readlink -f "$dev/driver")")
+          echo "$(basename "$dev") device=$(cat "$dev/device") class=$(cat "$dev/class") driver=${drv}"
+        done
+        echo "--- device nodes"
+        ls -l /dev/kfd /dev/dri 2>&1
+        echo "--- amdgpu module parameters"
+        grep -H . /sys/module/amdgpu/parameters/{emu_mode,fw_load_type,discovery,ip_block_mask,vm_update_mode,gpu_recovery,vramlimit} 2>&1
+        echo "--- network"
+        ip -br link 2>&1
+        ip -br addr 2>&1
+        ip route 2>&1
+        echo "--- RDMA"
+        rdma link 2>&1
+        ibv_devinfo -v 2>&1
+        ldconfig -p 2>&1 | grep -E 'libibverbs|libnl-3|libnl-route-3'
+        lsmod 2>&1 | grep -E '^(ionic|ib_|rdma_)'
+        echo "--- ROCm"
+        cat /opt/rocm/core-*/.info/version /etc/rocjitsu-guest.json 2>&1
+        GUEST
+            scp -F "$SSH_CONFIG" "${guest}:nixl-2vm/pip-list.txt" "$out/${guest}-pip-list.txt" || true
+          done
+        fi
+        for n in 1 2; do
+          ernic=$(docker ps -q \
+            --filter "label=com.docker.compose.project=${STACK_NAME}" \
+            --filter "label=com.docker.compose.service=ernic-${n}")
+          if [ -n "$ernic" ]; then
+            docker exec "$ernic" cat "/run/ernic-stats/ernic-${n}.stats" \
+              > "$out/ernic-${n}-stats.txt" 2>&1 || true
+          fi
+        done
+        if [ -f "$STACK_DIR/docker-compose.yml" ]; then
+          qemu-tool compose --stack-dir "$STACK_DIR" logs --no-color --tail 500 \
+            > "$out/compose-logs.txt" 2>&1 || true
+          # Two guests of four vCPUs oversubscribe a hosted runner, and the
+          # NICs' mesh manager drops a node that misses its heartbeat.
+          if grep -qi 'failed health check' "$out/compose-logs.txt"; then
+            echo "::warning title=rocjitsu two-guest test::the emulated NICs' mesh manager evicted a node during the run; an RDMA failure in this run may be that and not the wheel"
+          fi
+        fi
+        ls -l "$out"
+
+    - name: Upload diagnostics
+      id: upload
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: rocjitsu-2vm-${{ inputs.rocm-version }}-py${{ inputs.python-version }}
+        path: rocjitsu-2vm-diagnostics/
+        if-no-files-found: warn
+
+    - name: Take the stack down
+      id: down
+      if: always()
+      working-directory: qemu-minimal
+      run: |
+        qemu-tool quick-start down \
+          --xml qemu/stacks/rocm-golden.xml \
+          --xml "$GITHUB_WORKSPACE/.ci/rocjitsu/fleet-overlay-2vm.xml" \
+          --stack-dir "$STACK_DIR" \
+          --yes || true
+        left=$(docker ps -aq --filter "label=com.docker.compose.project=${STACK_NAME}")
+        if [ -n "$left" ]; then
+          echo "::warning::removing containers the teardown left behind"
+          # shellcheck disable=SC2086
+          docker rm -f $left || true
+        fi
+
+    - name: Report the result
+      id: report
+      if: always()
+      env:
+        STEPS: ${{ toJSON(steps) }}
+        ALLOW_FAILURE: ${{ inputs.allow-failure }}
+      run: |
+        set -euo pipefail
+        DIAGNOSTICS="$GITHUB_WORKSPACE/rocjitsu-2vm-diagnostics"
+        failed=$(python3 -I -c 'import json, os; print(" ".join(k for k, v in json.loads(os.environ["STEPS"]).items() if v.get("outcome") == "failure"))')
+        ran=$(cut -d'|' -f1 "$DIAGNOSTICS/results.txt" 2>/dev/null | tr '\n' ' ' || true)
+        soft=$(grep -c '|false|FAIL|' "$DIAGNOSTICS/results.txt" 2>/dev/null || true)
+        echo "stages run: ${ran:-none}; failed steps: ${failed:-none}; reported-only stages that failed: ${soft:-0}"
+        if [ -z "$failed" ]; then
+          if [ "$ran" != "1 2 3 4 " ]; then
+            echo "::error title=rocjitsu two-guest test::no step failed but only stage(s) '${ran}' ran"
+            exit 1
+          fi
+          echo "Both required stages passed; ${soft:-0} of the two reported-only stages failed." >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+        fi
+        msg="the two-guest test did not pass (failed step(s): ${failed}); see this job's log and summary"
+        if [ "$ALLOW_FAILURE" = true ]; then
+          echo "::warning title=rocjitsu two-guest test failed::${msg}. allow-failure is set, so the job is not failed."
+          echo "**The two-guest test did not pass** (failed step(s): ${failed}). allow-failure is set, so the job is not failed." >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+        fi
+        echo "::error title=rocjitsu two-guest test failed::${msg}"
+        exit 1
