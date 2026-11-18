@@ -1,0 +1,346 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: AMD Nightly Wheels
+
+on:
+  workflow_run:
+    workflows:
+      - AMD Nightly
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      run-id:
+        description: Run id of the "AMD Nightly" run whose wheels are published.
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: amd-nightly-wheels
+  cancel-in-progress: false
+
+env:
+  PUBLISH_BRANCHES: main-amd main
+  NIGHTLY_WORKFLOW: .github/workflows/amd-nightly.yml
+
+jobs:
+  plan:
+    name: Select the branches to publish
+    # A nightly run that is not publishable (another branch, a pull request, a
+    # fork) is skipped here; a run id given by hand is checked, and refused
+    # with an error, in the first step.
+    if: >-
+      (vars.AMD_NIGHTLY_ENABLED == 'true' || github.event_name == 'workflow_dispatch') &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.head_repository.full_name == github.repository &&
+        github.event.workflow_run.head_branch == github.event.repository.default_branch &&
+        (github.event.workflow_run.event == 'schedule' ||
+         github.event.workflow_run.event == 'workflow_dispatch')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      publish: ${{ steps.select.outputs.publish }}
+      count: ${{ steps.select.outputs.count }}
+      run-id: ${{ steps.run.outputs.run-id }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_ID: ${{ github.event.workflow_run.id || inputs.run-id }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+    - name: Check out the CI scripts
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+        persist-credentials: false
+        sparse-checkout: .ci/scripts
+
+    # Wheels are published only from a finished "AMD Nightly" run of this
+    # repository's default branch, never from a pull request or a fork.
+    - name: Check the nightly run
+      id: run
+      run: |
+        set -euo pipefail
+        if ! [[ "$RUN_ID" =~ ^[0-9]{1,20}$ ]]; then
+          echo "::error::the run id must be a number"
+          exit 1
+        fi
+        gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}" > "$RUNNER_TEMP/run.json"
+        if ! jq -e --arg repo "$GITHUB_REPOSITORY" --arg path "$NIGHTLY_WORKFLOW" \
+            --arg branch "$DEFAULT_BRANCH" '
+              (.path | split("@")[0]) == $path
+              and .status == "completed"
+              and (.event == "schedule" or .event == "workflow_dispatch")
+              and .head_repository.full_name == $repo
+              and .head_branch == $branch' "$RUNNER_TEMP/run.json" >/dev/null; then
+          jq '{path, status, event, head_branch, head_repository: .head_repository.full_name}' \
+            "$RUNNER_TEMP/run.json"
+          echo "::error::run ${RUN_ID} is not a completed scheduled or dispatched \"AMD Nightly\" run of ${GITHUB_REPOSITORY}'s ${DEFAULT_BRANCH} branch"
+          exit 1
+        fi
+        echo "run-id=${RUN_ID}" >> "$GITHUB_OUTPUT"
+
+    - name: Select the branches that passed
+      id: select
+      run: |
+        set -euo pipefail
+        summary="$RUNNER_TEMP/summary"
+        publish='[]'
+        if gh run download "$RUN_ID" --name amd-nightly-summary --dir "$summary"; then
+          read -ra branches <<< "$PUBLISH_BRANCHES"
+          publish=$(python3 .ci/scripts/amd_wheel_index.py select \
+            --summary "$summary/nightly-summary.json" --branch "${branches[@]}")
+        else
+          echo "::notice title=Nightly wheels not published::run ${RUN_ID} has no amd-nightly-summary artifact; every release is left as it is"
+        fi
+        count=$(jq 'length' <<< "$publish")
+        {
+          echo "publish=${publish}"
+          echo "count=${count}"
+        } >> "$GITHUB_OUTPUT"
+        {
+          echo "### Nightly wheels from run ${RUN_ID}"
+          echo
+          if [ "$count" = 0 ]; then
+            echo "Nothing to publish."
+          else
+            jq -r '.[] | "- `\(.branch)`: \(.version) at `\(.sha)`"' <<< "$publish"
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: Publish the wheels and the pip index
+    needs: plan
+    if: needs.plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      actions: read
+    # Shared with the results site, so the two never push gh-pages at once.
+    concurrency:
+      group: gh-pages
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_ID: ${{ needs.plan.outputs.run-id }}
+      PUBLISH: ${{ needs.plan.outputs.publish }}
+    steps:
+    - name: Check out the CI scripts
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+        persist-credentials: false
+        sparse-checkout: .ci/scripts
+
+    - name: Download and check the wheels
+      run: |
+        set -euo pipefail
+        work="$RUNNER_TEMP/nightly"
+        mkdir -p "$work/stage"
+        : > "$work/checked.tsv"
+        date -u +%Y-%m-%dT%H:%M:%SZ > "$work/date"
+        shopt -s nullglob
+
+        check() {
+          local branch=$1 slug=$2 sha=$3 version=$4 artifact=$5
+          local dir="$work/wheels/$slug" index="$work/stage/wheels/$slug/index.json"
+          gh run download "$RUN_ID" --name "$artifact" --dir "$dir" || return 1
+          local wheels=("$dir"/rocm_nixl-*.whl)
+          if [ "${#wheels[@]}" -eq 0 ]; then
+            echo "artifact ${artifact} holds no rocm_nixl wheel"
+            return 1
+          fi
+          python3 .ci/scripts/amd_wheel_index.py update --site "$work/stage" \
+            --branch "$slug" --ref "$branch" --sha "$sha" --date "$(cat "$work/date")" \
+            --base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/nightly-${slug}" \
+            "${wheels[@]}" || return 1
+          if [ "$(jq -r .version "$index")" != "$version" ]; then
+            echo "the wheels are version $(jq -r .version "$index"), the nightly reported ${version}"
+            return 1
+          fi
+        }
+
+        while IFS=$'\t' read -r branch slug sha version artifact; do
+          if check "$branch" "$slug" "$sha" "$version" "$artifact"; then
+            printf '%s\t%s\t%s\t%s\n' "$branch" "$slug" "$sha" "$version" >> "$work/checked.tsv"
+          else
+            echo "::error title=Nightly wheels not published::${branch}: the wheels could not be downloaded or checked; its release is left as it is"
+            touch "$work/failed"
+          fi
+        done < <(jq -r '.[] | [.branch, .slug, .sha, .version, .wheels_artifact] | @tsv' <<< "$PUBLISH")
+
+    # New files go up under their final names before anything is removed, so a
+    # failed upload leaves the previous night's wheels and index in place.
+    - name: Upload the wheels to the pre-releases
+      run: |
+        set -euo pipefail
+        work="$RUNNER_TEMP/nightly"
+        : > "$work/uploaded.tsv"
+        owner=${GITHUB_REPOSITORY_OWNER,,}
+
+        assets() {
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/$1" \
+            --jq '.assets[] | [.name, .state, (.size | tostring), (.digest // "")] | @tsv'
+        }
+
+        upload() {
+          local branch=$1 slug=$2 sha=$3 version=$4
+          local tag="nightly-$slug" index="$work/stage/wheels/$slug/index.json"
+          local notes="$work/notes-$slug.md" title="rocm-nixl nightly (${branch})"
+          {
+            echo "Nightly development build of rocm-nixl from the \`${branch}\` branch. Not a PyPI release."
+            echo
+            echo "- Branch: \`${branch}\`"
+            echo "- Commit: \`${sha}\`"
+            echo "- Version: \`${version}\`"
+            echo "- Published: $(cat "$work/date") from ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
+            echo
+            echo "Untested on hardware: these wheels passed the nightly's tests against emulated devices only."
+            echo
+            echo "The assets are replaced each night the branch passes. The tag is never moved, so the commit above, not the tag, identifies the source."
+            echo
+            echo '```'
+            echo "pip install --pre --index-url https://${owner}.github.io/${GITHUB_REPOSITORY#*/}/wheels/${slug}/simple/ --extra-index-url https://pypi.org/simple rocm-nixl"
+            echo '```'
+          } > "$notes"
+
+          if ! gh release view "$tag" --json tagName >/dev/null 2>&1; then
+            gh release create "$tag" --prerelease --latest=false --target "$sha" \
+              --title "$title" --notes-file "$notes" || return 1
+          fi
+
+          local before after file hash bytes want
+          before=$(assets "$tag") || return 1
+          while IFS=$'\t' read -r file hash bytes; do
+            want="${file}"$'\t'"uploaded"$'\t'"${bytes}"$'\t'
+            if grep -qxF "${want}sha256:${hash}" <<< "$before"; then
+              echo "${file} is already on ${tag}"
+              continue
+            fi
+            gh release upload "$tag" "$work/wheels/$slug/$file" --clobber || return 1
+          done < <(jq -r '.files[] | [.file, .sha256, (.bytes | tostring)] | @tsv' "$index")
+
+          after=$(assets "$tag") || return 1
+          while IFS=$'\t' read -r file hash bytes; do
+            want="${file}"$'\t'"uploaded"$'\t'"${bytes}"$'\t'
+            # Assets uploaded before GitHub recorded digests have none.
+            if ! grep -qxF -e "${want}sha256:${hash}" -e "${want}" <<< "$after"; then
+              echo "${file} is not a complete, matching asset of ${tag}"
+              return 1
+            fi
+          done < <(jq -r '.files[] | [.file, .sha256, (.bytes | tostring)] | @tsv' "$index")
+
+          gh release edit "$tag" --prerelease --title "$title" --notes-file "$notes" || return 1
+        }
+
+        while IFS=$'\t' read -r branch slug sha version; do
+          if upload "$branch" "$slug" "$sha" "$version"; then
+            printf '%s\t%s\t%s\t%s\n' "$branch" "$slug" "$sha" "$version" >> "$work/uploaded.tsv"
+          else
+            echo "::error title=Nightly wheels not published::${branch}: uploading to release nightly-${slug} failed; the pip index still lists the previous night"
+            touch "$work/failed"
+          fi
+        done < "$work/checked.tsv"
+
+    - name: Publish the pip index on gh-pages
+      id: pages
+      run: |
+        set -euo pipefail
+        work="$RUNNER_TEMP/nightly"
+        if [ ! -s "$work/uploaded.tsv" ]; then
+          echo "No branch has new wheels in place; gh-pages is left as it is."
+          exit 0
+        fi
+
+        while IFS=$'\t' read -r _ slug _; do
+          while read -r url; do
+            curl --fail --silent --show-error --head --location --retry 3 --retry-delay 5 \
+              --output /dev/null "$url"
+            echo "reachable: ${url}"
+          done < <(jq -r '.files[].url' "$work/stage/wheels/$slug/index.json")
+        done < "$work/uploaded.tsv"
+
+        gh auth setup-git
+        remote="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+        site="$work/site"
+        pushed=false
+        for attempt in 1 2; do
+          rm -rf "$site"
+          if git ls-remote --exit-code --heads "$remote" gh-pages >/dev/null; then
+            git clone --quiet --depth 1 --branch gh-pages "$remote" "$site"
+          else
+            git init --quiet "$site"
+            git -C "$site" remote add origin "$remote"
+            git -C "$site" switch --quiet --orphan gh-pages
+            touch "$site/.nojekyll"
+            git -C "$site" add .nojekyll
+          fi
+          while IFS=$'\t' read -r branch slug sha _; do
+            python3 .ci/scripts/amd_wheel_index.py update --site "$site" \
+              --branch "$slug" --ref "$branch" --sha "$sha" --date "$(cat "$work/date")" \
+              --base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/nightly-${slug}" \
+              "$work/wheels/$slug"/rocm_nixl-*.whl
+          done < "$work/uploaded.tsv"
+          git -C "$site" add wheels
+          if git -C "$site" diff --cached --quiet; then
+            echo "The index on gh-pages already lists these wheels."
+            pushed=true
+            break
+          fi
+          git -C "$site" \
+            -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit --quiet -m "wheels: nightly index from run ${RUN_ID}"
+          if git -C "$site" push --quiet origin HEAD:gh-pages; then
+            pushed=true
+            break
+          fi
+          echo "::warning::push to gh-pages was rejected (attempt ${attempt}); gh-pages moved underneath"
+        done
+        if [ "$pushed" != true ]; then
+          echo "::error::could not push the pip index to gh-pages; the old index and its wheels are left in place"
+          exit 1
+        fi
+        echo "pushed=true" >> "$GITHUB_OUTPUT"
+
+    # Only after the index stopped pointing at them.
+    - name: Remove the previous night's wheels
+      if: steps.pages.outputs.pushed == 'true'
+      run: |
+        set -euo pipefail
+        work="$RUNNER_TEMP/nightly"
+        while IFS=$'\t' read -r _ slug _; do
+          tag="nightly-$slug"
+          jq -r '.files[].file' "$work/stage/wheels/$slug/index.json" > "$work/keep-$slug.txt"
+          [ -s "$work/keep-$slug.txt" ]
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" --jq '.assets[].name' |
+            { grep -E '^rocm_nixl-.*\.whl$' || true; } |
+            { grep -vxFf "$work/keep-$slug.txt" || true; } > "$work/stale-$slug.txt"
+          while read -r name; do
+            echo "removing ${name} from ${tag}"
+            gh release delete-asset "$tag" "$name" --yes ||
+              echo "::warning::could not remove ${name} from ${tag}; the next nightly will retry"
+          done < "$work/stale-$slug.txt"
+        done < "$work/uploaded.tsv"
+
+    - name: Report
+      if: always()
+      run: |
+        set -euo pipefail
+        work="$RUNNER_TEMP/nightly"
+        owner=${GITHUB_REPOSITORY_OWNER,,}
+        if [ -s "$work/uploaded.tsv" ]; then
+          while IFS=$'\t' read -r branch slug _ version; do
+            echo "- \`${branch}\` ${version}: release \`nightly-${slug}\`, index https://${owner}.github.io/${GITHUB_REPOSITORY#*/}/wheels/${slug}/simple/"
+          done < "$work/uploaded.tsv" >> "$GITHUB_STEP_SUMMARY"
+        fi
+        if [ -e "$work/failed" ]; then
+          echo "::error::at least one branch that passed the nightly was not published; see the steps above"
+          exit 1
+        fi
