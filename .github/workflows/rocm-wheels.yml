@@ -215,8 +215,8 @@ jobs:
           sha=$(git rev-parse HEAD)
           version=$(python3 -I -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])' 2>/dev/null || true)
           missing=""
-          if ! grep -q -- '--gpu-stack' contrib/build-container.sh 2>/dev/null; then
-            missing="contrib/build-container.sh has no --gpu-stack option"
+          if ! grep -q -- '--rocm-version' contrib/build-container.sh 2>/dev/null; then
+            missing="contrib/build-container.sh has no --rocm-version option"
           elif [ ! -f contrib/wheel_merge_rocm.py ]; then
             missing="contrib/wheel_merge_rocm.py is missing"
           fi
@@ -319,19 +319,28 @@ jobs:
           if [ "$WRITE_CACHE" = "true" ]; then
             cache+=" --cache-to type=gha,mode=max,ignore-error=true,scope=${CACHE_SCOPE}"
           fi
+          # Sources from before --rocm-version selected ROCm by itself need
+          # --gpu-stack as well; later ones do not have that option.
+          stack=""
+          if grep -q -- '--gpu-stack' contrib/build-container.sh; then stack="--gpu-stack rocm"; fi
+          # shellcheck disable=SC2086
           DOCKER_BUILD_EXTRA_ARGS="--target wheel_base ${cache}" \
             ./contrib/build-container.sh \
               --dockerfile contrib/Dockerfile.manylinux \
-              --gpu-stack rocm --rocm-version "$ROCM_VERSION" \
+              ${stack} --rocm-version "$ROCM_VERSION" \
               --python-versions "$PYTHON_VERSIONS" \
               --tag "nixl-wheel-base:rocm${ROCM_VERSION}"
 
       # The wheels are written to dist/; the image is never loaded.
       - name: Build the wheels
         run: |
+          set -euo pipefail
+          stack=""
+          if grep -q -- '--gpu-stack' contrib/build-container.sh; then stack="--gpu-stack rocm"; fi
+          # shellcheck disable=SC2086
           ./contrib/build-container.sh \
             --dockerfile contrib/Dockerfile.manylinux \
-            --gpu-stack rocm --rocm-version "$ROCM_VERSION" \
+            ${stack} --rocm-version "$ROCM_VERSION" \
             --python-versions "$PYTHON_VERSIONS" \
             --wheel-output-dir dist
 
