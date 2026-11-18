@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -719,7 +720,7 @@ ARG WHL_PLATFORM="manylinux_2_28_$ARCH"
 RUN IFS=',' read -ra PYTHON_VERSIONS <<< "$WHL_PYTHON_VERSIONS" && \
     if [ "$GPU_STACK" = "rocm" ]; then \
         BUILD_NIXL_EP_RESOLVED="false"; \
-        GPU_STACK_FLAGS="--gpu-stack rocm --rocm-path $ROCM_PATH"; \
+        GPU_STACK_FLAGS="--rocm-path $ROCM_PATH"; \
     else \
         BUILD_NIXL_EP_RESOLVED="$(./contrib/resolve-nixl-ep.sh)" && \
         GPU_STACK_FLAGS=""; \

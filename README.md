@@ -441,7 +441,7 @@ The contrib folder also includes a script to build the python wheel with the UCX
 ./contrib/build-wheel.sh
 ```
 
-The `rocm-nixl` wheel (x86_64 only) is built in two steps: `./contrib/build-container.sh --dockerfile contrib/Dockerfile.manylinux --gpu-stack rocm --rocm-version <X.Y.Z>` builds the backend wheels for one ROCm version (`nixl_rocm<X>_<Y>-*.whl`, one per Python version) inside a manylinux image, and `./contrib/wheel_merge_rocm.py` merges the backend wheels of one Python version into `rocm_nixl-<version>-cp<NN>-cp<NN>-manylinux_2_28_x86_64.whl`, which contains every backend and the `nixl` dispatcher package. `--gpu-stack` defaults to `cuda`. See [contrib/README.md](contrib/README.md#build-rocm-wheels) for the commands.
+The `rocm-nixl` wheel (x86_64 only) is built in two steps: `./contrib/build-container.sh --dockerfile contrib/Dockerfile.manylinux --rocm-version <X.Y.Z>` builds the backend wheels for one ROCm version (`nixl_rocm<X>_<Y>-*.whl`, one per Python version) inside a manylinux image, and `./contrib/wheel_merge_rocm.py` merges the backend wheels of one Python version into `rocm_nixl-<version>-cp<NN>-cp<NN>-manylinux_2_28_x86_64.whl`, which contains every backend and the `nixl` dispatcher package. Without `--rocm-version` the build is a CUDA one. See [contrib/README.md](contrib/README.md#build-rocm-wheels) for the commands.
 
 ## Running with ETCD
 NIXL can use ETCD for metadata exchange between distributed nodes. This is especially useful in containerized or cloud-native environments.

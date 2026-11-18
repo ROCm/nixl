@@ -1,6 +1,7 @@
 #!/bin/bash
 
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -24,8 +25,9 @@ OUTPUT_DIR="dist"
 BUILD_NIXL_EP="false"
 TORCH_VERSIONS=""
 TORCH_CUDA_INDEX=""
-GPU_STACK="cuda"
-ROCM_PATH="${ROCM_PATH:-/opt/rocm}"
+# Set by --rocm-path only: a ROCM_PATH in the environment must not turn a
+# CUDA build into a ROCm one.
+ROCM_PATH=""
 WHL_FILE_PREFIX="nixl"
 
 while [[ $# -gt 0 ]]; do
@@ -65,8 +67,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --build-nixl-ep: Build wheel with nixl_ep package included (requires a CUDA sm_90 or newer target environment)"
             echo "  --torch-versions: Comma-separated list of torch versions to build the wheel for (default: $TORCH_VERSIONS)"
             echo "  --torch-cuda-index: torch wheel index, e.g. cu132 (default: cu132 for CUDA 13, cu<major><minor> of the nvcc toolkit for CUDA 12)"
-            echo "  --gpu-stack: GPU stack to build the wheel for, cuda or rocm (default: $GPU_STACK)"
-            echo "  --rocm-path: ROCm installation prefix, only used with --gpu-stack rocm (default: $ROCM_PATH)"
+            echo "  --rocm-path: ROCm installation prefix, e.g. /opt/rocm; build the wheel for that ROCm install instead of for CUDA (x86_64 only)"
             echo "  --help: Show this help message"
             echo ""
             echo "Must be executed from the root of the NIXL repository."
@@ -83,11 +84,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --torch-cuda-index)
             TORCH_CUDA_INDEX=$2
-            shift
-            shift
-            ;;
-        --gpu-stack)
-            GPU_STACK=$2
             shift
             shift
             ;;
@@ -142,36 +138,31 @@ rocm_prefix_libs() {
     shopt -u nullglob
 }
 
-case "$GPU_STACK" in
-    cuda) ;;
-    rocm)
-        if [ "$ARCH" != "x86_64" ]; then
-            echo "ERROR: --gpu-stack rocm is only supported on x86_64 (this machine is $ARCH)" >&2
-            exit 1
-        fi
-        if [ "$BUILD_NIXL_EP" = "true" ]; then
-            echo "ERROR: --build-nixl-ep is not supported with --gpu-stack rocm (nixl_ep is CUDA-only)" >&2
-            exit 1
-        fi
-        if [ ! -d "$ROCM_PATH/lib" ]; then
-            echo "ERROR: no ROCm installation at '$ROCM_PATH' (set --rocm-path or ROCM_PATH)" >&2
-            exit 1
-        fi
-        ROCM_VERSION=$(cat "$ROCM_PATH/.info/version" "$ROCM_PATH/core/.info/version" 2>/dev/null | grep -Eom1 '^[0-9]+\.[0-9]+(\.[0-9]+)?')
-        if ! [[ "$ROCM_VERSION" =~ ^([0-9]+)\.([0-9]+)(\.[0-9]+)?$ ]]; then
-            echo "ERROR: cannot read the ROCm version from $ROCM_PATH/.info/version or $ROCM_PATH/core/.info/version" >&2
-            exit 1
-        fi
-        ROCM_MAJOR="${BASH_REMATCH[1]}"
-        ROCM_MINOR="${BASH_REMATCH[2]}"
-        ROCM_VARIANT="rocm${ROCM_MAJOR}_${ROCM_MINOR}"
-        mapfile -t ROCM_PREFIX_LIBS < <(rocm_prefix_libs)
-        ;;
-    *)
-        echo "ERROR: invalid --gpu-stack '$GPU_STACK' (expected cuda or rocm)" >&2
+GPU_STACK="cuda"
+if [ -n "$ROCM_PATH" ]; then
+    GPU_STACK="rocm"
+    if [ "$ARCH" != "x86_64" ]; then
+        echo "ERROR: --rocm-path is only supported on x86_64 (this machine is $ARCH)" >&2
         exit 1
-        ;;
-esac
+    fi
+    if [ "$BUILD_NIXL_EP" = "true" ]; then
+        echo "ERROR: --build-nixl-ep is not supported with --rocm-path (nixl_ep is CUDA-only)" >&2
+        exit 1
+    fi
+    if [ ! -d "$ROCM_PATH/lib" ]; then
+        echo "ERROR: no ROCm installation at '$ROCM_PATH' (given with --rocm-path)" >&2
+        exit 1
+    fi
+    ROCM_VERSION=$(cat "$ROCM_PATH/.info/version" "$ROCM_PATH/core/.info/version" 2>/dev/null | grep -Eom1 '^[0-9]+\.[0-9]+(\.[0-9]+)?')
+    if ! [[ "$ROCM_VERSION" =~ ^([0-9]+)\.([0-9]+)(\.[0-9]+)?$ ]]; then
+        echo "ERROR: cannot read the ROCm version from $ROCM_PATH/.info/version or $ROCM_PATH/core/.info/version" >&2
+        exit 1
+    fi
+    ROCM_MAJOR="${BASH_REMATCH[1]}"
+    ROCM_MINOR="${BASH_REMATCH[2]}"
+    ROCM_VARIANT="rocm${ROCM_MAJOR}_${ROCM_MINOR}"
+    mapfile -t ROCM_PREFIX_LIBS < <(rocm_prefix_libs)
+fi
 
 set -e
 set -x
@@ -179,7 +170,9 @@ set -x
 TMP_DIR=$(mktemp -d)
 
 if [ "$GPU_STACK" = "rocm" ]; then
-    AUDITWHEEL_EXCLUDES="--exclude libssl* --exclude libcrypto* --exclude libefa* --exclude libhwloc* --exclude libfabric* --exclude libdoca* --exclude libred_client* --exclude libred_async* --exclude liblz4*"
+    AUDITWHEEL_EXCLUDES="--exclude libssl* --exclude libcrypto* --exclude libefa*"
+    AUDITWHEEL_EXCLUDES+=" --exclude libhwloc* --exclude libfabric* --exclude libdoca*"
+    AUDITWHEEL_EXCLUDES+=" --exclude libred_client* --exclude libred_async* --exclude liblz4*"
     for LIB in "${ROCM_RUNTIME_LIBS[@]}"; do
         AUDITWHEEL_EXCLUDES+=" --exclude ${LIB}*"
     done
@@ -201,7 +194,11 @@ else
         echo "Invalid CUDA_MAJOR: '$CUDA_MAJOR'"
         exit 1
     fi
-    AUDITWHEEL_EXCLUDES="--exclude libcuda* --exclude libcufile* --exclude libcuobjclient* --exclude libssl* --exclude libcrypto* --exclude libefa* --exclude libhwloc* --exclude libfabric* --exclude libtorch* --exclude libc10* --exclude libdoca* --exclude libred_client* --exclude libred_async* --exclude liblz4*"
+    AUDITWHEEL_EXCLUDES="--exclude libcuda* --exclude libcufile* --exclude libcuobjclient*"
+    AUDITWHEEL_EXCLUDES+=" --exclude libssl* --exclude libcrypto* --exclude libefa*"
+    AUDITWHEEL_EXCLUDES+=" --exclude libhwloc* --exclude libfabric* --exclude libtorch*"
+    AUDITWHEEL_EXCLUDES+=" --exclude libc10* --exclude libdoca* --exclude libred_client*"
+    AUDITWHEEL_EXCLUDES+=" --exclude libred_async* --exclude liblz4*"
 
     PKG_NAME="nixl-cu${CUDA_MAJOR}"
     # torch index: --torch-cuda-index, else cu132 for CUDA 13 (PyTorch has no stable

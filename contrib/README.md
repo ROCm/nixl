@@ -43,14 +43,14 @@ selects the backend matching the installed ROCm. It is built in three steps,
 all run from the repository root.
 
 1. Build the backend wheels, one build per ROCm version. `Dockerfile.manylinux`
-   builds CUDA wheels by default; `--gpu-stack rocm` builds against a ROCm
-   release instead:
+   builds CUDA wheels by default; `--rocm-version X.Y.Z` builds against that
+   ROCm release instead:
 
    ```bash
    for rocm in 10.1.0 7.14.1; do
        ./contrib/build-container.sh \
            --dockerfile contrib/Dockerfile.manylinux \
-           --gpu-stack rocm --rocm-version "$rocm" \
+           --rocm-version "$rocm" \
            --python-versions 3.10,3.11,3.12,3.13,3.14 \
            --wheel-output-dir "dist-rocm$rocm"
    done
@@ -122,7 +122,7 @@ provide the `nixl` import package: do not install them in the same
 environment.
 
 `--cuda-version`, `--torch-cuda-index`, `--torch-versions` and
-`--build-nixl-ep` are rejected with `--gpu-stack rocm` (`nixl_ep` is
+`--build-nixl-ep` are rejected with `--rocm-version` (`nixl_ep` is
 CUDA-only).
 
 Inside an environment that already has ROCm, UCX and NIXL installed the way
@@ -130,7 +130,7 @@ Inside an environment that already has ROCm, UCX and NIXL installed the way
 into `--output-dir` (default `dist`):
 
 ```bash
-./contrib/build-wheel.sh --gpu-stack rocm --rocm-path /opt/rocm --python-version 3.12
+./contrib/build-wheel.sh --rocm-path /opt/rocm --python-version 3.12
 ```
 
 The wheel is tagged for `--platform` (default `manylinux_2_39_x86_64`); pass
