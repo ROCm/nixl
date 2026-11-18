@@ -78,7 +78,7 @@ The tests run on the branches as they are that night, whether or not the sync
 worked and whether or not the sync pull request has been merged.
 
 A branch that cannot build ROCm wheels is skipped with a notice and does not
-fail the run. That is `main` today: upstream has neither the `--gpu-stack`
+fail the run. That is `main` today: upstream has neither the `--rocm-version`
 option of `contrib/build-container.sh` nor `contrib/wheel_merge_rocm.py`. The
 skip ends by itself once upstream has both.
 
