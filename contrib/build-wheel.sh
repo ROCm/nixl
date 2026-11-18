@@ -26,7 +26,6 @@ TORCH_VERSIONS=""
 TORCH_CUDA_INDEX=""
 GPU_STACK="cuda"
 ROCM_PATH="${ROCM_PATH:-/opt/rocm}"
-ROCM_VERSION=""
 WHL_FILE_PREFIX="nixl"
 
 while [[ $# -gt 0 ]]; do
@@ -68,7 +67,6 @@ while [[ $# -gt 0 ]]; do
             echo "  --torch-cuda-index: torch wheel index, e.g. cu132 (default: cu132 for CUDA 13, cu<major><minor> of the nvcc toolkit for CUDA 12)"
             echo "  --gpu-stack: GPU stack to build the wheel for, cuda or rocm (default: $GPU_STACK)"
             echo "  --rocm-path: ROCm installation prefix, only used with --gpu-stack rocm (default: $ROCM_PATH)"
-            echo "  --rocm-version: ROCm version X.Y[.Z], only used with --gpu-stack rocm (default: read from the ROCm installation)"
             echo "  --help: Show this help message"
             echo ""
             echo "Must be executed from the root of the NIXL repository."
@@ -95,11 +93,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --rocm-path)
             ROCM_PATH=$2
-            shift
-            shift
-            ;;
-        --rocm-version)
-            ROCM_VERSION=$2
             shift
             shift
             ;;
@@ -160,32 +153,13 @@ case "$GPU_STACK" in
             echo "ERROR: --build-nixl-ep is not supported with --gpu-stack rocm (nixl_ep is CUDA-only)" >&2
             exit 1
         fi
-        if [ -n "$TORCH_VERSIONS" ]; then
-            echo "ERROR: --torch-versions is not supported with --gpu-stack rocm (the ROCm wheel is not built against torch)" >&2
-            exit 1
-        fi
-        if [ -n "$TORCH_CUDA_INDEX" ]; then
-            echo "ERROR: --torch-cuda-index is not supported with --gpu-stack rocm" >&2
-            exit 1
-        fi
         if [ ! -d "$ROCM_PATH/lib" ]; then
             echo "ERROR: no ROCm installation at '$ROCM_PATH' (set --rocm-path or ROCM_PATH)" >&2
             exit 1
         fi
-        if [ -z "$ROCM_VERSION" ]; then
-            for ROCM_VERSION_FILE in "$ROCM_PATH/.info/version" "$ROCM_PATH/core/.info/version"; do
-                if [ -r "$ROCM_VERSION_FILE" ]; then
-                    ROCM_VERSION=$(grep -Eom1 '^[0-9]+\.[0-9]+(\.[0-9]+)?' "$ROCM_VERSION_FILE")
-                    [ -n "$ROCM_VERSION" ] && break
-                fi
-            done
-            if [ -z "$ROCM_VERSION" ]; then
-                echo "ERROR: cannot determine the ROCm version from $ROCM_PATH/.info/version or $ROCM_PATH/core/.info/version; pass --rocm-version X.Y[.Z]" >&2
-                exit 1
-            fi
-        fi
+        ROCM_VERSION=$(cat "$ROCM_PATH/.info/version" "$ROCM_PATH/core/.info/version" 2>/dev/null | grep -Eom1 '^[0-9]+\.[0-9]+(\.[0-9]+)?')
         if ! [[ "$ROCM_VERSION" =~ ^([0-9]+)\.([0-9]+)(\.[0-9]+)?$ ]]; then
-            echo "ERROR: invalid ROCm version '$ROCM_VERSION' (expected X.Y[.Z])" >&2
+            echo "ERROR: cannot read the ROCm version from $ROCM_PATH/.info/version or $ROCM_PATH/core/.info/version" >&2
             exit 1
         fi
         ROCM_MAJOR="${BASH_REMATCH[1]}"

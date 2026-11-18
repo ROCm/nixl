@@ -42,6 +42,9 @@ A ROCm installation (7.14 or 10.1) is required on the host, with its
 libraries resolvable by the dynamic loader (e.g. `/opt/rocm/lib` in
 `LD_LIBRARY_PATH`). ROCm is not bundled in the wheel.
 
+OpenSSL 3 (`libssl.so.3`) is also required on the host; distributions that
+ship only OpenSSL 1.1, such as EL8, are not supported.
+
 The ROCm version is read from an installed ROCm build of PyTorch, or from
 `$ROCM_PATH` (default `/opt/rocm`): `.info/version` or `core/.info/version`.
 If ROCm is not installed under `/opt/rocm`, e.g. only `/opt/rocm/core-<X.Y>`

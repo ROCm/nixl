@@ -47,12 +47,8 @@ class RocmPytorch(NamedTuple):
     index_url: str
 
 
-# AMD's official ROCm PyTorch build for each ROCm X.Y, pinned exactly: the
-# "+rocm" local version exists only on AMD's index, so pip can never satisfy
-# the extra with the CUDA build of torch from PyPI. Each pin must exist for
-# every Python the wheels are built for. The 7.14 pin is a ROCm 7.14.0 build
-# and brings the 7.14.0 pip ROCm runtime, while CI builds the backend against
-# ROCm 7.14.1.
+# Pinned exactly: the "+rocm" local version exists only on AMD's index, so pip
+# can never satisfy the extra with the CUDA build of torch from PyPI.
 ROCM_PYTORCH = {
     "7.14": RocmPytorch(
         torch="2.13.0+rocm7.14.0",

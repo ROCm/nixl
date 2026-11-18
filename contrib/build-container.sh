@@ -61,6 +61,7 @@ GPU_STACK="cuda"
 ROCM_VERSION=""
 WHL_BASE_SET="false"
 PROXY_CA_CERT=""
+WHEEL_OUTPUT_DIR=""
 BUILD_INFINIA="false"
 INFINIA_LIBS_IMAGE="il.artifactory.nvidia.com/sw-nbu-swx-nixl-docker-local/static/infinia-libs:v2.5.0-rcx.1"
 APT_MIRROR=""
@@ -195,6 +196,14 @@ get_options() {
         --proxy-ca-cert)
             if [ "$2" ]; then
                 PROXY_CA_CERT=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --wheel-output-dir)
+            if [ "$2" ]; then
+                WHEEL_OUTPUT_DIR=$2
                 shift
             else
                 missing_requirement "$1"
@@ -452,10 +461,10 @@ show_help() {
     echo "  [--torch-versions torch versions to build for, comma separated (default: uses Dockerfile ARG default)]"
     echo "  [--cuda-version CUDA MAJOR.MINOR for the manylinux wheel build, e.g. 12.9 (default: ${CUDA_VERSION_DEFAULT})]
   [--torch-cuda-index torch wheel index for the manylinux wheel build (default: cu132 for CUDA 13, cu<CUDA_VERSION> for CUDA 12)]
-  [--gpu-stack [cuda|rocm] GPU stack for the manylinux wheel build (default: ${GPU_STACK}); rocm builds the nixl-rocm<X>.<Y> backend wheels (merged into rocm-nixl by contrib/wheel_merge_rocm.py), is x86_64 only and requires --dockerfile contrib/Dockerfile.manylinux]
-  [--rocm-version ROCm X.Y.Z for --gpu-stack rocm, e.g. 10.1.0 or 7.14.1 (default: uses Dockerfile ARG default)]
-  [with --gpu-stack rocm, --wheel-base defaults to manylinux_2_28]
-  [--proxy-ca-cert root CA certificate (PEM file) of a TLS-intercepting proxy, passed to the build as the proxy_ca secret; requires a dockerfile that consumes it (contrib/Dockerfile.manylinux)]
+  [--gpu-stack cuda|rocm GPU stack for the manylinux wheel build (default: ${GPU_STACK}); rocm is x86_64 only and defaults --wheel-base to manylinux_2_28]
+  [--rocm-version ROCm X.Y.Z for --gpu-stack rocm, e.g. 10.1.0 (default: uses Dockerfile ARG default)]
+  [--proxy-ca-cert root CA certificate (PEM file) of a TLS-intercepting proxy, passed to the manylinux wheel build as the proxy_ca secret]
+  [--wheel-output-dir directory to write the manylinux wheels to instead of creating an image (BuildKit local output)]
   [--manylinux-image PyPA manylinux image prefix (default: ${MANYLINUX_IMAGE})]
   [--manylinux-image-tag pinned PyPA manylinux image tag (default: ${MANYLINUX_IMAGE_TAG})]"
     echo "  [--wheel-base-image pre-built wheel base image URL; skips wheel_base stage and builds only the wheel stage]"
@@ -512,7 +521,7 @@ case "$GPU_STACK" in
         if [ "$BUILD_NIXL_EP" = "true" ]; then
             error "ERROR:" "--build-nixl-ep cannot be used with --gpu-stack rocm (nixl_ep is CUDA-only)"
         fi
-        # ROCm supports distributions with glibc older than 2.39 (EL8, EL9, Ubuntu 22.04).
+        # ROCm supports distributions with glibc older than 2.39 (EL9, Ubuntu 22.04).
         if [ "$WHL_BASE_SET" = "false" ]; then
             WHL_BASE=manylinux_2_28
             WHL_PLATFORM=${WHL_BASE}_${ARCH}
@@ -531,6 +540,7 @@ if [ -n "$PROXY_CA_CERT" ]; then
         error "ERROR:" "--proxy-ca-cert requires a dockerfile that consumes the proxy_ca secret (contrib/Dockerfile.manylinux); $DOCKER_FILE does not"
     fi
     BUILD_ARGS+=" --secret id=proxy_ca,src=$(readlink -f "$PROXY_CA_CERT")"
+    BUILD_ARGS+=" --build-arg PROXY_CA_SHA256=$(sha256sum < "$PROXY_CA_CERT" | cut -d' ' -f1)"
 fi
 
 BUILD_ARGS+="${BASE_IMAGE:+ --build-arg BASE_IMAGE=$BASE_IMAGE}"
@@ -641,6 +651,13 @@ if [ -n "$WHEEL_BASE_IMAGE" ]; then
     # Not named BUILD_TARGET: Jenkins exports a BUILD_TARGET job parameter
     # (nixl/nixlbench) that would leak into the docker command line.
     DOCKER_BUILD_TARGET="--target wheel"
+fi
+
+if [ -n "$WHEEL_OUTPUT_DIR" ]; then
+    if ! grep -q '^FROM .* AS wheel_dist$' "$DOCKER_FILE"; then
+        error "ERROR:" "--wheel-output-dir requires a dockerfile with a wheel_dist stage (contrib/Dockerfile.manylinux); $DOCKER_FILE has none"
+    fi
+    DOCKER_BUILD_TARGET="--target wheel_dist --output type=local,dest=$WHEEL_OUTPUT_DIR"
 fi
 
 # Infinia DDN libs: pre-pulled from Artifactory on the host and placed flat into

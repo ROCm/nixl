@@ -526,7 +526,7 @@ def test_installed_wheel_selects_backend(venv, tmp_path, rocm_version, backend):
     env = {k: v for k, v in os.environ.items() if not k.startswith("PYTHON")}
     env.update(ROCM_PATH=str(tmp_path), PYTHONDONTWRITEBYTECODE="1")
     result = subprocess.run(
-        [str(python), "-c", "import nixl; print(nixl._api.WHERE)"],
+        [str(python), "-c", "import sys, nixl; sys.stdout.write(nixl._api.WHERE)"],
         capture_output=True,
         text=True,
         env=env,
@@ -538,6 +538,9 @@ def test_installed_wheel_selects_backend(venv, tmp_path, rocm_version, backend):
 
 def test_extra_installs_only_the_rocm_pytorch(venv, tmp_path):
     python, merged, _ = venv
+    pip_version = _pip(python, "--version").stdout.split()[1]
+    if tuple(map(int, pip_version.split(".")[:2])) < (23, 3):
+        pytest.skip(f"pip {pip_version} in the venv is older than 23.3")
     pin = wheel_merge_rocm.ROCM_PYTORCH["10.1"].torch
     public = pin.split("+")[0]
     numpy = _make_wheel(

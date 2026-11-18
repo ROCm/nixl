@@ -47,15 +47,20 @@ class _HideInstalledBackends:
         return None
 
 
+def _drop_nixl_and_torch_modules():
+    for name in list(sys.modules):
+        top = name.split(".")[0]
+        if top.startswith("nixl") or top == "torch":
+            del sys.modules[name]
+
+
 @pytest.fixture
 def env(monkeypatch, tmp_path):
     """Isolated import state: dispatcher sources plus a dir for fake backends."""
     if not META_DIR.is_dir():
         pytest.skip("NIXL source tree not available")
     saved = dict(sys.modules)
-    for name in list(sys.modules):
-        if name.split(".")[0].startswith("nixl") or name.split(".")[0] == "torch":
-            del sys.modules[name]
+    _drop_nixl_and_torch_modules()
     backends = tmp_path / "site"
     backends.mkdir()
     rocm = tmp_path / "rocm"
@@ -85,8 +90,8 @@ def env(monkeypatch, tmp_path):
         real_detect_cuda_major=real_detect_cuda_major,
     )
 
-    sys.modules.clear()
-    sys.modules.update(saved)
+    _drop_nixl_and_torch_modules()
+    sys.modules.update({k: v for k, v in saved.items() if k not in sys.modules})
 
 
 def add_backend(env, name):
@@ -108,16 +113,17 @@ def set_rocm_install(env, version, subdir=".info"):
     (info / "version").write_text(version + "\n")
 
 
-def fake_torch(monkeypatch, version, hip=None, cuda=None):
+def fake_torch(version, hip=None, cuda=None):
     torch = types.ModuleType("torch")
     torch.__version__ = version
     torch.version = types.SimpleNamespace(cuda=cuda, hip=hip)
-    monkeypatch.setitem(sys.modules, "torch", torch)
+    # The env fixture restores the real torch; monkeypatch would delete it again.
+    sys.modules["torch"] = torch
 
 
 def use_cuda_torch(env, monkeypatch):
     """A CUDA 13 PyTorch, found by the real CUDA detection."""
-    fake_torch(monkeypatch, "2.14.0+cu130", cuda="13.0")
+    fake_torch("2.14.0+cu130", cuda="13.0")
     monkeypatch.setattr(env.utils, "detect_cuda_major", env.real_detect_cuda_major)
 
 
@@ -142,8 +148,8 @@ def test_parse_rocm_version(env, text, expected):
     assert env.utils.parse_rocm_version(text) == expected
 
 
-def test_version_from_imported_torch(env, monkeypatch):
-    fake_torch(monkeypatch, "2.14.0+rocm10.1.0")
+def test_version_from_imported_torch(env):
+    fake_torch("2.14.0+rocm10.1.0")
     set_rocm_install(env, "7.14.1")
     assert env.utils.detect_rocm_version() == (10, 1)
 
@@ -155,8 +161,8 @@ def test_version_from_torch_metadata_without_importing_torch(env, monkeypatch):
     assert "torch" not in sys.modules
 
 
-def test_non_rocm_torch_falls_back_to_rocm_install(env, monkeypatch):
-    fake_torch(monkeypatch, "2.14.0+cpu")
+def test_non_rocm_torch_falls_back_to_rocm_install(env):
+    fake_torch("2.14.0+cpu")
     set_rocm_install(env, "10.1.0")
     assert env.utils.detect_rocm_version() == (10, 1)
 
@@ -240,10 +246,10 @@ def test_unknown_version_uses_installed_rocm_backend(env):
     assert selected_backend() == "nixl_rocm10_1"
 
 
-def test_unknown_version_prefers_versioned_over_legacy(env, monkeypatch):
+def test_unknown_version_prefers_versioned_over_legacy(env):
     add_backend(env, "nixl_rocm")
     add_backend(env, "nixl_rocm7_14")
-    fake_torch(monkeypatch, "2.14.0", hip="7.14")
+    fake_torch("2.14.0", hip="7.14")
     assert selected_backend() == "nixl_rocm7_14"
 
 
@@ -268,17 +274,17 @@ def test_cuda_backend_with_unsupported_rocm_keeps_upstream_selection(env):
     assert selected_backend() == "nixl_cu12"
 
 
-def test_cuda_backend_with_rocm_torch_keeps_upstream_selection(env, monkeypatch):
+def test_cuda_backend_with_rocm_torch_keeps_upstream_selection(env):
     for name in ("nixl_rocm", "nixl_rocm10_1", "nixl_cu13"):
         add_backend(env, name)
-    fake_torch(monkeypatch, "2.14.0+rocm10.1.0", hip="10.1")
+    fake_torch("2.14.0+rocm10.1.0", hip="10.1")
     assert selected_backend() == "nixl_rocm"
 
 
-def test_cuda_backend_with_rocm_torch_ignores_versioned_backend(env, monkeypatch):
+def test_cuda_backend_with_rocm_torch_ignores_versioned_backend(env):
     add_backend(env, "nixl_rocm10_1")
     add_backend(env, "nixl_cu13")
-    fake_torch(monkeypatch, "2.14.0+rocm10.1.0", hip="10.1")
+    fake_torch("2.14.0+rocm10.1.0", hip="10.1")
     assert selected_backend() == "nixl_cu13"
 
 
