@@ -62,7 +62,7 @@ env:
   GUEST_ROCM: '10.1'
   # Move together with the nonroot-user action pin, the job container image
   # and the digests in .ci/rocjitsu/fleet-overlay.xml.
-  QEMU_MINIMAL_REF: 481c892854b25935abb80892c5d16ae6bfea579e
+  QEMU_MINIMAL_REF: 45941a379b6afb4306902c1206d8d981565b5a5c # v2.0.0
   # Under /var/lib/qemu-tool because the compose bind mounts are resolved by
   # the host daemon. The compose project is the stack directory's basename.
   STACK_DIR: /var/lib/qemu-tool/stacks/nixl-rocjitsu
@@ -157,7 +157,7 @@ jobs:
 
     # Exports CIUSER_UID and CIUSER_HOME.
     - name: Run the stack as a non-root user
-      uses: sbates130272/qemu-minimal/.github/actions/nonroot-user@481c892854b25935abb80892c5d16ae6bfea579e # qemu-minimal @ 2026-11-17
+      uses: sbates130272/qemu-minimal/.github/actions/nonroot-user@45941a379b6afb4306902c1206d8d981565b5a5c # qemu-minimal v2.0.0
 
     - name: Install qemu-tool
       run: |
