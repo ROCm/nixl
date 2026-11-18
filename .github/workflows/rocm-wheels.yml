@@ -20,8 +20,10 @@ on:
       - src/plugins/rocm_ais/**
       - .ci/rocjitsu/**
       - .ci/scripts/rocm_wheel_smoke_test.py
+      - .ci/scripts/rocm_wheel_two_node_test.py
       - .github/workflows/rocm-wheels.yml
       - .github/workflows/rocm-wheels-rocjitsu.yml
+      - .github/workflows/rocm-wheels-rocjitsu-2vm.yml
   push:
     tags:
       - v*
@@ -380,3 +382,21 @@ jobs:
       rocm-version: ${{ matrix.rocm-version }}
       artifact-name: rocm-nixl-wheels
       python-version: ${{ needs.plan.outputs.test-python }}
+
+  # allow-failure: a failure here is a warning on the run, not a failed job.
+  rocjitsu-2vm:
+    name: rocjitsu two guests (ROCm ${{ matrix.rocm-version }})
+    needs: [plan, merge]
+    strategy:
+      fail-fast: false
+      matrix:
+        rocm-version: ${{ fromJSON(needs.plan.outputs.rocm-versions) }}
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/rocm-wheels-rocjitsu-2vm.yml
+    with:
+      rocm-version: ${{ matrix.rocm-version }}
+      artifact-name: rocm-nixl-wheels
+      python-version: ${{ needs.plan.outputs.test-python }}
+      allow-failure: true
