@@ -39,12 +39,69 @@ on:
         required: false
         type: string
         default: 3.10,3.11,3.12,3.13,3.14
+      ref:
+        description: Branch, tag or commit of this repository to build and test. Empty means the ref the workflow runs on.
+        required: false
+        type: string
+        default: ''
+      version-suffix:
+        description: Appended to the wheel version before building, for example .dev20261118.
+        required: false
+        type: string
+        default: ''
+  workflow_call:
+    inputs:
+      ref:
+        description: Branch, tag or commit of this repository to build and test. Empty means the ref the workflow runs on.
+        required: false
+        type: string
+        default: ''
+      python-versions:
+        description: Python versions to build for, comma-separated. Empty means every supported version.
+        required: false
+        type: string
+        default: ''
+      rocm-versions:
+        description: ROCm versions to build for, as comma-separated X.Y.Z. Empty means the default set.
+        required: false
+        type: string
+        default: ''
+      version-suffix:
+        description: Appended to the wheel version before building, for example .dev20261118.
+        required: false
+        type: string
+        default: ''
+      artifact-suffix:
+        description: Appended to the name of every artifact, so that one run can build several refs. For example -main-amd.
+        required: false
+        type: string
+        default: ''
+      run-vm-tests:
+        description: Run the rocjitsu jobs.
+        required: false
+        type: boolean
+        default: true
+    # A caller that runs this workflow in a matrix gets one leg's values only;
+    # the artifact names are the fixed forms shown here for that reason.
+    outputs:
+      supported:
+        description: Whether the ref can build ROCm wheels, as true or false.
+        value: ${{ jobs.plan.outputs.supported }}
+      version:
+        description: The wheel version built.
+        value: ${{ jobs.plan.outputs.version }}
+      wheels-artifact:
+        description: Name of the artifact holding the merged rocm-nixl wheels.
+        value: rocm-nixl-wheels${{ inputs.artifact-suffix }}
+      results-artifact:
+        description: Name of the artifact holding results.json.
+        value: rocm-results${{ inputs.artifact-suffix }}
 
 permissions:
   contents: read
 
 concurrency:
-  group: rocm-wheels-${{ github.ref }}
+  group: rocm-wheels-${{ github.ref }}${{ inputs.artifact-suffix }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -56,7 +113,43 @@ jobs:
       rocm-versions: ${{ steps.plan.outputs.rocm-versions }}
       python-versions: ${{ steps.plan.outputs.python-versions }}
       test-python: ${{ steps.plan.outputs.test-python }}
+      supported: ${{ steps.source.outputs.supported }}
+      sha: ${{ steps.source.outputs.sha }}
+      version: ${{ steps.source.outputs.version }}
+      run-vm-tests: ${{ steps.inputs.outputs.run-vm-tests }}
+      wheels-artifact: ${{ steps.inputs.outputs.wheels-artifact }}
     steps:
+      - name: Check the inputs
+        id: inputs
+        env:
+          REF: ${{ inputs.ref }}
+          VERSION_SUFFIX: ${{ inputs.version-suffix }}
+          ARTIFACT_SUFFIX: ${{ inputs.artifact-suffix }}
+          # Empty on the events that have no such input, which run the tests.
+          RUN_VM_TESTS: ${{ inputs.run-vm-tests }}
+        run: |
+          set -euo pipefail
+          if [ -n "$REF" ]; then
+            if [[ ! "$REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || [[ "$REF" == *..* ]]; then
+              echo "::error::ref must be a branch, tag or commit of this repository"
+              exit 1
+            fi
+          fi
+          if [[ ! "$VERSION_SUFFIX" =~ ^[A-Za-z0-9.]*$ ]]; then
+            echo "::error::version-suffix may hold letters, digits and dots only"
+            exit 1
+          fi
+          if [[ ! "$ARTIFACT_SUFFIX" =~ ^(-[A-Za-z0-9._-]+)?$ ]]; then
+            echo "::error::artifact-suffix must be empty or a dash followed by letters, digits, dots, underscores and dashes"
+            exit 1
+          fi
+          vm=true
+          if [ "$RUN_VM_TESTS" = "false" ]; then vm=false; fi
+          {
+            echo "run-vm-tests=${vm}"
+            echo "wheels-artifact=rocm-nixl-wheels${ARTIFACT_SUFFIX}"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Select ROCm and Python versions
         id: plan
         env:
@@ -93,9 +186,65 @@ jobs:
             echo "test-python=${TEST_PYTHON}"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      # With a ref, the workspace holds that ref's source and the CI scripts
+      # come from the commit this workflow file was read from.
+      - name: Checkout the CI files
+        if: inputs.ref != ''
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          path: ci
+          sparse-checkout: .ci
+          persist-credentials: false
+
+      - name: Check that the source can build ROCm wheels
+        id: source
+        env:
+          REF: ${{ inputs.ref }}
+          VERSION_SUFFIX: ${{ inputs.version-suffix }}
+        run: |
+          set -euo pipefail
+          ci_dir=.
+          if [ -d ci/.ci ]; then ci_dir=ci; fi
+          sha=$(git rev-parse HEAD)
+          version=$(python3 -I -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])' 2>/dev/null || true)
+          missing=""
+          if ! grep -q -- '--gpu-stack' contrib/build-container.sh 2>/dev/null; then
+            missing="contrib/build-container.sh has no --gpu-stack option"
+          elif [ ! -f contrib/wheel_merge_rocm.py ]; then
+            missing="contrib/wheel_merge_rocm.py is missing"
+          fi
+          if [ -n "$missing" ]; then
+            supported=false
+            msg="ROCm wheels skipped for ${REF:-$GITHUB_REF_NAME} (${sha:0:8}): ${missing}, so this source cannot build them yet."
+            echo "::notice title=ROCm wheels not supported::${msg}"
+            echo "${msg}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            supported=true
+            if [ -n "$VERSION_SUFFIX" ]; then
+              version=$(python3 -I "${ci_dir}/.ci/scripts/stamp_wheel_version.py" "$VERSION_SUFFIX")
+            fi
+            if [ -z "$version" ]; then
+              echo "::error::pyproject.toml has no [project] version"
+              exit 1
+            fi
+          fi
+          {
+            echo "supported=${supported}"
+            echo "sha=${sha}"
+            echo "version=${version}"
+          } >> "$GITHUB_OUTPUT"
+
   build:
     name: Build (ROCm ${{ matrix.rocm-version }})
     needs: plan
+    if: needs.plan.outputs.supported == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 300
     strategy:
@@ -116,7 +265,38 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          ref: ${{ inputs.ref != '' && needs.plan.outputs.sha || '' }}
           persist-credentials: false
+
+      - name: Checkout the CI files
+        if: inputs.ref != ''
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          path: ci
+          sparse-checkout: .ci
+          persist-credentials: false
+
+      - name: Stamp the wheel version
+        if: inputs.version-suffix != ''
+        env:
+          VERSION_SUFFIX: ${{ inputs.version-suffix }}
+          PLANNED_VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          ci_dir=.
+          if [ -d ci/.ci ]; then ci_dir=ci; fi
+          version=$(python3 -I "${ci_dir}/.ci/scripts/stamp_wheel_version.py" "$VERSION_SUFFIX")
+          if [ "$version" != "$PLANNED_VERSION" ]; then
+            echo "::error::stamped version ${version} is not the planned ${PLANNED_VERSION}"
+            exit 1
+          fi
+          git diff --stat
+
+      # The Dockerfile copies the whole workspace into the image.
+      - name: Remove the CI files from the build context
+        if: inputs.ref != ''
+        run: rm -rf ci
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -126,11 +306,13 @@ jobs:
 
       # Only the dependency stage is cached: the wheel stage starts with the
       # source tree, so its layers are never reused. A tag's cache is readable
-      # from no other ref, so tag builds only read.
+      # from no other ref, so tag builds only read. So does a build of another
+      # ref's source: every ref built by one run shares this scope, and a
+      # second copy would not fit in the repository's cache.
       - name: Build the dependency stage
         env:
           CACHE_SCOPE: rocm-wheel-base-${{ matrix.rocm-version }}
-          WRITE_CACHE: ${{ github.ref_type != 'tag' }}
+          WRITE_CACHE: ${{ github.ref_type != 'tag' && (inputs.ref == '' || needs.plan.outputs.sha == github.sha) }}
         run: |
           set -euo pipefail
           cache="--cache-from type=gha,scope=${CACHE_SCOPE}"
@@ -154,12 +336,19 @@ jobs:
             --wheel-output-dir dist
 
       - name: Check the wheels
+        env:
+          # Set only when the version was stamped.
+          STAMPED_VERSION: ${{ inputs.version-suffix != '' && needs.plan.outputs.version || '' }}
         run: |
           set -euo pipefail
           df -h /
           ls -l dist
           backend="nixl_rocm$(echo "$ROCM_VERSION" | cut -d. -f1,2 | tr . _)"
           compgen -G "dist/${backend}-*.whl" > /dev/null
+          if [ -n "$STAMPED_VERSION" ] && ! compgen -G "dist/${backend}-${STAMPED_VERSION}-*.whl" > /dev/null; then
+            echo "::error::dist/ holds no ${backend} wheel of the stamped version ${STAMPED_VERSION}"
+            exit 1
+          fi
           for wheel in dist/*.whl; do
             case "$(basename "$wheel")" in
               "${backend}"-*) ;;
@@ -173,31 +362,60 @@ jobs:
       - name: Upload the backend wheels
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: rocm-backend-wheels-${{ matrix.rocm-version }}
+          name: rocm-backend-wheels-${{ matrix.rocm-version }}${{ inputs.artifact-suffix }}
           path: dist/*.whl
           if-no-files-found: error
 
   merge:
     name: Merge
     needs: [plan, build]
+    if: needs.plan.outputs.supported == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          ref: ${{ inputs.ref != '' && needs.plan.outputs.sha || '' }}
           persist-credentials: false
 
       - name: Download the backend wheels
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: rocm-backend-wheels-*
-          merge-multiple: true
-          path: backends
+          pattern: rocm-backend-wheels-*${{ inputs.artifact-suffix }}
+          path: backend-artifacts
+
+      # The pattern also matches another ref's artifacts when its suffix ends
+      # with this one, so the artifacts are taken by their exact names.
+      - name: Collect this build's backend wheels
+        env:
+          ROCM_VERSIONS: ${{ needs.plan.outputs.rocm-versions }}
+          ARTIFACT_SUFFIX: ${{ inputs.artifact-suffix }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          mkdir backends
+          for version in $(python3 -I -c 'import json, sys; print(" ".join(json.loads(sys.argv[1])))' "$ROCM_VERSIONS"); do
+            dir="backend-artifacts/rocm-backend-wheels-${version}${ARTIFACT_SUFFIX}"
+            wheels=("$dir"/*.whl)
+            if [ "${#wheels[@]}" -eq 0 ]; then
+              # A lone matching artifact may be extracted without its directory.
+              wheels=(backend-artifacts/"nixl_rocm$(echo "$version" | cut -d. -f1,2 | tr . _)"-*.whl)
+            fi
+            if [ "${#wheels[@]}" -eq 0 ]; then
+              echo "::error::artifact rocm-backend-wheels-${version}${ARTIFACT_SUFFIX} was not downloaded or holds no wheel"
+              ls -lR backend-artifacts
+              exit 1
+            fi
+            mv "${wheels[@]}" backends/
+          done
 
       # One rocm_nixl wheel per Python tag, holding the backend of every ROCm
       # version this run built.
       - name: Merge the backends
+        env:
+          # Set only when the version was stamped.
+          STAMPED_VERSION: ${{ inputs.version-suffix != '' && needs.plan.outputs.version || '' }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -223,6 +441,17 @@ jobs:
           if [ "${#merged[@]}" -ne "$(wc -w <<< "$tags")" ]; then
             echo "::error::expected one rocm_nixl wheel per Python tag (${tags//$'\n'/ }), found ${#merged[@]}"
             exit 1
+          fi
+          if [ -n "$STAMPED_VERSION" ]; then
+            for wheel in "${merged[@]}"; do
+              case "${wheel##*/}" in
+                "rocm_nixl-${STAMPED_VERSION}-"*) ;;
+                *)
+                  echo "::error::${wheel} does not carry the stamped version ${STAMPED_VERSION}"
+                  exit 1
+                  ;;
+              esac
+            done
           fi
 
       # The extras are what keep pip from pairing rocm-nixl with PyPI's CUDA
@@ -279,13 +508,14 @@ jobs:
       - name: Upload the merged wheels
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: rocm-nixl-wheels
+          name: ${{ needs.plan.outputs.wheels-artifact }}
           path: dist-merged/rocm_nixl-*.whl
           if-no-files-found: error
 
   test:
     name: Test (ROCm ${{ matrix.rocm-version }})
     needs: [plan, merge]
+    if: needs.plan.outputs.supported == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -333,6 +563,8 @@ jobs:
             echo "LD_LIBRARY_PATH=${rocm_path}/lib"
           } >> "$GITHUB_ENV"
 
+      # Only the CI scripts are used, which always come from the commit this
+      # workflow file was read from, whatever ref the wheels were built from.
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -341,7 +573,7 @@ jobs:
       - name: Download the merged wheels
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: rocm-nixl-wheels
+          name: ${{ needs.plan.outputs.wheels-artifact }}
           path: wheelhouse
 
       # numpy is the only package taken from an index. The wheel is resolved
@@ -364,12 +596,22 @@ jobs:
 
       - name: Run the smoke test
         run: |
+          mkdir -p check-results
           env -u NIXL_PLUGIN_DIR venv/bin/python .ci/scripts/rocm_wheel_smoke_test.py \
-            --expect-rocm "$ROCM_XY"
+            --expect-rocm "$ROCM_XY" --json-out check-results/smoke.json
+
+      - name: Upload the test results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rocm-check-results-test-${{ matrix.rocm-version }}${{ inputs.artifact-suffix }}
+          path: check-results/*.json
+          if-no-files-found: ignore
 
   rocjitsu:
     name: rocjitsu (ROCm ${{ matrix.rocm-version }})
     needs: [plan, merge]
+    if: needs.plan.outputs.supported == 'true' && needs.plan.outputs.run-vm-tests == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -380,13 +622,15 @@ jobs:
     uses: ./.github/workflows/rocm-wheels-rocjitsu.yml
     with:
       rocm-version: ${{ matrix.rocm-version }}
-      artifact-name: rocm-nixl-wheels
+      artifact-name: ${{ needs.plan.outputs.wheels-artifact }}
       python-version: ${{ needs.plan.outputs.test-python }}
+      artifact-suffix: ${{ inputs.artifact-suffix }}
 
   # allow-failure: a failure here is a warning on the run, not a failed job.
   rocjitsu-2vm:
     name: rocjitsu two guests (ROCm ${{ matrix.rocm-version }})
     needs: [plan, merge]
+    if: needs.plan.outputs.supported == 'true' && needs.plan.outputs.run-vm-tests == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -397,6 +641,200 @@ jobs:
     uses: ./.github/workflows/rocm-wheels-rocjitsu-2vm.yml
     with:
       rocm-version: ${{ matrix.rocm-version }}
-      artifact-name: rocm-nixl-wheels
+      artifact-name: ${{ needs.plan.outputs.wheels-artifact }}
       python-version: ${{ needs.plan.outputs.test-python }}
       allow-failure: true
+      artifact-suffix: ${{ inputs.artifact-suffix }}
+
+  # Runs whatever happened above, including for a ref that cannot build ROCm
+  # wheels, so that a caller always finds one results.json per ref.
+  results:
+    name: Results
+    needs: [plan, build, merge, test, rocjitsu, rocjitsu-2vm]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Download the merged wheels
+        if: needs.merge.result == 'success'
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.plan.outputs.wheels-artifact }}
+          path: wheels
+
+      - name: Download the test results
+        if: needs.plan.outputs.supported == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: rocm-check-results-*${{ inputs.artifact-suffix }}
+          path: check-results
+
+      # The needs context has each job's result but not how long it took.
+      - name: List this run's jobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}/jobs?per_page=100" \
+            --jq '.jobs[] | {id, name, conclusion, started_at, completed_at} | @json' > jobs.jsonl \
+            || { echo "::warning::could not list the run's jobs; durations are left out"; : > jobs.jsonl; }
+          wc -l jobs.jsonl
+
+      - name: Write results.json
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          REF: ${{ inputs.ref }}
+          ARTIFACT_SUFFIX: ${{ inputs.artifact-suffix }}
+          CHECK_RUN_ID: ${{ job.check_run_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          python3 -I - <<'EOF'
+          import datetime
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import re
+          import zipfile
+
+          # Job id to the start of its name in the jobs API; a matrix or a
+          # called workflow adds the rest.
+          JOBS = {
+              "plan": "Plan",
+              "build": "Build (",
+              "merge": "Merge",
+              "test": "Test (",
+              "rocjitsu": "rocjitsu (",
+              "rocjitsu-2vm": "rocjitsu two guests (",
+          }
+          OWN_NAME = "Results"
+
+          needs = json.loads(os.environ["NEEDS"])
+          plan = (needs.get("plan") or {}).get("outputs") or {}
+          suffix = os.environ.get("ARTIFACT_SUFFIX", "")
+          ref = os.environ.get("REF") or os.environ["GITHUB_REF_NAME"]
+          supported = plan.get("supported") == "true"
+          try:
+              rocm_versions = json.loads(plan.get("rocm-versions") or "[]")
+          except ValueError:
+              rocm_versions = []
+
+
+          def when(stamp):
+              if not stamp:
+                  return None
+              return datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+
+
+          # A job of a called workflow is listed as "<caller job> / <name>".
+          # This job's own entry gives the caller's part, which is what tells
+          # this call's jobs from those of the other calls in the same run.
+          listed = [json.loads(line) for line in pathlib.Path("jobs.jsonl").read_text().splitlines() if line.strip()]
+          own = [j for j in listed if str(j["id"]) == os.environ.get("CHECK_RUN_ID", "")]
+          prefix = None
+          if own and own[0]["name"].endswith(OWN_NAME):
+              prefix = own[0]["name"][: -len(OWN_NAME)]
+          elif listed:
+              print("::warning::this job is not in the run's job list; durations are left out")
+
+
+          def duration(start_of_name):
+              if prefix is None:
+                  return None
+              spans = []
+              for job in listed:
+                  if not job["name"].startswith(prefix) or job["conclusion"] in (None, "skipped"):
+                      continue
+                  name = job["name"][len(prefix):]
+                  if start_of_name.endswith("("):
+                      mine = name.startswith(start_of_name)
+                  else:
+                      mine = name == start_of_name
+                  if not mine:
+                      continue
+                  start, end = when(job["started_at"]), when(job["completed_at"])
+                  if start and end:
+                      spans.append((start, end))
+              if not spans:
+                  return None
+              return round((max(e for _, e in spans) - min(s for s, _ in spans)).total_seconds(), 1)
+
+
+          jobs = [
+              {"name": name, "result": (needs.get(name) or {}).get("result"), "duration_s": duration(start)}
+              for name, start in JOBS.items()
+          ]
+
+          wheels = []
+          for path in sorted(pathlib.Path("wheels").glob("*.whl")):
+              digest = hashlib.sha256()
+              with open(path, "rb") as stream:
+                  for block in iter(lambda: stream.read(1 << 20), b""):
+                      digest.update(block)
+              with zipfile.ZipFile(path) as wheel:
+                  rocm = sorted(
+                      {m.group(1).replace("_", ".") for n in wheel.namelist() if (m := re.match(r"nixl_rocm(\d+_\d+)/", n))},
+                      key=lambda xy: [int(part) for part in xy.split(".")],
+                  )
+              tag = re.search(r"-cp(\d)(\d+)-", path.name)
+              wheels.append(
+                  {
+                      "file": path.name,
+                      "bytes": path.stat().st_size,
+                      "sha256": digest.hexdigest(),
+                      "python": f"{tag.group(1)}.{tag.group(2)}" if tag else None,
+                      "rocm": rocm,
+                  }
+              )
+
+          tests = []
+          for job in ("test", "rocjitsu", "rocjitsu-2vm"):
+              for version in rocm_versions:
+                  directory = pathlib.Path("check-results") / f"rocm-check-results-{job}-{version}{suffix}"
+                  for path in sorted(directory.glob("*.json")):
+                      try:
+                          record = json.loads(path.read_text())
+                          entry = {
+                              "job": job,
+                              "rocm": version,
+                              "script": record.get("script"),
+                              "checks": record.get("checks") or [],
+                          }
+                      except (ValueError, AttributeError) as exc:
+                          print(f"::warning::{path} is not a test result: {exc}")
+                          continue
+                      # One script, several runs: the stage and the role.
+                      if job == "rocjitsu-2vm":
+                          entry["label"] = path.stem
+                      tests.append(entry)
+
+          results = {
+              "schema": 1,
+              "ref": ref,
+              "sha": plan.get("sha") or None,
+              "version": plan.get("version") or None,
+              "workflow_run_id": int(os.environ["GITHUB_RUN_ID"]),
+              "supported": supported,
+              "jobs": jobs,
+              "wheels": wheels,
+              "tests": tests,
+          }
+          pathlib.Path("results/results.json").write_text(json.dumps(results, indent=1) + "\n")
+          print(
+              f"{ref}: supported={supported}, {len(wheels)} wheel(s), {len(tests)} test result file(s), "
+              + ", ".join(f"{j['name']}={j['result']}" for j in jobs)
+          )
+          EOF
+
+      - name: Upload the results
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rocm-results${{ inputs.artifact-suffix }}
+          path: results/results.json
+          if-no-files-found: error
