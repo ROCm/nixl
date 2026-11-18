@@ -1,0 +1,463 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: AMD Nightly
+
+# Resyncs the mirror branch with upstream, builds and tests the ROCm wheels of
+# each branch in .github/amd-nightly-branches.txt, and publishes the results to
+# the gh-pages branch. See .ci/docs/amd-ci.md.
+
+on:
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+    inputs:
+      branches:
+        description: Branches to build and test, separated by spaces. Empty means the list in .github/amd-nightly-branches.txt.
+        required: false
+        type: string
+        default: ''
+      skip-sync:
+        description: Do not resync main with upstream.
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: amd-nightly
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_URL: https://github.com/ai-dynamo/nixl.git
+
+# Every job carries the same guard, so that a copy of this file in another
+# repository does nothing on its schedule. A scheduled run has no inputs.
+jobs:
+  sync:
+    name: Sync with upstream
+    if: ${{ (vars.AMD_NIGHTLY_ENABLED == 'true' || github.event_name == 'workflow_dispatch') && !(github.event_name == 'workflow_dispatch' && inputs.skip-sync) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # main-amd is never pushed to: what it lacks reaches it as a pull request
+      # that a maintainer merges. The pushes below are a fast-forward of the
+      # mirror and updates of the pull request's head branch.
+      - name: Fast-forward main and open the pull request into main-amd
+        env:
+          # A secret cannot be tested in a job's "if".
+          SYNC_TOKEN: ${{ secrets.AMD_SYNC_TOKEN }}
+          ORIGIN_URL: https://github.com/${{ github.repository }}.git
+          MIRROR: main
+          TARGET: main-amd
+          HEAD_BRANCH: amd-sync/upstream-main
+        run: |
+          set -euo pipefail
+          if [ -z "${SYNC_TOKEN:-}" ]; then
+            echo "::warning title=Sync skipped::the secret AMD_SYNC_TOKEN is not set, so ${MIRROR} was not resynced with upstream. The branches are tested as they are."
+            exit 0
+          fi
+          fail() {
+            echo "::error title=Sync failed::$1"
+            exit 1
+          }
+
+          # The token goes to this repository only, and into neither a URL nor
+          # a command line.
+          header=$(printf 'x-access-token:%s' "$SYNC_TOKEN" | base64 -w0)
+          echo "::add-mask::${header}"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0="http.${ORIGIN_URL}.extraheader"
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${header}"
+          export GIT_TERMINAL_PROMPT=0
+          export GH_TOKEN="$SYNC_TOKEN"
+
+          git init -q "${RUNNER_TEMP}/sync"
+          cd "${RUNNER_TEMP}/sync"
+          git remote add origin "$ORIGIN_URL"
+          git remote add upstream "$UPSTREAM_URL"
+          git fetch -q --no-tags upstream "+refs/heads/main:refs/remotes/upstream/main" \
+            || fail "could not fetch main from ${UPSTREAM_URL}"
+          git fetch -q --no-tags origin "+refs/heads/${MIRROR}:refs/remotes/origin/${MIRROR}" \
+            || fail "could not fetch ${MIRROR} from this repository; check that AMD_SYNC_TOKEN is valid and can read it"
+
+          upstream_sha=$(git rev-parse refs/remotes/upstream/main)
+          mirror_sha=$(git rev-parse "refs/remotes/origin/${MIRROR}")
+          if [ "$mirror_sha" = "$upstream_sha" ]; then
+            echo "${MIRROR} is already at upstream main (${upstream_sha})"
+          elif git merge-base --is-ancestor "$mirror_sha" "$upstream_sha"; then
+            # Not forced: the server refuses anything but a fast-forward.
+            git push -q origin "${upstream_sha}:refs/heads/${MIRROR}" \
+              || fail "could not fast-forward ${MIRROR} to ${upstream_sha}. Upstream commits change workflow files, so AMD_SYNC_TOKEN needs the Workflows permission as well as Contents. Nothing was changed."
+            echo "::notice title=Sync::${MIRROR} fast-forwarded from ${mirror_sha:0:8} to upstream main ${upstream_sha:0:8}"
+          else
+            fail "${MIRROR} (${mirror_sha:0:8}) has commits that upstream main (${upstream_sha:0:8}) lacks. ${MIRROR} is a mirror and must hold none of its own; nothing was changed."
+          fi
+
+          git fetch -q --no-tags origin "+refs/heads/${TARGET}:refs/remotes/origin/${TARGET}" \
+            || fail "this repository has no ${TARGET} branch; see the bootstrap steps in .ci/docs/amd-ci.md"
+          target_sha=$(git rev-parse "refs/remotes/origin/${TARGET}")
+          behind=$(git rev-list --count "${target_sha}..${upstream_sha}")
+          if [ "$behind" -eq 0 ]; then
+            echo "${TARGET} already has every commit of ${MIRROR}"
+            exit 0
+          fi
+
+          # The pull request's head is a branch of its own so that a maintainer
+          # can resolve conflicts on it without touching the mirror.
+          head_sha=""
+          if git fetch -q --no-tags origin "+refs/heads/${HEAD_BRANCH}:refs/remotes/origin/${HEAD_BRANCH}" 2>/dev/null; then
+            head_sha=$(git rev-parse "refs/remotes/origin/${HEAD_BRANCH}")
+          fi
+          rejected="could not update ${HEAD_BRANCH}; AMD_SYNC_TOKEN needs the Contents and Workflows permissions"
+          if [ -z "$head_sha" ]; then
+            git push -q origin "${upstream_sha}:refs/heads/${HEAD_BRANCH}" || fail "$rejected"
+            echo "${HEAD_BRANCH} created at ${upstream_sha}"
+          elif [ "$head_sha" = "$upstream_sha" ]; then
+            echo "${HEAD_BRANCH} is already at ${upstream_sha}"
+          elif git merge-base --is-ancestor "$head_sha" "$upstream_sha"; then
+            git push -q origin "${upstream_sha}:refs/heads/${HEAD_BRANCH}" || fail "$rejected"
+            echo "${HEAD_BRANCH} fast-forwarded to ${upstream_sha}"
+          elif git merge-base --is-ancestor "$head_sha" "$target_sha"; then
+            # Left over from a pull request that was merged with a maintainer's
+            # commits on it. All of it is in the target, so nothing is lost.
+            git push -q --force-with-lease="refs/heads/${HEAD_BRANCH}:${head_sha}" \
+              origin "${upstream_sha}:refs/heads/${HEAD_BRANCH}" || fail "$rejected"
+            echo "${HEAD_BRANCH} moved from ${head_sha} (already merged into ${TARGET}) to ${upstream_sha}"
+          else
+            echo "::warning title=Sync::${HEAD_BRANCH} (${head_sha:0:8}) has commits that are in neither ${MIRROR} nor ${TARGET}, so it was left as it is. Merge its pull request, or merge ${MIRROR} into it by hand, to pick up the ${behind} commit(s) ${TARGET} lacks."
+          fi
+
+          open=$(gh api -X GET "repos/${GITHUB_REPOSITORY}/pulls" \
+            -f state=open -f base="$TARGET" -f head="${GITHUB_REPOSITORY_OWNER}:${HEAD_BRANCH}" \
+            --jq '.[0].number // empty') \
+            || fail "could not list the pull requests; AMD_SYNC_TOKEN needs the Pull requests permission"
+          if [ -n "$open" ]; then
+            echo "::notice title=Sync::pull request #${open} into ${TARGET} is open and carries the ${behind} upstream commit(s) ${TARGET} lacks"
+            exit 0
+          fi
+          body="Upstream main has commits that \`${TARGET}\` lacks. The AMD Nightly workflow opened this pull request and keeps \`${HEAD_BRANCH}\` at the tip of \`${MIRROR}\` until it is merged.
+
+          - Merge it with a merge commit. A squash or a rebase leaves \`${TARGET}\` without the upstream commits themselves, and the next night opens the same pull request again.
+          - To resolve a conflict, merge \`${TARGET}\` into \`${HEAD_BRANCH}\` and push. The workflow then leaves the branch alone until this pull request is merged.
+          - Nothing merges, approves or auto-merges this pull request for you."
+          url=$(gh pr create --repo "$GITHUB_REPOSITORY" --base "$TARGET" --head "$HEAD_BRANCH" \
+            --title "Sync upstream main into ${TARGET}" --body "$body") \
+            || fail "could not open the pull request from ${HEAD_BRANCH} into ${TARGET}; AMD_SYNC_TOKEN needs the Pull requests permission"
+          echo "::notice title=Sync::opened ${url} with the ${behind} upstream commit(s) ${TARGET} lacks"
+
+  # Runs whatever the sync did: the branches are tested as they are.
+  branches:
+    name: Select the branches
+    needs: sync
+    if: ${{ !cancelled() && (vars.AMD_NIGHTLY_ENABLED == 'true' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+      branches: ${{ steps.select.outputs.branches }}
+      date: ${{ steps.select.outputs.date }}
+      stamp: ${{ steps.select.outputs.stamp }}
+      upstream-sha: ${{ steps.select.outputs.upstream-sha }}
+    steps:
+      - name: Read the branch list
+        id: select
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OVERRIDE: ${{ inputs.branches }}
+          LIST_FILE: .github/amd-nightly-branches.txt
+          MAX_BRANCHES: 6
+        run: |
+          set -euo pipefail
+          if [ -n "${OVERRIDE//[[:space:]]/}" ]; then
+            echo "using the branches given when the run was started"
+            tr -s '[:space:]' '\n' <<< "$OVERRIDE" > list.txt
+          else
+            default_branch=$(gh api "repos/${GITHUB_REPOSITORY}" --jq .default_branch)
+            echo "reading ${LIST_FILE} of ${default_branch}"
+            if ! gh api -H 'Accept: application/vnd.github.raw' \
+                "repos/${GITHUB_REPOSITORY}/contents/${LIST_FILE}?ref=${default_branch}" > list.txt; then
+              echo "::error::${LIST_FILE} could not be read from ${default_branch}"
+              exit 1
+            fi
+          fi
+
+          # The names end up in artifact names, release tags and paths, so only
+          # plain ones are accepted, and a rejected name is never echoed.
+          entries='[]'
+          number=0
+          while IFS= read -r line || [ -n "$line" ]; do
+            number=$((number + 1))
+            line=${line%%#*}
+            branch=$(tr -d '[:space:]' <<< "$line")
+            if [ -z "$branch" ]; then continue; fi
+            if [[ ! "$branch" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$ ]] \
+                || [[ "$branch" == *..* || "$branch" == *//* || "$branch" == */ || "$branch" == *.lock ]]; then
+              echo "::error::entry ${number} of the branch list is not a branch name this workflow accepts (letters, digits, '.', '_', '-' and '/')"
+              exit 1
+            fi
+            slug=${branch//\//-}
+            if jq -e --arg s "$slug" 'any(.[]; .slug == $s)' <<< "$entries" > /dev/null; then
+              echo "::error::${branch} is listed twice, or shares the name ${slug} with another branch once '/' becomes '-'"
+              exit 1
+            fi
+            if ! sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${branch}" --jq .object.sha 2>/dev/null) \
+                || [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::warning title=Branch skipped::${branch} is in the branch list but is not a branch of this repository"
+              continue
+            fi
+            entries=$(jq -c --arg b "$branch" --arg s "$slug" --arg h "$sha" \
+              '. + [{branch: $b, slug: $s, sha: $h}]' <<< "$entries")
+          done < list.txt
+
+          count=$(jq length <<< "$entries")
+          if [ "$count" -eq 0 ]; then
+            echo "::error::the branch list names no branch of this repository"
+            exit 1
+          fi
+          if [ "$count" -gt "$MAX_BRANCHES" ]; then
+            echo "::error::the branch list names ${count} branches; at most ${MAX_BRANCHES} are built in one run"
+            exit 1
+          fi
+          jq -r '.[] | "\(.branch) -> \(.slug) at \(.sha)"' <<< "$entries"
+
+          upstream_sha=$(git ls-remote "$UPSTREAM_URL" refs/heads/main | cut -f1 || true)
+          {
+            echo "matrix={\"include\":${entries}}"
+            echo "branches=${entries}"
+            echo "date=$(date -u +%Y%m%d)"
+            echo "stamp=$(date -u +%Y%m%dT%H%M%SZ)"
+            echo "upstream-sha=${upstream_sha}"
+          } >> "$GITHUB_OUTPUT"
+
+  # actions: read is what the called workflow's rocjitsu and results jobs ask
+  # for; a called workflow cannot be given more than its caller has.
+  wheels:
+    name: wheels (${{ matrix.slug }})
+    needs: branches
+    if: ${{ !cancelled() && needs.branches.result == 'success' && (vars.AMD_NIGHTLY_ENABLED == 'true' || github.event_name == 'workflow_dispatch') }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.branches.outputs.matrix) }}
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/rocm-wheels.yml
+    with:
+      ref: ${{ matrix.branch }}
+      python-versions: 3.10,3.11,3.12,3.13,3.14
+      version-suffix: .dev${{ needs.branches.outputs.date }}
+      artifact-suffix: -${{ matrix.slug }}
+      run-vm-tests: true
+
+  report:
+    name: Report
+    needs: [sync, branches, wheels]
+    if: ${{ always() && (vars.AMD_NIGHTLY_ENABLED == 'true' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pages: read
+    # Shared with every other job that pushes to gh-pages.
+    concurrency:
+      group: gh-pages
+      cancel-in-progress: false
+    env:
+      # A branch is reported as passed when it can build ROCm wheels and each
+      # of these jobs of its wheel workflow succeeded. rocjitsu-2vm is not
+      # here: it is allowed to fail.
+      REQUIRED_JOBS: plan build merge test rocjitsu
+    steps:
+      - name: Checkout the CI scripts
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          sparse-checkout: .ci/scripts
+          persist-credentials: false
+
+      - name: Download the results of every branch
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: rocm-results-*
+          path: results
+
+      - name: Write nightly-summary.json
+        id: summary
+        env:
+          BRANCHES: ${{ needs.branches.outputs.branches }}
+          STAMP: ${{ needs.branches.outputs.stamp }}
+          UPSTREAM_SHA: ${{ needs.branches.outputs.upstream-sha }}
+          SYNC_RESULT: ${{ needs.sync.result }}
+        run: |
+          set -euo pipefail
+          python3 -I - <<'EOF'
+          import datetime
+          import json
+          import os
+          import pathlib
+
+          required = os.environ["REQUIRED_JOBS"].split()
+          stamp = os.environ.get("STAMP") or datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+          try:
+              listed = json.loads(os.environ.get("BRANCHES") or "[]")
+          except ValueError:
+              listed = []
+
+          branches = []
+          failed = []
+          for item in listed:
+              slug = item["slug"]
+              entry = {
+                  "branch": item["branch"],
+                  "slug": slug,
+                  "sha": item["sha"],
+                  "passed": False,
+                  "reason": None,
+                  "wheels_artifact": f"rocm-nixl-wheels-{slug}",
+                  "results": None,
+              }
+              path = pathlib.Path("results") / f"rocm-results-{slug}" / "results.json"
+              try:
+                  results = json.loads(path.read_text())
+              except (OSError, ValueError):
+                  results = None
+              if not isinstance(results, dict):
+                  entry["reason"] = "no results artifact"
+              else:
+                  entry["results"] = results
+                  entry["sha"] = results.get("sha") or entry["sha"]
+                  jobs = {job.get("name"): job.get("result") for job in results.get("jobs") or []}
+                  bad = [f"{name} {jobs.get(name) or 'did not run'}" for name in required if jobs.get(name) != "success"]
+                  if results.get("supported") is not True and jobs.get("plan") == "success":
+                      entry["reason"] = "the branch cannot build ROCm wheels yet"
+                  elif bad:
+                      entry["reason"] = "; ".join(bad)
+                  elif not results.get("wheels"):
+                      entry["reason"] = "no wheels"
+                  else:
+                      entry["passed"] = True
+              # A branch that cannot build ROCm wheels yet is not a failure.
+              unsupported = entry["reason"] == "the branch cannot build ROCm wheels yet"
+              if not entry["passed"] and not unsupported:
+                  failed.append(entry["branch"])
+              branches.append(entry)
+
+          summary = {
+              "schema": 1,
+              "run_id": int(os.environ["GITHUB_RUN_ID"]),
+              "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "stamp": stamp,
+              "upstream_main_sha": os.environ.get("UPSTREAM_SHA") or None,
+              "sync": os.environ.get("SYNC_RESULT") or None,
+              "branches": branches,
+          }
+          pathlib.Path("nightly-summary.json").write_text(json.dumps(summary, indent=1) + "\n")
+
+          lines = ["| Branch | Commit | Version | Result |", "| --- | --- | --- | --- |"]
+          for entry in branches:
+              version = (entry["results"] or {}).get("version") or ""
+              result = "passed" if entry["passed"] else entry["reason"]
+              lines.append(f"| `{entry['branch']}` | `{(entry['sha'] or '')[:8]}` | {version} | {result} |")
+          if not branches:
+              lines = ["No branch was selected, so nothing was built."]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as stream:
+              stream.write("\n".join(lines) + "\n")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
+              stream.write(f"stamp={stamp}\n")
+              stream.write(f"failed={' '.join(failed)}\n")
+              stream.write(f"branches={len(branches)}\n")
+          EOF
+
+      - name: Upload the summary
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: amd-nightly-summary
+          path: nightly-summary.json
+          if-no-files-found: error
+
+      # A commit on top of gh-pages, never a forced push, and only this job's
+      # own paths are staged. Another publisher may push in between, so the
+      # whole step is tried twice from a fresh clone.
+      - name: Publish to gh-pages
+        env:
+          PAGES_TOKEN: ${{ github.token }}
+          STAMP: ${{ steps.summary.outputs.stamp }}
+          SITE_URL: https://github.com/${{ github.repository }}.git
+        run: |
+          set -euo pipefail
+          header=$(printf 'x-access-token:%s' "$PAGES_TOKEN" | base64 -w0)
+          echo "::add-mask::${header}"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0="http.${SITE_URL}.extraheader"
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${header}"
+          export GIT_TERMINAL_PROMPT=0
+          export GIT_AUTHOR_NAME="github-actions[bot]"
+          export GIT_AUTHOR_EMAIL="41898282+github-actions[bot]@users.noreply.github.com"
+          export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+          export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+          tool="${GITHUB_WORKSPACE}/.ci/scripts/amd_results_site.py"
+          summary="${GITHUB_WORKSPACE}/nightly-summary.json"
+
+          for attempt in 1 2; do
+            site="${RUNNER_TEMP}/site-${attempt}"
+            if git ls-remote --exit-code --heads "$SITE_URL" gh-pages > /dev/null; then
+              git clone -q --branch gh-pages --single-branch "$SITE_URL" "$site"
+            else
+              echo "creating the gh-pages branch"
+              git init -q "$site"
+              git -C "$site" remote add origin "$SITE_URL"
+              git -C "$site" checkout -q --orphan gh-pages
+            fi
+            if [ ! -f "$site/.nojekyll" ]; then : > "$site/.nojekyll"; fi
+            python3 -I "$tool" add --site "$site" --summary "$summary"
+            python3 -I "$tool" render --site "$site"
+            git -C "$site" add .nojekyll index.html data/nightly
+            deleted=$(git -C "$site" diff --cached --name-only --diff-filter=D)
+            if [ -n "$deleted" ]; then
+              echo "::error::publishing would delete files from gh-pages; nothing was pushed"
+              echo "$deleted"
+              exit 1
+            fi
+            if git -C "$site" diff --cached --quiet; then
+              echo "gh-pages already holds this run"
+              break
+            fi
+            git -C "$site" commit -q -m "data: add nightly run ${STAMP}"
+            if git -C "$site" push -q origin HEAD:refs/heads/gh-pages; then
+              break
+            fi
+            if [ "$attempt" -eq 2 ]; then
+              echo "::error::the push to gh-pages was refused twice"
+              exit 1
+            fi
+            echo "::warning::the push to gh-pages was refused; trying once more from a fresh clone"
+            sleep 15
+          done
+
+      - name: Check that the site is being served
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if url=$(gh api "repos/${GITHUB_REPOSITORY}/pages" --jq .html_url 2>/dev/null); then
+            echo "Results site: ${url}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning title=Pages::could not confirm that GitHub Pages is serving this repository's gh-pages branch. The data was pushed, but an administrator has to enable Pages once (Settings > Pages > Deploy from a branch > gh-pages, /)."
+          fi
+
+      - name: Fail if a branch did not pass
+        env:
+          FAILED: ${{ steps.summary.outputs.failed }}
+          BRANCHES: ${{ steps.summary.outputs.branches }}
+        run: |
+          if [ "${BRANCHES:-0}" = "0" ]; then
+            echo "::error::no branch was built; see the 'Select the branches' job"
+            exit 1
+          fi
+          if [ -n "$FAILED" ]; then
+            echo "::error::did not pass: ${FAILED}"
+            exit 1
+          fi

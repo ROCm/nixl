@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Branches of this repository that the AMD Nightly workflow builds and tests,
+# one per line. The copy on the default branch is the one that is read.
+# See .ci/docs/amd-ci.md.
+main-amd
+main
