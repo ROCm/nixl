@@ -12,14 +12,16 @@ on:
 
 jobs:
   request:
+    # NVSkills CI reports only to ai-dynamo; elsewhere its status never arrives and the job fails.
     if: >
-      github.event_name == 'pull_request' ||
+      github.repository == 'ai-dynamo/nixl' &&
+      (github.event_name == 'pull_request' ||
       (github.event_name == 'issue_comment' &&
         github.event.issue.pull_request &&
         startsWith(github.event.comment.body, '/nvskills-ci')) ||
       (github.event_name == 'push' &&
         github.actor == (vars.NVSKILLS_SIGNATURE_PUSH_ACTOR || 'nv-skills-ci[bot]') &&
-        startsWith(github.event.head_commit.message, vars.NVSKILLS_SIGNATURE_COMMIT_TITLE || 'Attach NVSkills validation signatures'))
+        startsWith(github.event.head_commit.message, vars.NVSKILLS_SIGNATURE_COMMIT_TITLE || 'Attach NVSkills validation signatures')))
     permissions:
       contents: read
       pull-requests: read

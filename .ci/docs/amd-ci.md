@@ -189,10 +189,13 @@ the mirror moves. Disable the ones that cannot work here:
 gh workflow disable aws_efa_validation.yml
 gh workflow disable build_validation.yml
 gh workflow disable fern-check.yml
-gh workflow disable request-nvskills-ci.yml
 ```
 
 `pre-commit.yml` also runs on every push and can be left on or disabled.
+
+Upstream's `Request NVSkills CI` is skipped in the fork: it waits for a status
+that NVIDIA's service reports only to upstream, and would fail every pull
+request that changes `skills/`, an upstream sync included.
 
 Upstream's `copyright-checks` is skipped in the fork, which cannot pull its
 container image. `AMD Copyright Checks`
