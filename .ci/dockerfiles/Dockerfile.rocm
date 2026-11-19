@@ -204,7 +204,7 @@ RUN pip3 --no-cache-dir install --break-system-packages \
 # The wheel's local-version tag (+rocmX.Y.Z) is version-embedded, so we derive X.Y.Z from
 # the base image's ROCm install (/opt/rocm/core/.info/version, "X.Y.Z" with an optional
 # "-<build>" suffix). TORCH_VERSION/TORCH_INDEX_URL must name a torch that exists for
-# that ROCm version (docs/rocm-ci.md has the ROCm 10.1 values).
+# that ROCm version (docs/rocm-ci.md has the ROCm 10.1 and 10.2 values).
 ARG TORCH_VERSION=2.11.0
 ARG TORCH_INDEX_URL=https://repo.amd.com/rocm/whl-multi-arch/
 RUN set -eux; \
