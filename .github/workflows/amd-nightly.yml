@@ -168,7 +168,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           OVERRIDE: ${{ inputs.branches }}
           LIST_FILE: .github/amd-nightly-branches.txt
-          MAX_BRANCHES: 6
+          MAX_BRANCHES: 12
         run: |
           set -euo pipefail
           if [ -n "${OVERRIDE//[[:space:]]/}" ]; then
@@ -299,7 +299,11 @@ jobs:
     permissions:
       contents: write
       pages: read
-    # Shared with every other job that pushes to gh-pages.
+    # Runs the jobs of this repository that name this group one at a time. One
+    # more may wait; a third would cancel the one waiting, so a new gh-pages
+    # writer takes a group of its own. It is not what keeps gh-pages
+    # consistent: the push below is never forced, so a writer that lost the
+    # race is refused and starts again.
     concurrency:
       group: gh-pages
       cancel-in-progress: false
@@ -418,8 +422,10 @@ jobs:
           if-no-files-found: error
 
       # A commit on top of gh-pages, never a forced push, and only this job's
-      # own paths are staged. Another publisher may push in between, so the
-      # whole step is tried twice from a fresh clone.
+      # own paths are staged. Another publisher may push in between, whether or
+      # not it shares the concurrency group, so the whole step is tried up to
+      # five times, each from a fresh shallow clone and after a random pause
+      # that keeps two refused writers from colliding again.
       - name: Publish to gh-pages
         env:
           PAGES_TOKEN: ${{ github.token }}
@@ -440,10 +446,11 @@ jobs:
           tool="${GITHUB_WORKSPACE}/.ci/scripts/amd_results_site.py"
           summary="${GITHUB_WORKSPACE}/nightly-summary.json"
 
-          for attempt in 1 2; do
+          attempts=5
+          for attempt in $(seq "$attempts"); do
             site="${RUNNER_TEMP}/site-${attempt}"
             if git ls-remote --exit-code --heads "$SITE_URL" gh-pages > /dev/null; then
-              git clone -q --branch gh-pages --single-branch "$SITE_URL" "$site"
+              git clone -q --depth 1 --branch gh-pages --single-branch "$SITE_URL" "$site"
             else
               echo "creating the gh-pages branch"
               git init -q "$site"
@@ -468,12 +475,13 @@ jobs:
             if git -C "$site" push -q origin HEAD:refs/heads/gh-pages; then
               break
             fi
-            if [ "$attempt" -eq 2 ]; then
-              echo "::error::the push to gh-pages was refused twice"
+            if [ "$attempt" -eq "$attempts" ]; then
+              echo "::error::the push to gh-pages was refused on each of ${attempts} attempts; nothing was published"
               exit 1
             fi
-            echo "::warning::the push to gh-pages was refused; trying once more from a fresh clone"
-            sleep 15
+            delay=$((5 + RANDOM % 20))
+            echo "::warning::gh-pages refused the push (attempt ${attempt} of ${attempts}); trying again in ${delay}s"
+            sleep "$delay"
           done
 
       - name: Check that the site is being served

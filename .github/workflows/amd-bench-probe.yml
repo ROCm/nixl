@@ -1,0 +1,1494 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: AMD Bench Probe
+
+# Answers the questions the nightly nixlbench lanes are designed around that
+# need no nixlbench binary: what the rocjitsu guest and the runner offer, whether
+# the emulated NIC's loopback, nvmeof and s3 backends can be selected and used
+# in the one-guest stack, and whether a job container may use io_uring.
+#
+# Started by hand only. Nothing needs its jobs and it publishes nothing: each
+# job writes a table to its summary and uploads a JSON artifact.
+#
+# The two VM jobs boot the stack as rocm-wheels-rocjitsu.yml does, and their
+# boot, diagnostics and teardown steps are copies of that workflow's; change
+# them together. The external dependencies are that workflow's too:
+#   - github.com/sbates130272/qemu-minimal at QEMU_MINIMAL_REF: qemu-tool, the
+#     rocm-golden fleet file and the nonroot-user action.
+#   - The Docker Hub images under docker.io/sbates130272 that the overlays in
+#     .ci/rocjitsu pin by digest; the QEMU image is also the job container.
+
+on:
+  workflow_dispatch:
+    inputs:
+      probes:
+        description: >-
+          Probes to run, separated by spaces: all, guest-facts, ernic-backend,
+          ernic-backend-loopback, ernic-backend-nvmeof, ernic-backend-s3,
+          container-uring.
+        required: false
+        type: string
+        default: all
+
+permissions:
+  contents: read
+
+env:
+  # Move together with the nonroot-user action pin, the job container image
+  # and the digests in .ci/rocjitsu/fleet-overlay.xml and
+  # .ci/rocjitsu/fleet-overlay-backends.xml.
+  QEMU_MINIMAL_REF: 45941a379b6afb4306902c1206d8d981565b5a5c # v2.0.0
+
+jobs:
+
+  plan:
+    name: Select the probes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      guest-facts: ${{ steps.select.outputs.guest-facts }}
+      container-uring: ${{ steps.select.outputs.container-uring }}
+      lanes: ${{ steps.select.outputs.lanes }}
+    steps:
+      - name: Read the probes input
+        id: select
+        env:
+          PROBES: ${{ inputs.probes }}
+        run: |
+          set -euo pipefail
+          read -r -a tokens <<< "${PROBES:-all}"
+          if [ "${#tokens[@]}" -eq 0 ]; then tokens=(all); fi
+          facts=false
+          uring=false
+          loopback=false
+          nvmeof=false
+          s3=false
+          for token in "${tokens[@]}"; do
+            case "$token" in
+              all)
+                facts=true
+                uring=true
+                loopback=true
+                nvmeof=true
+                s3=true
+                ;;
+              guest-facts) facts=true ;;
+              container-uring) uring=true ;;
+              ernic-backend)
+                loopback=true
+                nvmeof=true
+                s3=true
+                ;;
+              ernic-backend-loopback) loopback=true ;;
+              ernic-backend-nvmeof) nvmeof=true ;;
+              ernic-backend-s3) s3=true ;;
+              *)
+                # A rejected name is never echoed.
+                echo "::error::the probes input names a probe this workflow does not have; see the input's description"
+                exit 1
+                ;;
+            esac
+          done
+          lanes=""
+          if [ "$loopback" = true ]; then lanes='"loopback"'; fi
+          if [ "$nvmeof" = true ]; then lanes="${lanes:+${lanes},}\"nvmeof\""; fi
+          if [ "$s3" = true ]; then lanes="${lanes:+${lanes},}\"s3\""; fi
+          {
+            echo "guest-facts=${facts}"
+            echo "container-uring=${uring}"
+            echo "lanes=[${lanes}]"
+          } >> "$GITHUB_OUTPUT"
+          echo "guest-facts: ${facts}; ernic-backend lanes: [${lanes}]; container-uring: ${uring}"
+
+  guest-facts:
+    name: Guest facts
+    needs: plan
+    if: needs.plan.outputs.guest-facts == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    container:
+      # <qemu-ref> of .ci/rocjitsu/fleet-overlay.xml.
+      image: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20261112.gdca6903-qemu.4cb9698-vfu.3719c3a@sha256:f7e61be3f29c82aeac60b8fa3f88ac3c434ab0f19a79bd144cb87ed9054aca03
+      # QEMU runs in a sibling container started through the host's docker
+      # socket: the images directory must be the same path on both sides and
+      # quick-start must see host pids.
+      options: >-
+        --device /dev/kvm
+        --pid=host
+        -v /var/run/docker.sock:/var/run/docker.sock
+        -v /var/lib/qemu-tool:/var/lib/qemu-tool
+    defaults:
+      run:
+        # A container job defaults to sh, which rejects "set -o pipefail".
+        shell: bash
+    env:
+      # The stack of the smoke test, so the facts are those of the guest that
+      # test runs in.
+      OVERLAY: .ci/rocjitsu/fleet-overlay.xml
+      # Under /var/lib/qemu-tool because the compose bind mounts are resolved
+      # by the host daemon. The compose project is the stack directory's
+      # basename.
+      STACK_DIR: /var/lib/qemu-tool/stacks/nixl-rocjitsu
+      STACK_NAME: nixl-rocjitsu
+      KEY_DIR: /var/lib/qemu-tool/nixl-rocjitsu-key
+      NVME_MOUNT: /mnt/nixl-nvme
+    steps:
+      - name: Check out code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Check out qemu-minimal
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: sbates130272/qemu-minimal
+          ref: ${{ env.QEMU_MINIMAL_REF }}
+          path: qemu-minimal
+          persist-credentials: false
+
+      # github.workspace is the runner's path, not the job container's.
+      - name: Prepare the results directories
+        run: |
+          set -euo pipefail
+          install -m 0755 .ci/scripts/amd_bench_probe_host.sh /usr/local/bin/probe-check
+          mkdir -p "$GITHUB_WORKSPACE/amd-bench-probe-results" \
+            "$GITHUB_WORKSPACE/amd-bench-probe-diagnostics"
+          {
+            echo "PROBE_DIR=$GITHUB_WORKSPACE/amd-bench-probe-results"
+            echo "DIAG_DIR=$GITHUB_WORKSPACE/amd-bench-probe-diagnostics"
+          } >> "$GITHUB_ENV"
+
+      # The image is pinned twice, here and in the overlay, and the two are
+      # moved by hand.
+      - name: Check the job container is the overlay's QEMU image
+        run: |
+          set -euo pipefail
+          want=$(sed -n 's:.*<qemu-ref>\(.*\)</qemu-ref>.*:\1:p' "$OVERLAY")
+          have=$(docker inspect -f '{{.Config.Image}}' "$(cat /etc/hostname)" 2>/dev/null || true)
+          if [ -z "$have" ]; then
+            probe-check record pins.job-container warn "the job container's image could not be read, so it was not compared with <qemu-ref> of ${OVERLAY}"
+          elif [ -n "$want" ] && [ "$have" = "$want" ]; then
+            probe-check record pins.job-container pass "the job container is <qemu-ref> of ${OVERLAY}"
+          else
+            probe-check record pins.job-container fail "the job container is ${have} but <qemu-ref> of ${OVERLAY} is ${want:-missing}; move the workflow's pins with the overlay's"
+          fi
+
+      - name: Require KVM
+        run: |
+          set -euo pipefail
+          if [ ! -c /dev/kvm ] || [ ! -w /dev/kvm ]; then
+            echo "::error::/dev/kvm is not usable on this runner; the guest cannot boot without it"
+            exit 1
+          fi
+          df -h / /var/lib/qemu-tool
+
+      - name: Record the runner before the boot
+        run: probe-check runner before-boot
+
+      # Exports CIUSER_UID and CIUSER_HOME.
+      - name: Run the stack as a non-root user
+        uses: sbates130272/qemu-minimal/.github/actions/nonroot-user@45941a379b6afb4306902c1206d8d981565b5a5c # qemu-minimal v2.0.0
+
+      - name: Install qemu-tool
+        run: |
+          set -euo pipefail
+          # The image ships its own qemu-tool, which would otherwise win on PATH.
+          PIPX_BIN_DIR=/usr/local/bin pipx install --force ./qemu-minimal/qemu
+          resolved=$(readlink -f "$(command -v qemu-tool)")
+          echo "qemu-tool resolves to: ${resolved}"
+          case "$resolved" in
+            /opt/qemu-tool/*)
+              echo "::error::the image's qemu-tool is shadowing the pinned one"
+              exit 1
+              ;;
+          esac
+          qemu-tool quick-start --help >/dev/null
+
+      # Run from the qemu-minimal checkout so the qemu container installs the
+      # pinned qemu-tool from it.
+      - name: Boot one guest with an emulated GPU and a spare NVMe
+        working-directory: qemu-minimal
+        run: |
+          set -euo pipefail
+          setpriv --reuid "$CIUSER_UID" --regid "$CIUSER_UID" --init-groups \
+            env HOME="$CIUSER_HOME" \
+            qemu-tool quick-start up \
+              --xml qemu/stacks/rocm-golden.xml \
+              --xml "$GITHUB_WORKSPACE/$OVERLAY" \
+              --stack-dir "$STACK_DIR" \
+              --key-dir "$KEY_DIR" \
+              --in-network \
+              --no-metrics \
+              --yes
+
+      # A job container cannot reach the SSH port published on the host; on the
+      # stack's network the guest answers on the qemu container's port 2222.
+      - name: Join the stack network
+        run: docker network connect "${STACK_NAME}_fleet" "$(cat /etc/hostname)"
+
+      - name: Wait for the guest to answer SSH
+        run: |
+          set -euo pipefail
+          qemu=$(docker ps -q \
+            --filter "label=com.docker.compose.project=${STACK_NAME}" \
+            --filter "label=com.docker.compose.service=qemu-1")
+          if [ -z "$qemu" ]; then
+            echo "::error::the qemu-1 container is not running"
+            exit 1
+          fi
+          host=$(docker inspect \
+            -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$qemu")
+          if [ -z "$host" ]; then
+            echo "::error::the guest's container has no address on the stack network"
+            exit 1
+          fi
+          # The image says which account it was baked with.
+          user=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("username") or "ubuntu")' \
+            "${KEY_DIR}/vm-info.json" 2>/dev/null || echo ubuntu)
+
+          cfg="${RUNNER_TEMP}/guest-ssh-config"
+          cat > "$cfg" <<EOF
+          Host guest
+            HostName ${host}
+            Port 2222
+            User ${user}
+            IdentityFile ${KEY_DIR}/id_rsa
+            IdentitiesOnly yes
+            BatchMode yes
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+            LogLevel ERROR
+            ConnectTimeout 10
+            ServerAliveInterval 15
+          EOF
+          echo "SSH_CONFIG=${cfg}" >> "$GITHUB_ENV"
+
+          echo "connecting as ${user} to ${host}:2222"
+          for _ in $(seq 1 120); do
+            if ssh -F "$cfg" guest true 2>/dev/null; then
+              echo "guest answered SSH"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::the guest never answered SSH at ${host}:2222"
+          ssh -v -F "$cfg" guest true 2>&1 | tail -20 || true
+          exit 1
+
+      - name: Record the runner after the boot
+        run: probe-check runner after-boot
+
+      # As the smoke test does, so that the guest has the NVMe mount a storage
+      # case would use and the runner's disk shows what the file system costs.
+      - name: Format and mount the spare NVMe
+        id: nvme
+        continue-on-error: true
+        run: |
+          ssh -F "$SSH_CONFIG" guest bash -s -- "$NVME_MOUNT" <<'GUEST'
+          set -euo pipefail
+          mnt=$1
+          lsblk -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS
+          root_src=$(findmnt -no SOURCE /)
+          root_disk=$(lsblk -no PKNAME "$root_src" 2>/dev/null | head -1 || true)
+          dev=""
+          while read -r name type; do
+            [ "$type" = disk ] || continue
+            [[ "$name" =~ ^/dev/nvme[0-9]+n[0-9]+$ ]] || continue
+            [ "$name" != "$root_src" ] || continue
+            [ "$name" != "/dev/${root_disk}" ] || continue
+            # Nothing on it or on a partition of it may be mounted.
+            [ -z "$(lsblk -no MOUNTPOINTS "$name" | tr -d '[:space:]')" ] || continue
+            dev=$name
+            break
+          done < <(lsblk -dpno NAME,TYPE)
+          if [ -z "$dev" ]; then
+            echo "::error::the guest has no spare NVMe namespace"
+            exit 1
+          fi
+          echo "spare NVMe: ${dev}"
+          sudo -n mkfs.ext4 -q -F "$dev"
+          sudo -n mkdir -p "$mnt"
+          sudo -n mount -o noatime "$dev" "$mnt"
+          sudo -n chmod 1777 "$mnt"
+          test "$(findmnt -no SOURCE "$mnt")" = "$dev"
+          df -h "$mnt"
+          GUEST
+
+      - name: Probe the guest
+        env:
+          NVME_STEP: ${{ steps.nvme.outcome }}
+        run: |
+          set -euo pipefail
+          if [ "$NVME_STEP" = success ]; then
+            probe-check record guest.nvme-mount pass "the spare NVMe is formatted and mounted at ${NVME_MOUNT}"
+          else
+            probe-check record guest.nvme-mount warn "the spare NVMe could not be formatted and mounted at ${NVME_MOUNT}"
+          fi
+          scp -F "$SSH_CONFIG" .ci/scripts/amd_bench_probe_guest.py guest:/tmp/amd_bench_probe_guest.py
+          rc=0
+          ssh -F "$SSH_CONFIG" guest \
+            'python3 -I /tmp/amd_bench_probe_guest.py --json-out /tmp/guest-facts.json --summary-out /tmp/guest-facts.md' \
+            || rc=$?
+          scp -F "$SSH_CONFIG" guest:/tmp/guest-facts.json guest:/tmp/guest-facts.md "$PROBE_DIR/" || true
+          if [ "$rc" -ne 0 ] || [ ! -s "$PROBE_DIR/guest-facts.json" ]; then
+            probe-check record guest.probe fail "amd_bench_probe_guest.py ended with exit status ${rc} in the guest"
+            exit 0
+          fi
+          failed=$(python3 -I -c 'import json,sys; print(", ".join(json.load(open(sys.argv[1]))["errors"]) or "none")' \
+            "$PROBE_DIR/guest-facts.json")
+          if [ "$failed" = none ]; then
+            probe-check record guest.probe pass "every probe answered; see guest-facts.json"
+          else
+            probe-check record guest.probe warn "probes that could not answer: ${failed}"
+          fi
+
+      - name: Record the runner after the probe
+        if: always()
+        run: probe-check runner end || true
+
+      - name: Write the summary
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo "### AMD Bench Probe: guest facts"
+            echo
+            if [ -s "$PROBE_DIR/guest-facts.md" ]; then
+              cat "$PROBE_DIR/guest-facts.md"
+            else
+              echo "The guest was not probed."
+            fi
+            echo
+            echo "### The runner and the job's checks"
+            echo
+            probe-check finish guest-facts
+          } >> "$GITHUB_STEP_SUMMARY"
+          if ! probe-check failures; then
+            echo "::error::the checks listed above failed"
+            exit 1
+          fi
+
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: amd-bench-probe-guest-facts
+          path: amd-bench-probe-results/*.json
+          if-no-files-found: warn
+
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          out="$GITHUB_WORKSPACE/amd-bench-probe-diagnostics"
+          mkdir -p "$out"
+          if [ -n "${SSH_CONFIG:-}" ]; then
+            g() { ssh -F "$SSH_CONFIG" guest "$@"; }
+            g 'sudo -n dmesg' > "$out/dmesg.txt" 2>&1 || true
+            g bash -s > "$out/guest-state.txt" 2>&1 <<'GUEST' || true
+          echo "--- block devices"
+          lsblk -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS 2>&1
+          echo "--- network"
+          ip -br addr 2>&1
+          echo "--- RDMA"
+          rdma link 2>&1
+          ibv_devinfo -v 2>&1
+          echo "--- modules"
+          lsmod 2>&1
+          echo "--- ROCm"
+          cat /opt/rocm/core-*/.info/version /etc/rocjitsu-guest.json 2>&1
+          GUEST
+          fi
+          if [ -f "$STACK_DIR/docker-compose.yml" ]; then
+            qemu-tool compose --stack-dir "$STACK_DIR" logs --no-color --tail 500 \
+              > "$out/compose-logs.txt" 2>&1 || true
+          fi
+          ls -l "$out"
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: amd-bench-probe-guest-facts-diagnostics
+          path: amd-bench-probe-diagnostics/
+          if-no-files-found: warn
+
+      - name: Take the stack down
+        if: always()
+        working-directory: qemu-minimal
+        run: |
+          qemu-tool quick-start down \
+            --xml qemu/stacks/rocm-golden.xml \
+            --xml "$GITHUB_WORKSPACE/$OVERLAY" \
+            --stack-dir "$STACK_DIR" \
+            --yes || true
+          left=$(docker ps -aq --filter "label=com.docker.compose.project=${STACK_NAME}")
+          if [ -n "$left" ]; then
+            echo "::warning::removing containers the teardown left behind"
+            # shellcheck disable=SC2086
+            docker rm -f $left || true
+          fi
+
+  # qemu-tool always starts the NIC server as a node of its TCP mesh. A
+  # docker-compose.override.yml in the stack directory, which compose merges
+  # by itself, replaces that command and the mesh's health check for the one
+  # NIC server of a one-guest stack with no TAP.
+  ernic-backend:
+    name: NIC backend ${{ matrix.lane }}
+    needs: plan
+    if: needs.plan.outputs.lanes != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: ${{ fromJSON(needs.plan.outputs.lanes) }}
+    container:
+      # <qemu-ref> of .ci/rocjitsu/fleet-overlay-backends.xml.
+      image: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20261112.gdca6903-qemu.4cb9698-vfu.3719c3a@sha256:f7e61be3f29c82aeac60b8fa3f88ac3c434ab0f19a79bd144cb87ed9054aca03
+      # QEMU runs in a sibling container started through the host's docker
+      # socket: the images directory must be the same path on both sides and
+      # quick-start must see host pids.
+      options: >-
+        --device /dev/kvm
+        --pid=host
+        -v /var/run/docker.sock:/var/run/docker.sock
+        -v /var/lib/qemu-tool:/var/lib/qemu-tool
+    defaults:
+      run:
+        # A container job defaults to sh, which rejects "set -o pipefail".
+        shell: bash
+    env:
+      LANE: ${{ matrix.lane }}
+      OVERLAY: .ci/rocjitsu/fleet-overlay-backends.xml
+      # Under /var/lib/qemu-tool because the compose bind mounts are resolved
+      # by the host daemon. The compose project is the stack directory's
+      # basename.
+      STACK_DIR: /var/lib/qemu-tool/stacks/nixl-rocjitsu-backend
+      STACK_NAME: nixl-rocjitsu-backend
+      KEY_DIR: /var/lib/qemu-tool/nixl-rocjitsu-backend-key
+      # What qemu-tool gives the first NIC server of a fleet. The override
+      # restates them, and a guard compares them with the generated file.
+      ERNIC_SOCK: /run/vfu/ernic-1.sock
+      ERNIC_STATS: /run/ernic-stats/ernic-1.stats
+      ERNIC_MAC: '72:6f:63:6d:00:01'
+      # <ernic-subnet>.(10+N) for NIC N, which the guest gives the NIC at boot.
+      ERNIC_GUEST_IP: 192.168.100.11
+      # Where the nvmeof and s3 targets answer. Any free address of the NIC's
+      # subnet; their own default, 192.168.200.1, is not on it.
+      ERNIC_PEER_IP: 192.168.100.1
+      # The target's default NQN.
+      NVMEOF_NQN: nvmet-test
+      # The nvmeof target derives no MAC from ip= and has none to discover: it
+      # is not a host on the segment and never answers ARP, and the emulator
+      # routes the connection by queue pair and by the address in the CM
+      # request, not by MAC (rocm-ernic 90434a2: docs/nvmeof.rst "Connecting
+      # from the Guest", src/ionic/ionic_datapath.c, src/nvmeof/nvmeof_cm.c).
+      # The static neighbour entry that rdma_resolve_addr() needs can therefore
+      # name any link-layer address; this is the one in that document. The s3
+      # endpoint is different: it answers ARP with 02:53: and its four address
+      # bytes (src/s3/s3_tcp.c), which the s3 lane checks.
+      NVMEOF_NEIGH_MAC: '02:00:00:00:c0:01'
+      S3_PORT: 9000
+      S3_BUCKET: nixl
+    steps:
+      - name: Check out code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Check out qemu-minimal
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: sbates130272/qemu-minimal
+          ref: ${{ env.QEMU_MINIMAL_REF }}
+          path: qemu-minimal
+          persist-credentials: false
+
+      # github.workspace is the runner's path, not the job container's.
+      - name: Prepare the results directories
+        run: |
+          set -euo pipefail
+          install -m 0755 .ci/scripts/amd_bench_probe_host.sh /usr/local/bin/probe-check
+          mkdir -p "$GITHUB_WORKSPACE/amd-bench-probe-results" \
+            "$GITHUB_WORKSPACE/amd-bench-probe-diagnostics"
+          {
+            echo "PROBE_DIR=$GITHUB_WORKSPACE/amd-bench-probe-results"
+            echo "DIAG_DIR=$GITHUB_WORKSPACE/amd-bench-probe-diagnostics"
+          } >> "$GITHUB_ENV"
+
+      # The image is pinned twice, here and in the overlay, and the two are
+      # moved by hand.
+      - name: Check the job container is the overlay's QEMU image
+        run: |
+          set -euo pipefail
+          want=$(sed -n 's:.*<qemu-ref>\(.*\)</qemu-ref>.*:\1:p' "$OVERLAY")
+          have=$(docker inspect -f '{{.Config.Image}}' "$(cat /etc/hostname)" 2>/dev/null || true)
+          if [ -z "$have" ]; then
+            probe-check record pins.job-container warn "the job container's image could not be read, so it was not compared with <qemu-ref> of ${OVERLAY}"
+          elif [ -n "$want" ] && [ "$have" = "$want" ]; then
+            probe-check record pins.job-container pass "the job container is <qemu-ref> of ${OVERLAY}"
+          else
+            probe-check record pins.job-container fail "the job container is ${have} but <qemu-ref> of ${OVERLAY} is ${want:-missing}; move the workflow's pins with the overlay's"
+          fi
+
+      - name: Require KVM
+        run: |
+          set -euo pipefail
+          if [ ! -c /dev/kvm ] || [ ! -w /dev/kvm ]; then
+            echo "::error::/dev/kvm is not usable on this runner; the guest cannot boot without it"
+            exit 1
+          fi
+          df -h / /var/lib/qemu-tool
+
+      - name: Record the runner before the boot
+        run: probe-check runner before-boot
+
+      # Exports CIUSER_UID and CIUSER_HOME.
+      - name: Run the stack as a non-root user
+        uses: sbates130272/qemu-minimal/.github/actions/nonroot-user@45941a379b6afb4306902c1206d8d981565b5a5c # qemu-minimal v2.0.0
+
+      - name: Install qemu-tool
+        run: |
+          set -euo pipefail
+          # The image ships its own qemu-tool, which would otherwise win on PATH.
+          PIPX_BIN_DIR=/usr/local/bin pipx install --force ./qemu-minimal/qemu
+          resolved=$(readlink -f "$(command -v qemu-tool)")
+          echo "qemu-tool resolves to: ${resolved}"
+          case "$resolved" in
+            /opt/qemu-tool/*)
+              echo "::error::the image's qemu-tool is shadowing the pinned one"
+              exit 1
+              ;;
+          esac
+          qemu-tool quick-start --help >/dev/null
+
+      # The option strings are the ones nvmeof_target_cfg_parse() and
+      # s3_target_cfg_parse() of rocm-ernic 90434a2 accept: ip= is the
+      # target's, ns=N starts another namespace and the options after it
+      # describe that one.
+      - name: Select the NIC backend
+        id: select
+        run: |
+          set -euo pipefail
+          case "$LANE" in
+            loopback)
+              backend=loopback
+              ;;
+            nvmeof)
+              # nsid 1 and 2 are block namespaces with 4096- and 512-byte
+              # LBAs, nsid 3 a Key Value one.
+              backend="nvmeof:ip=${ERNIC_PEER_IP},size=256M,bs=4096,ns=2,size=64M,bs=512,ns=3,kv=1,size=64M,keys=4096"
+              ;;
+            s3)
+              backend="s3:ip=${ERNIC_PEER_IP},size=256M,bucket=${S3_BUCKET}"
+              ;;
+            *)
+              echo "::error::no backend is defined for the lane '${LANE}'"
+              exit 1
+              ;;
+          esac
+          echo "ERNIC_BACKEND=${backend}" >> "$GITHUB_ENV"
+          probe-check record backend.requested info "$backend"
+
+          # With a second guest the other NIC server would wait for a mesh
+          # manager that is gone; with the TAP the server is started through
+          # an entrypoint, which ignores a replaced command.
+          fleet="$GITHUB_WORKSPACE/$OVERLAY"
+          if grep -qF '<vm-count>1</vm-count>' "$fleet" \
+              && grep -qF '<ernic-tap>false</ernic-tap>' "$fleet"; then
+            probe-check record overlay.shape pass "${OVERLAY} sets one guest and no TAP"
+          else
+            probe-check record overlay.shape fail "${OVERLAY} must set <vm-count>1</vm-count> and <ernic-tap>false</ernic-tap>; the override is not valid for any other stack"
+            exit 1
+          fi
+
+          # quick-start leaves a file of this name in the stack directory
+          # alone, and compose reads it because it is run there with no -f.
+          install -d -o "$CIUSER_UID" -g "$CIUSER_UID" "$STACK_DIR"
+          cat > "$STACK_DIR/docker-compose.override.yml" <<EOF
+          services:
+            ernic-1:
+              command: ["rocm-ernic", "-s", "${ERNIC_SOCK}", "-b", "${backend}", "-m", "${ERNIC_MAC}", "-S", "${ERNIC_STATS}"]
+              healthcheck:
+                test: ["CMD", "sh", "-c", "test -S ${ERNIC_SOCK}"]
+          EOF
+          chown "$CIUSER_UID:$CIUSER_UID" "$STACK_DIR/docker-compose.override.yml"
+          cat "$STACK_DIR/docker-compose.override.yml"
+          cp "$STACK_DIR/docker-compose.override.yml" "$DIAG_DIR/"
+
+      - name: Check the pinned NIC server image has the backends
+        run: |
+          set -euo pipefail
+          ref=$(sed -n 's:.*<ernic-ref>\(.*\)</ernic-ref>.*:\1:p' "$GITHUB_WORKSPACE/$OVERLAY")
+          if [ -z "$ref" ]; then
+            probe-check record image.backends fail "${OVERLAY} has no <ernic-ref>"
+            exit 1
+          fi
+          # --help is written to stderr.
+          docker run --rm "$ref" rocm-ernic --help > "$DIAG_DIR/ernic-help.txt" 2>&1 || true
+          missing=""
+          for word in loopback nvmeof s3; do
+            if ! grep -qw -- "$word" "$DIAG_DIR/ernic-help.txt"; then missing="${missing} ${word}"; fi
+          done
+          if [ -z "$missing" ]; then
+            probe-check record image.backends pass "rocm-ernic --help of the pinned image lists loopback, nvmeof and s3"
+          else
+            probe-check record image.backends fail "rocm-ernic --help of the pinned image does not list:${missing}"
+          fi
+
+          # A malformed backend string is refused before the server starts, so
+          # a server that is still running when the timeout ends it took the
+          # string. At the info level it logs what it parsed.
+          rc=0
+          docker run --rm "$ref" timeout 5 rocm-ernic -s /tmp/probe.sock -b "$ERNIC_BACKEND" -L info \
+            > "$DIAG_DIR/ernic-dry-run.txt" 2>&1 || rc=$?
+          parsed=$(grep -E "nvmeof target|nsid [0-9]+ |s3 bucket" "$DIAG_DIR/ernic-dry-run.txt" \
+            | sed -E 's/^.*ionic_datapath: *//' | tr '\n' ';' || true)
+          if [ "$rc" -eq 124 ] && grep -qF -- "Backend: ${ERNIC_BACKEND}" "$DIAG_DIR/ernic-dry-run.txt"; then
+            probe-check record image.backend-string pass "the pinned image starts with this backend string; ${parsed:-it logs no target layout}"
+          else
+            probe-check record image.backend-string warn "a dry run of the pinned image with this backend string ended with exit status ${rc}: $(tail -n 1 "$DIAG_DIR/ernic-dry-run.txt")"
+          fi
+
+      # Run from the qemu-minimal checkout so the qemu container installs the
+      # pinned qemu-tool from it.
+      - name: Boot one guest with the selected NIC backend
+        working-directory: qemu-minimal
+        run: |
+          set -euo pipefail
+          setpriv --reuid "$CIUSER_UID" --regid "$CIUSER_UID" --init-groups \
+            env HOME="$CIUSER_HOME" \
+            qemu-tool quick-start up \
+              --xml qemu/stacks/rocm-golden.xml \
+              --xml "$GITHUB_WORKSPACE/$OVERLAY" \
+              --stack-dir "$STACK_DIR" \
+              --key-dir "$KEY_DIR" \
+              --in-network \
+              --no-metrics \
+              --yes
+
+      # Whether compose replaces "command" and "healthcheck.test" with the
+      # override's, rather than appending to them, is what the lane rests on.
+      - name: Check how compose merged the override
+        if: ${{ !cancelled() && steps.select.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          if [ ! -f "$STACK_DIR/docker-compose.yml" ]; then
+            probe-check record compose.merge skip "quick-start generated no compose file"
+            exit 0
+          fi
+          merged="$DIAG_DIR/compose-config.json"
+          if ! setpriv --reuid "$CIUSER_UID" --regid "$CIUSER_UID" --init-groups \
+              env HOME="$CIUSER_HOME" \
+              qemu-tool compose --stack-dir "$STACK_DIR" config --format json \
+              > "$merged" 2> "$DIAG_DIR/compose-config.err"; then
+            probe-check record compose.merge fail "docker compose config failed: $(tail -n 1 "$DIAG_DIR/compose-config.err")"
+            exit 0
+          fi
+          verdict=$(python3 -I -c '
+          import json
+          import sys
+
+          merged, backend, mac, sock, stats = sys.argv[1:]
+          try:
+              with open(merged, encoding="utf-8") as f:
+                  service = json.load(f)["services"]["ernic-1"]
+          except (OSError, ValueError, KeyError) as e:
+              print(f"fail\tcould not read the merged configuration: {e!r}")
+              sys.exit(0)
+          want_command = ["rocm-ernic", "-s", sock, "-b", backend, "-m", mac, "-S", stats]
+          want_test = ["CMD", "sh", "-c", "test -S " + sock]
+          command = service.get("command")
+          entrypoint = service.get("entrypoint")
+          test = (service.get("healthcheck") or {}).get("test")
+          wrong = []
+          if command != want_command:
+              wrong.append(f"command is {command}")
+          if entrypoint:
+              wrong.append(f"entrypoint is {entrypoint}")
+          if test != want_test:
+              wrong.append(f"healthcheck.test is {test}")
+          if wrong:
+              print("fail\tcompose did not replace the generated values: " + "; ".join(wrong))
+          else:
+              print("pass\tcommand and healthcheck.test of ernic-1 are those of the override alone, with no entrypoint")
+          ' "$merged" "$ERNIC_BACKEND" "$ERNIC_MAC" "$ERNIC_SOCK" "$ERNIC_STATS") \
+            || verdict=$'fail\tcould not compare the merged configuration with the override'
+          IFS=$'\t' read -r status detail <<< "$verdict"
+          probe-check record compose.merge "$status" "$detail"
+
+      # On what the server reports, not on its arguments.
+      - name: Check the backend took effect
+        if: ${{ !cancelled() && steps.select.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          c=$(docker ps -aq \
+            --filter "label=com.docker.compose.project=${STACK_NAME}" \
+            --filter "label=com.docker.compose.service=ernic-1")
+          c=${c%%$'\n'*}
+          if [ -z "$c" ]; then
+            probe-check record backend.container fail "the compose project ${STACK_NAME} has no ernic-1 container"
+            exit 1
+          fi
+          probe-check record backend.container pass "the compose project is ${STACK_NAME}; ernic-1 is $(docker inspect -f '{{.Name}} ({{.State.Status}})' "$c")"
+          docker logs "$c" > "$DIAG_DIR/ernic-1-boot.log" 2>&1 || true
+          failed=false
+
+          if grep -qF -- "Backend: ${ERNIC_BACKEND}" "$DIAG_DIR/ernic-1-boot.log"; then
+            probe-check record backend.reported pass "the server reports Backend: ${ERNIC_BACKEND}"
+          else
+            probe-check record backend.reported fail "the server does not report the requested backend; it reports '$(grep -m 1 -F 'Backend:' "$DIAG_DIR/ernic-1-boot.log" || echo nothing)'"
+            failed=true
+          fi
+
+          # A stack with the TAP starts the server from an entrypoint, and the
+          # override's command would be unused arguments to it.
+          entrypoint=$(docker inspect -f '{{json .Config.Entrypoint}}' "$c")
+          if [ "$entrypoint" = null ]; then
+            probe-check record backend.entrypoint pass "the container has no entrypoint"
+          else
+            probe-check record backend.entrypoint fail "the container has the entrypoint ${entrypoint}, so the override's command is not what runs"
+            failed=true
+          fi
+
+          # The socket path, the MAC and the statistics path the override
+          # hardcodes.
+          if grep -qF -- "- \"${ERNIC_SOCK}\"" "$STACK_DIR/docker-compose.yml" \
+              && grep -qF -- "- \"${ERNIC_MAC}\"" "$STACK_DIR/docker-compose.yml" \
+              && grep -qF -- "- \"${ERNIC_STATS}\"" "$STACK_DIR/docker-compose.yml"; then
+            probe-check record backend.generated pass "the generated compose file gives ernic-1 the socket ${ERNIC_SOCK}, the MAC ${ERNIC_MAC} and the statistics file ${ERNIC_STATS}"
+          else
+            probe-check record backend.generated fail "the generated compose file does not give ernic-1 the socket ${ERNIC_SOCK}, the MAC ${ERNIC_MAC} and the statistics file ${ERNIC_STATS} that the override hardcodes"
+            failed=true
+          fi
+          if [ "$failed" = true ]; then exit 1; fi
+
+      # A job container cannot reach the SSH port published on the host; on the
+      # stack's network the guest answers on the qemu container's port 2222.
+      - name: Join the stack network
+        run: docker network connect "${STACK_NAME}_fleet" "$(cat /etc/hostname)"
+
+      - name: Wait for the guest to answer SSH
+        run: |
+          set -euo pipefail
+          qemu=$(docker ps -q \
+            --filter "label=com.docker.compose.project=${STACK_NAME}" \
+            --filter "label=com.docker.compose.service=qemu-1")
+          if [ -z "$qemu" ]; then
+            echo "::error::the qemu-1 container is not running"
+            exit 1
+          fi
+          host=$(docker inspect \
+            -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$qemu")
+          if [ -z "$host" ]; then
+            echo "::error::the guest's container has no address on the stack network"
+            exit 1
+          fi
+          # The image says which account it was baked with.
+          user=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("username") or "ubuntu")' \
+            "${KEY_DIR}/vm-info.json" 2>/dev/null || echo ubuntu)
+
+          cfg="${RUNNER_TEMP}/guest-ssh-config"
+          cat > "$cfg" <<EOF
+          Host guest
+            HostName ${host}
+            Port 2222
+            User ${user}
+            IdentityFile ${KEY_DIR}/id_rsa
+            IdentitiesOnly yes
+            BatchMode yes
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+            LogLevel ERROR
+            ConnectTimeout 10
+            ServerAliveInterval 15
+          EOF
+          echo "SSH_CONFIG=${cfg}" >> "$GITHUB_ENV"
+
+          echo "connecting as ${user} to ${host}:2222"
+          for _ in $(seq 1 120); do
+            if ssh -F "$cfg" guest true 2>/dev/null; then
+              echo "guest answered SSH"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::the guest never answered SSH at ${host}:2222"
+          ssh -v -F "$cfg" guest true 2>&1 | tail -20 || true
+          exit 1
+
+      # The guest scripts below print each outcome as a line of
+      # PROBE<tab>CHECK<tab>STATUS<tab>DETAIL, which probe-check ingest
+      # records. A script exits 0 once it has recorded a failure, so another
+      # exit status is a failure it did not expect.
+      #
+      # There is no modprobe of ionic: the image loads ionic and ionic_rdma at
+      # boot, and the RDMA device is missing if it did not.
+      - name: Check the emulated NIC in the guest
+        run: |
+          set -euo pipefail
+          log="$DIAG_DIR/nic.txt"
+          rc=0
+          ssh -F "$SSH_CONFIG" guest bash -s -- "$ERNIC_MAC" "$ERNIC_GUEST_IP" <<'GUEST' 2>&1 | tee "$log" || rc=$?
+          set -euo pipefail
+          probe() {
+            local detail=${3:-}
+            printf 'PROBE\t%s\t%s\t%s\n' "$1" "$2" "${detail//[$'\t\r\n']/ }"
+          }
+          mac=$1
+          want=$2
+
+          # awk reads every link: were it to exit at the first match, ip
+          # could be killed writing the rest and pipefail would end the script.
+          iface=$(ip -br link | awk -v mac="$mac" '$0 ~ mac && !seen++ {print $1}')
+          if [ -z "$iface" ]; then
+            probe nic.interface fail "the guest has no network interface with the MAC ${mac}: its emulated RDMA NIC is missing"
+            ip -br link
+            exit 0
+          fi
+          probe nic.interface pass "${iface} has the MAC ${mac}"
+
+          sudo -n ip link set "$iface" up
+          if ip -4 -br addr show dev "$iface" | grep -qF "${want}/"; then
+            probe nic.address pass "the guest gave ${iface} the address ${want}"
+          else
+            sudo -n ip addr add "${want}/24" dev "$iface"
+            probe nic.address warn "the guest had not given ${iface} the address ${want}; it was added"
+          fi
+          ip -4 -br addr show dev "$iface"
+
+          ib=""
+          for _ in $(seq 30); do
+            for dev in "/sys/class/net/${iface}/device/infiniband"/*; do
+              if [ -e "$dev" ]; then ib=${dev##*/}; break; fi
+            done
+            if [ -n "$ib" ]; then break; fi
+            sleep 2
+          done
+          if [ -z "$ib" ]; then
+            probe nic.rdma-device fail "${iface} has no RDMA device"
+            exit 0
+          fi
+          state=unknown
+          for _ in $(seq 30); do
+            state=$(cat "/sys/class/infiniband/${ib}/ports/1/state" 2>/dev/null || echo unknown)
+            case "$state" in *ACTIVE*) break ;; esac
+            sleep 2
+          done
+          case "$state" in
+            *ACTIVE*) probe nic.rdma-device pass "${ib} on ${iface}, port 1 ${state}" ;;
+            *) probe nic.rdma-device warn "${ib} on ${iface}, port 1 is '${state}', not ACTIVE" ;;
+          esac
+
+          if path=$(modinfo -n nvme-rdma 2>&1); then
+            probe guest.nvme-rdma pass "$path"
+          else
+            probe guest.nvme-rdma warn "the guest kernel has no nvme-rdma module: ${path}"
+          fi
+
+          echo "NIC_IFACE=${iface}"
+          echo "NIC_IB=${ib}"
+          GUEST
+          probe-check ingest "$log"
+          if [ "$rc" -ne 0 ]; then
+            probe-check record nic.script fail "the guest script ended with exit status ${rc}"
+          fi
+
+          # The names go back to the guest on a command line.
+          iface=$(sed -n 's/^NIC_IFACE=//p' "$log" | tail -n 1)
+          ib=$(sed -n 's/^NIC_IB=//p' "$log" | tail -n 1)
+          if [[ ! "$iface" =~ ^[A-Za-z0-9_.-]+$ || ! "$ib" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+            echo "::error::the guest has no usable emulated RDMA NIC, so the lane cannot run"
+            exit 1
+          fi
+          {
+            echo "NIC_IFACE=${iface}"
+            echo "NIC_IB=${ib}"
+          } >> "$GITHUB_ENV"
+
+      # Both ends of the connection are in the one guest, on the NIC's own
+      # address. It may fail: the record is the answer.
+      - name: Run an RDMA ping-pong against the NIC's own address
+        if: matrix.lane == 'loopback'
+        run: |
+          set -euo pipefail
+          log="$DIAG_DIR/loopback.txt"
+          rc=0
+          ssh -F "$SSH_CONFIG" guest bash -s -- "$NIC_IB" "$ERNIC_GUEST_IP" <<'GUEST' 2>&1 | tee "$log" || rc=$?
+          set -euo pipefail
+          probe() {
+            local detail=${3:-}
+            printf 'PROBE\t%s\t%s\t%s\n' "$1" "$2" "${detail//[$'\t\r\n']/ }"
+          }
+          ib=$1
+          addr=$2
+          port="/sys/class/infiniband/${ib}/ports/1"
+
+          if ! command -v ibv_devinfo >/dev/null; then
+            probe loopback.ibv-devinfo skip "the guest has no ibv_devinfo"
+          elif out=$(ibv_devinfo -d "$ib" 2>&1); then
+            echo "$out"
+            probe loopback.ibv-devinfo pass "$(grep -E 'state:|active_mtu:|link_layer:' <<< "$out" | tr -s '[:space:]' ' ')"
+          else
+            echo "$out"
+            probe loopback.ibv-devinfo warn "ibv_devinfo -d ${ib} failed: $(tail -n 1 <<< "$out")"
+          fi
+
+          # The GID of the NIC's IPv4 address, RoCE v2 where both are listed.
+          IFS=. read -r a b c d <<< "$addr"
+          want=$(printf '0000:0000:0000:0000:0000:ffff:%02x%02x:%02x%02x' "$a" "$b" "$c" "$d")
+          gid=""
+          for path in "$port"/gids/*; do
+            [ "$(cat "$path" 2>/dev/null)" = "$want" ] || continue
+            index=${path##*/}
+            type=$(cat "$port/gid_attrs/types/${index}" 2>/dev/null || echo unknown)
+            echo "GID index ${index} is ${want} (${type})"
+            if [ -z "$gid" ]; then gid=$index; fi
+            case "$type" in *v2*) gid=$index; break ;; esac
+          done
+          if [ -z "$gid" ]; then
+            probe loopback.rc-pingpong warn "${ib} has no GID for ${addr}, so no connection to it can be addressed"
+            exit 0
+          fi
+          if ! command -v ibv_rc_pingpong >/dev/null; then
+            probe loopback.rc-pingpong skip "the guest has no ibv_rc_pingpong"
+            exit 0
+          fi
+
+          # Ended with SIGTERM, and SIGKILL only if that is not enough: a
+          # process killed in the middle of RDMA leaves the guest's RDMA device
+          # unusable. Not SIGINT, which a background job of this shell ignores.
+          server_log=$(mktemp)
+          client_log=$(mktemp)
+          timeout --kill-after=10 60 \
+            ibv_rc_pingpong -d "$ib" -i 1 -g "$gid" -s 4096 -n 200 > "$server_log" 2>&1 &
+          server=$!
+          sleep 2
+          client_rc=0
+          timeout --kill-after=10 45 \
+            ibv_rc_pingpong -d "$ib" -i 1 -g "$gid" -s 4096 -n 200 "$addr" > "$client_log" 2>&1 || client_rc=$?
+          server_rc=0
+          wait "$server" || server_rc=$?
+          echo "--- server"
+          cat "$server_log"
+          echo "--- client"
+          cat "$client_log"
+          if [ "$client_rc" -eq 0 ] && [ "$server_rc" -eq 0 ]; then
+            probe loopback.rc-pingpong pass "200 exchanges of 4096 bytes over GID index ${gid}: $(tail -n 2 "$client_log" | tr -s '[:space:]' ' ')"
+          else
+            probe loopback.rc-pingpong warn "ibv_rc_pingpong over GID index ${gid}: client exit status ${client_rc}, server exit status ${server_rc}: $(tail -n 1 "$client_log")"
+          fi
+          GUEST
+          probe-check ingest "$log"
+          if [ "$rc" -ne 0 ]; then
+            probe-check record loopback.script fail "the guest script ended with exit status ${rc}"
+          fi
+
+      # The controller is found by its transport and NQN and its namespaces by
+      # nsid, through sysfs, never by device name: the names do not follow the
+      # nsids, and the guest's own NVMe drive is a controller too. Nothing is
+      # formatted, and nothing is written to a device that is not behind the
+      # rdma controller.
+      - name: Connect to the NVMe-oF target and check its namespaces
+        if: matrix.lane == 'nvmeof'
+        run: |
+          set -euo pipefail
+          log="$DIAG_DIR/nvmeof.txt"
+          rc=0
+          ssh -F "$SSH_CONFIG" guest bash -s -- \
+            "$NIC_IFACE" "$ERNIC_PEER_IP" "$NVMEOF_NQN" "$NVMEOF_NEIGH_MAC" 3 3 <<'GUEST' 2>&1 | tee "$log" || rc=$?
+          set -euo pipefail
+          probe() {
+            local detail=${3:-}
+            printf 'PROBE\t%s\t%s\t%s\n' "$1" "$2" "${detail//[$'\t\r\n']/ }"
+          }
+          attr() { tr -s ' ' < "$1" | sed 's/ *$//'; }
+          iface=$1
+          ip=$2
+          nqn=$3
+          lladdr=$4
+          want_ns=$5
+          kv_nsid=$6
+
+          # -a, or the second name is taken as a parameter of the first.
+          if sudo -n modprobe -a nvme-fabrics nvme-rdma; then
+            probe nvmeof.modules pass "nvme-fabrics and nvme-rdma are loaded"
+          else
+            probe nvmeof.modules fail "modprobe -a nvme-fabrics nvme-rdma failed"
+            exit 0
+          fi
+
+          # Nothing answers ARP for the target, so rdma_resolve_addr() needs
+          # the neighbour given to it.
+          before=$(ip neigh show "$ip" dev "$iface" 2>/dev/null || true)
+          sudo -n ip neigh replace "$ip" lladdr "$lladdr" dev "$iface" nud permanent
+          probe nvmeof.neighbour info "before: ${before:-no entry}; set: $(ip neigh show "$ip" dev "$iface")"
+
+          rdma_ctrl() {
+            local c
+            for c in /sys/class/nvme/nvme*; do
+              [ -r "$c/transport" ] || continue
+              [ "$(cat "$c/transport")" = rdma ] || continue
+              [ "$(cat "$c/subsysnqn")" = "$nqn" ] || continue
+              echo "$c"
+              return 0
+            done
+            return 1
+          }
+
+          connected=false
+          disconnect() {
+            local out
+            [ "$connected" = true ] || return 0
+            connected=false
+            if out=$(sudo -n timeout 60 nvme disconnect -n "$nqn" 2>&1) && ! rdma_ctrl >/dev/null; then
+              probe nvmeof.disconnect pass "$out"
+            else
+              probe nvmeof.disconnect warn "nvme disconnect -n ${nqn} left a controller behind or failed: ${out}"
+            fi
+          }
+          trap disconnect EXIT
+
+          if out=$(sudo -n timeout 120 nvme connect -t rdma -a "$ip" -s 4420 -n "$nqn" 2>&1); then
+            connected=true
+          else
+            probe nvmeof.connect fail "nvme connect -t rdma -a ${ip} -s 4420 -n ${nqn}: ${out}"
+            sudo -n dmesg | tail -n 30 || true
+            exit 0
+          fi
+          sudo -n udevadm settle --timeout=30 || true
+          if ! ctrl=$(rdma_ctrl); then
+            probe nvmeof.connect fail "nvme connect succeeded, but no controller has the transport rdma and the NQN ${nqn}"
+            exit 0
+          fi
+          name=${ctrl##*/}
+          address=$(cat "$ctrl/address")
+          probe nvmeof.connect pass "${name}: transport rdma, address ${address}, model $(attr "$ctrl/model"), serial $(attr "$ctrl/serial")"
+          case "$address" in
+            *"traddr=${ip}"*) ;;
+            *) probe nvmeof.address warn "the address of ${name} does not name the target ${ip}: ${address}" ;;
+          esac
+
+          count=0
+          for _ in $(seq 15); do
+            count=0
+            for d in "$ctrl"/nvme*n*; do
+              if [ -e "$d/nsid" ]; then count=$((count + 1)); fi
+            done
+            if [ "$count" -ge "$want_ns" ]; then break; fi
+            sleep 2
+          done
+          if [ "$count" -eq "$want_ns" ]; then
+            probe nvmeof.namespaces pass "${name} has ${count} namespaces"
+          else
+            probe nvmeof.namespaces fail "${name} has ${count} namespaces, not the ${want_ns} the backend string defines"
+          fi
+
+          # usage: write_read NSID BLOCK-DEVICE-NAME
+          write_read() {
+            local nsid=$1 blk=$2 check="nvmeof.io.ns$1" dev sysdev transports subnqn wwid sig pattern want got
+            dev="/dev/${blk}"
+            if [ ! -b "$dev" ]; then
+              probe "$check" fail "nsid ${nsid} has no block device ${dev}"
+              return 1
+            fi
+
+            # Every controller the device hangs off must be the fabric one. A
+            # multipath head hangs off the subsystem, which lists them.
+            sysdev=$(readlink -f "/sys/block/${blk}/device")
+            if [ -r "$sysdev/transport" ]; then
+              transports=$(cat "$sysdev/transport")
+            else
+              transports=$(cat "$sysdev"/nvme*/transport 2>/dev/null | sort -u | tr '\n' ' ' || true)
+              transports=${transports% }
+            fi
+            subnqn=$(cat "$sysdev/subsysnqn" 2>/dev/null || true)
+            if [ "$transports" != rdma ] || [ "$subnqn" != "$nqn" ]; then
+              probe "$check" fail "refusing to write to ${dev}: its transport is '${transports}' and its NQN '${subnqn}', not rdma and ${nqn}"
+              return 1
+            fi
+            if [ -n "$(lsblk -no MOUNTPOINTS "$dev" | tr -d '[:space:]')" ]; then
+              probe "$check" fail "refusing to write to ${dev}: it is mounted"
+              return 1
+            fi
+            sig=$(sudo -n blkid -p -o value -s TYPE "$dev" 2>/dev/null || true)
+            if [ -n "$sig" ]; then
+              probe "$check" fail "refusing to write to ${dev}: it carries a ${sig} signature"
+              return 1
+            fi
+
+            # By the namespace's own identity where udev has made the link.
+            wwid=$(cat "/sys/block/${blk}/wwid" 2>/dev/null || true)
+            if [ -n "$wwid" ] && [ "$(readlink -f "/dev/disk/by-id/nvme-${wwid}")" = "/dev/${blk}" ]; then
+              dev="/dev/disk/by-id/nvme-${wwid}"
+            else
+              probe "nvmeof.by-id.ns${nsid}" warn "udev made no /dev/disk/by-id link for the wwid '${wwid}' of ${blk}; using ${dev}"
+            fi
+
+            pattern=$(mktemp)
+            head -c 1048576 /dev/urandom > "$pattern"
+            want=$(sha256sum < "$pattern" | cut -d ' ' -f 1)
+            if ! sudo -n dd if="$pattern" of="$dev" bs=65536 count=16 oflag=direct conv=fsync,notrunc status=none; then
+              rm -f "$pattern"
+              probe "$check" fail "an O_DIRECT write of 1 MiB to ${dev} failed"
+              return 1
+            fi
+            rm -f "$pattern"
+            got=$(sudo -n dd if="$dev" bs=65536 count=16 iflag=direct status=none | sha256sum | cut -d ' ' -f 1)
+            if [ "$got" = "$want" ]; then
+              probe "$check" pass "1 MiB written to ${dev} with O_DIRECT reads back with the same sha256 ${want}"
+            else
+              probe "$check" fail "1 MiB written to ${dev} with O_DIRECT reads back differently: sha256 ${got}, wrote ${want}"
+              return 1
+            fi
+          }
+
+          kv_seen=false
+          for d in "$ctrl"/nvme*n*; do
+            [ -e "$d/nsid" ] || continue
+            entry=${d##*/}
+            nsid=$(cat "$d/nsid")
+            # With native multipath the controller holds nvmeXcYnZ and the
+            # block device is nvmeXnZ; without it they are the same name.
+            blk=$(sed -E 's/c[0-9]+n/n/' <<< "$entry")
+            sys="/sys/block/${blk}"
+            lba=$(cat "$sys/queue/logical_block_size" 2>/dev/null || echo unknown)
+            sectors=$(cat "$sys/size" 2>/dev/null || echo 0)
+            hidden=$(cat "$sys/hidden" 2>/dev/null || echo unknown)
+            generic="/dev/ng${blk#nvme}"
+            if [ "$nsid" = "$kv_nsid" ]; then
+              # Linux attaches a Key Value namespace with no block device and
+              # keeps its generic character device, which passthrough uses.
+              kv_seen=true
+              if [ -c "$generic" ]; then
+                probe nvmeof.kv-generic-node pass "nsid ${nsid} is ${entry}: ${generic} exists; its block device has hidden=${hidden} and $((sectors * 512)) bytes"
+              else
+                probe nvmeof.kv-generic-node warn "nsid ${nsid} is ${entry}: ${generic} does not exist"
+              fi
+              continue
+            fi
+            if [ -c "$generic" ]; then node="generic node ${generic}"; else node="no generic node ${generic}"; fi
+            probe "nvmeof.ns${nsid}" info "${entry}: block device ${blk}, LBA size ${lba}, $((sectors * 512)) bytes, ${node}"
+            write_read "$nsid" "$blk" || true
+          done
+          if [ "$kv_seen" = false ]; then
+            probe nvmeof.kv-generic-node warn "nsid ${kv_nsid} is not under ${name} in sysfs; generic nodes: $(compgen -G '/dev/ng*' | tr '\n' ' ' || true)"
+          fi
+
+          sudo -n nvme list || true
+          disconnect
+          trap - EXIT
+          GUEST
+          probe-check ingest "$log"
+          if [ "$rc" -ne 0 ]; then
+            probe-check record nvmeof.script fail "the guest script ended with exit status ${rc}"
+          fi
+
+      # No neighbour entry here: the endpoint answers ARP itself. A request
+      # with a body above 16 KiB is refused unless it is moved by RDMA, so the
+      # object sent with curl is 8 KiB.
+      - name: Use the S3 store over HTTP and over RDMA
+        if: matrix.lane == 's3'
+        run: |
+          set -euo pipefail
+          log="$DIAG_DIR/s3.txt"
+
+          # The client is the server's own, from the image the server runs
+          # from, so the two agree on the RDMA token.
+          client=no
+          src="${RUNNER_TEMP}/s3-client"
+          mkdir -p "$src"
+          c=$(docker ps -q \
+            --filter "label=com.docker.compose.project=${STACK_NAME}" \
+            --filter "label=com.docker.compose.service=ernic-1")
+          c=${c%%$'\n'*}
+          if [ -n "$c" ] \
+              && docker cp "${c}:/usr/local/share/rocm-ernic/s3_rdma_client.c" "$src/" \
+              && docker cp "${c}:/usr/local/share/rocm-ernic/parse_int.h" "$src/"; then
+            ssh -F "$SSH_CONFIG" guest 'rm -rf /tmp/amd-bench-probe-s3 && mkdir -p /tmp/amd-bench-probe-s3'
+            scp -F "$SSH_CONFIG" "$src/s3_rdma_client.c" "$src/parse_int.h" guest:/tmp/amd-bench-probe-s3/
+            client=yes
+          fi
+
+          rc=0
+          ssh -F "$SSH_CONFIG" guest bash -s -- \
+            "$NIC_IFACE" "$NIC_IB" "$ERNIC_PEER_IP" "$S3_PORT" "$S3_BUCKET" "$client" <<'GUEST' 2>&1 | tee "$log" || rc=$?
+          set -euo pipefail
+          probe() {
+            local detail=${3:-}
+            printf 'PROBE\t%s\t%s\t%s\n' "$1" "$2" "${detail//[$'\t\r\n']/ }"
+          }
+          iface=$1
+          ib=$2
+          ip=$3
+          port=$4
+          bucket=$5
+          client=$6
+          url="http://${ip}:${port}/${bucket}"
+          work=$(mktemp -d)
+
+          if ping -c 2 -W 2 "$ip" >/dev/null 2>&1; then
+            probe s3.ping pass "${ip} answers ICMP echo"
+          else
+            probe s3.ping warn "${ip} does not answer ICMP echo"
+          fi
+
+          if out=$(curl -fsS --max-time 20 "${url}/" 2>&1); then
+            probe s3.list pass "GET ${url}/ answered: $(head -c 200 <<< "$out" | tr -s '[:space:]' ' ')"
+          else
+            probe s3.list fail "GET ${url}/ failed: ${out}"
+            exit 0
+          fi
+
+          # The endpoint's MAC is 02:53: and the four bytes of its address.
+          IFS=. read -r a b c d <<< "$ip"
+          derived=$(printf '02:53:%02x:%02x:%02x:%02x' "$a" "$b" "$c" "$d")
+          learned=$(ip neigh show "$ip" dev "$iface" \
+            | awk '{for (i = 1; i < NF; i++) if ($i == "lladdr") print $(i + 1)}' || true)
+          if [ "$learned" = "$derived" ]; then
+            probe s3.neighbour pass "the guest learned ${learned} for ${ip} by ARP, the MAC the target derives from ip="
+          else
+            probe s3.neighbour warn "the guest learned '${learned}' for ${ip}, not ${derived}"
+          fi
+
+          key="amd-bench-probe-$$"
+          head -c 8192 /dev/urandom > "$work/put.bin"
+          if out=$(curl -fsS --max-time 30 -H 'Expect:' -X PUT --data-binary "@${work}/put.bin" "${url}/${key}" 2>&1); then
+            probe s3.put pass "PUT of 8192 bytes to ${url}/${key}"
+          else
+            probe s3.put fail "PUT of 8192 bytes to ${url}/${key} failed: ${out}"
+            exit 0
+          fi
+          if out=$(curl -fsS --max-time 30 -o "$work/get.bin" "${url}/${key}" 2>&1); then
+            if cmp -s "$work/put.bin" "$work/get.bin"; then
+              probe s3.get pass "GET of ${url}/${key} returns the 8192 bytes that were put"
+            else
+              probe s3.get fail "GET of ${url}/${key} returns $(stat -c %s "$work/get.bin") bytes that differ from the 8192 that were put"
+            fi
+          else
+            probe s3.get fail "GET of ${url}/${key} failed: ${out}"
+          fi
+          if out=$(curl -fsS --max-time 30 -X DELETE "${url}/${key}" 2>&1); then
+            probe s3.delete pass "DELETE of ${url}/${key}"
+          else
+            probe s3.delete warn "DELETE of ${url}/${key} failed: ${out}"
+          fi
+
+          if [ "$client" != yes ]; then
+            probe s3.rdma-client skip "the NIC server image ships no s3_rdma_client.c and parse_int.h"
+            exit 0
+          fi
+          cd /tmp/amd-bench-probe-s3
+          if ! cc -O2 -Wall -Wextra -o s3_rdma_client s3_rdma_client.c -libverbs > build.log 2>&1; then
+            cat build.log
+            probe s3.rdma-client warn "s3_rdma_client.c does not build in the guest: $(grep -m 1 -E 'error|cannot find' build.log || tail -n 1 build.log)"
+            exit 0
+          fi
+          # Registering the client's buffer needs more locked memory than the
+          # default allows. -F runs the functional checks and not the sweep.
+          client_rc=0
+          # shellcheck disable=SC2016,SC2024
+          sudo -n timeout --kill-after=10 180 \
+            bash -c 'ulimit -l unlimited && exec "$@"' bash \
+            ./s3_rdma_client -d "$ib" -a "$ip" -p "$port" -b "$bucket" -F > client.log 2>&1 || client_rc=$?
+          cat client.log
+          if [ "$client_rc" -eq 0 ] && grep -q 'all checks passed' client.log; then
+            probe s3.rdma-client pass "s3_rdma_client -F on ${ib}: all checks passed ($(grep -c '^ok ' client.log) checks)"
+          else
+            probe s3.rdma-client warn "s3_rdma_client -F on ${ib} ended with exit status ${client_rc}: $(grep -c '^FAIL' client.log || true) checks failed, the first: $(grep -m 1 '^FAIL' client.log || tail -n 1 client.log)"
+          fi
+          GUEST
+          probe-check ingest "$log"
+          if [ "$rc" -ne 0 ]; then
+            probe-check record s3.script fail "the guest script ended with exit status ${rc}"
+          fi
+
+      # The RAM namespaces and the object store are anonymous memory of the
+      # NIC server's container.
+      - name: Record the NIC server at the end of the lane
+        if: ${{ !cancelled() && steps.select.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          c=$(docker ps -aq \
+            --filter "label=com.docker.compose.project=${STACK_NAME}" \
+            --filter "label=com.docker.compose.service=ernic-1")
+          c=${c%%$'\n'*}
+          if [ -z "$c" ]; then
+            probe-check record server.state warn "there is no ernic-1 container at the end of the lane"
+            exit 0
+          fi
+          docker logs "$c" > "$DIAG_DIR/ernic-1.log" 2>&1 || true
+          docker exec "$c" cat "$ERNIC_STATS" > "$DIAG_DIR/ernic-1-stats.txt" 2>&1 || true
+          state=$(docker inspect -f '{{.State.Status}}' "$c")
+          usage=$(docker stats --no-stream --format 'memory {{.MemUsage}}, CPU {{.CPUPerc}}' "$c" 2>/dev/null || echo "docker stats unavailable")
+          if [ "$state" = running ]; then
+            probe-check record server.state info "running; ${usage}"
+          else
+            probe-check record server.state warn "the NIC server's container is ${state} at the end of the lane"
+          fi
+
+      - name: Record the runner at the end
+        if: always()
+        run: probe-check runner end || true
+
+      - name: Write the summary
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo "### AMD Bench Probe: NIC backend ${LANE}"
+            echo
+            probe-check finish ernic-backend "$LANE"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if ! probe-check failures; then
+            echo "::error::the checks listed above failed"
+            exit 1
+          fi
+
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: amd-bench-probe-ernic-backend-${{ matrix.lane }}
+          path: amd-bench-probe-results/*.json
+          if-no-files-found: warn
+
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          out="$GITHUB_WORKSPACE/amd-bench-probe-diagnostics"
+          mkdir -p "$out"
+          if [ -n "${SSH_CONFIG:-}" ]; then
+            g() { ssh -F "$SSH_CONFIG" guest "$@"; }
+            g 'sudo -n dmesg' > "$out/dmesg.txt" 2>&1 || true
+            g bash -s > "$out/guest-state.txt" 2>&1 <<'GUEST' || true
+          echo "--- block devices"
+          lsblk -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS 2>&1
+          echo "--- NVMe controllers"
+          grep -H . /sys/class/nvme/nvme*/{transport,subsysnqn,address,model,serial,state} 2>&1
+          echo "--- network"
+          ip -br addr 2>&1
+          ip neigh 2>&1
+          echo "--- RDMA"
+          rdma link 2>&1
+          ibv_devinfo -v 2>&1
+          echo "--- modules"
+          lsmod 2>&1
+          echo "--- ROCm"
+          cat /opt/rocm/core-*/.info/version /etc/rocjitsu-guest.json 2>&1
+          GUEST
+          fi
+          if [ -f "$STACK_DIR/docker-compose.yml" ]; then
+            cp "$STACK_DIR/docker-compose.yml" "$out/" || true
+            qemu-tool compose --stack-dir "$STACK_DIR" logs --no-color --tail 500 \
+              > "$out/compose-logs.txt" 2>&1 || true
+          fi
+          ls -l "$out"
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: amd-bench-probe-ernic-backend-${{ matrix.lane }}-diagnostics
+          path: amd-bench-probe-diagnostics/
+          if-no-files-found: warn
+
+      - name: Take the stack down
+        if: always()
+        working-directory: qemu-minimal
+        run: |
+          qemu-tool quick-start down \
+            --xml qemu/stacks/rocm-golden.xml \
+            --xml "$GITHUB_WORKSPACE/$OVERLAY" \
+            --stack-dir "$STACK_DIR" \
+            --yes || true
+          left=$(docker ps -aq --filter "label=com.docker.compose.project=${STACK_NAME}")
+          if [ -n "$left" ]; then
+            echo "::warning::removing containers the teardown left behind"
+            # shellcheck disable=SC2086
+            docker rm -f $left || true
+          fi
+
+  # Docker's default seccomp profile is reported to refuse io_uring_setup. The
+  # answer decides whether a container lane can run nixlbench's URING cases
+  # with these options or must leave them to the guests. The job cannot fail
+  # the run: either answer is a result.
+  container-uring:
+    name: io_uring in a job container (seccomp ${{ matrix.seccomp }})
+    needs: plan
+    if: needs.plan.outputs.container-uring == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - seccomp: default
+            options: ''
+          - seccomp: unconfined
+            options: --security-opt seccomp=unconfined
+    container:
+      image: ubuntu:24.04
+      options: ${{ matrix.options }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      SECCOMP: ${{ matrix.seccomp }}
+    steps:
+      - name: Install Python
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates python3
+
+      - name: Check out code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Call io_uring_setup
+        run: |
+          set -euo pipefail
+          install -m 0755 .ci/scripts/amd_bench_probe_host.sh /usr/local/bin/probe-check
+          export PROBE_DIR="$GITHUB_WORKSPACE/amd-bench-probe-results"
+          mkdir -p "$PROBE_DIR"
+          python3 -I .ci/scripts/amd_bench_probe_guest.py --only system,io_uring \
+            --json-out "$PROBE_DIR/io-uring.json"
+          cat "$PROBE_DIR/io-uring.json"
+          answer=$(python3 -I -c '
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as f:
+              result = json.load(f)
+          uring = result["facts"].get("io_uring")
+          if uring is None:
+              print("the probe failed: " + result["errors"].get("io_uring", "unknown"))
+          else:
+              outcome = "works" if uring["works"] else "fails with " + uring["errno"]
+              seccomp = uring.get("seccomp")
+              disabled = uring.get("sysctl_io_uring_disabled")
+              kernel = result["facts"].get("system", {}).get("kernel_release", "unknown")
+              print(
+                  f"io_uring_setup {outcome}; Seccomp: {seccomp}, "
+                  f"kernel.io_uring_disabled: {disabled}, kernel {kernel}"
+              )
+          ' "$PROBE_DIR/io-uring.json")
+          probe-check record "container-uring.seccomp-${SECCOMP}" info "$answer"
+          {
+            echo "### AMD Bench Probe: io_uring in a job container (seccomp ${SECCOMP})"
+            echo
+            probe-check finish container-uring "$SECCOMP"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: amd-bench-probe-container-uring-${{ matrix.seccomp }}
+          path: amd-bench-probe-results/*.json
+          if-no-files-found: warn

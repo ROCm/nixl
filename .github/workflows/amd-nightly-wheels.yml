@@ -124,7 +124,11 @@ jobs:
     permissions:
       contents: write
       actions: read
-    # Shared with the results site, so the two never push gh-pages at once.
+    # Runs the jobs of this repository that name this group one at a time. One
+    # more may wait; a third would cancel the one waiting, so a new gh-pages
+    # writer takes a group of its own. It is not what keeps gh-pages
+    # consistent: the push below is never forced, so a writer that lost the
+    # race is refused and starts again.
     concurrency:
       group: gh-pages
       cancel-in-progress: false
@@ -272,7 +276,8 @@ jobs:
         remote="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
         site="$work/site"
         pushed=false
-        for attempt in 1 2; do
+        attempts=5
+        for attempt in $(seq "$attempts"); do
           rm -rf "$site"
           if git ls-remote --exit-code --heads "$remote" gh-pages >/dev/null; then
             git clone --quiet --depth 1 --branch gh-pages "$remote" "$site"
@@ -303,10 +308,14 @@ jobs:
             pushed=true
             break
           fi
-          echo "::warning::push to gh-pages was rejected (attempt ${attempt}); gh-pages moved underneath"
+          echo "::warning::push to gh-pages was rejected (attempt ${attempt} of ${attempts}); it moved underneath"
+          # A random pause keeps two refused writers from colliding again.
+          if [ "$attempt" -lt "$attempts" ]; then
+            sleep $((5 + RANDOM % 20))
+          fi
         done
         if [ "$pushed" != true ]; then
-          echo "::error::could not push the pip index to gh-pages; the old index and its wheels are left in place"
+          echo "::error::the pip index was not pushed in ${attempts} attempts; the old index and its wheels are kept"
           exit 1
         fi
         echo "pushed=true" >> "$GITHUB_OUTPUT"
