@@ -298,7 +298,7 @@ jobs:
                  /opt/rocm/core-*/.info/version; do
           if [ -s "$f" ]; then ver=$(head -1 "$f"); break; fi
         done
-        echo "guest ROCm version: ${ver:-unknown}"
+        echo "guest ROCm version: ${ver:-unknown}; ROCM_PATH: ${ROCM_PATH:-unset}"
         case "$ver" in
           "$want".*|"$want") ;;
           *)

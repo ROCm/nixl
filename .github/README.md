@@ -18,7 +18,7 @@ SPDX-License-Identifier: Apache-2.0
 [![Nightly wheel date](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Frocm.github.io%2Fnixl%2Fwheels%2Ffor-upstream-feat-rocm-wheels%2Findex.json&query=%24.date&label=published&color=informational&style=flat-square)](https://github.com/ROCm/nixl/releases/tag/nightly-for-upstream-feat-rocm-wheels)
 [![Wheel index](https://img.shields.io/badge/pip%20index-wheels-blue?style=flat-square)](https://rocm.github.io/nixl/wheels/)
 [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue?style=flat-square&logo=python&logoColor=white)](https://rocm.github.io/nixl/wheels/for-upstream-feat-rocm-wheels/simple/rocm-nixl/)
-[![ROCm](https://img.shields.io/badge/ROCm-7.14%20%7C%2010.1-ED1C24?style=flat-square)](https://rocm.docs.amd.com/)
+[![ROCm](https://img.shields.io/badge/ROCm-7.14%20%7C%2010.1%20%7C%2010.2-ED1C24?style=flat-square)](https://rocm.docs.amd.com/)
 [![Platform](https://img.shields.io/badge/platform-manylinux__2__28%20x86__64-lightgrey?style=flat-square)](https://rocm.github.io/nixl/wheels/for-upstream-feat-rocm-wheels/simple/rocm-nixl/)
 
 This repository is AMD's fork of [NIXL](https://github.com/ai-dynamo/nixl),
@@ -109,6 +109,10 @@ emulated-GPU guests, and adds the results to the site at
 `https://rocm.github.io/nixl/`. A branch that cannot build ROCm wheels yet is
 skipped; that is `main` until upstream can.
 
+The wheels hold a backend for each of ROCm 7.14, 10.1 and 10.2. All three are
+tested in a container. The emulated-GPU guests carry ROCm 10.1, so only that
+backend is tested there.
+
 One branch is published: the wheels branch, named in
 [`amd-wheels-branch.txt`](amd-wheels-branch.txt), which is
 `for-upstream/feat/rocm-wheels`. Its wheels from a night that passed go out as
@@ -121,6 +125,14 @@ pip install --pre \
     --extra-index-url https://pypi.org/simple \
     rocm-nixl
 ```
+
+The extras `rocm7.14`, `rocm10.1` and `rocm10.2` add AMD's PyTorch for that
+ROCm version. It is on AMD's index only, which the command above does not
+name: for `rocm10.1` and `rocm10.2` add
+`--extra-index-url https://stable.repo.amd.com/rocm/whl-next/`; Building the
+wheels, linked below, gives the index for each extra. The `rocm10.2` extra is
+for Python 3.11 and newer: AMD publishes no PyTorch for ROCm 10.2 on Python
+3.10.
 
 The older index `wheels/main-amd/` and the release `nightly-main-amd` are no
 longer updated.

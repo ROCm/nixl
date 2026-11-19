@@ -63,6 +63,16 @@ A ROCm installation matching one of the wheel's backends is still needed at
 run time; see `contrib/README.md` on the wheels branch
 ([here](https://github.com/ROCm/nixl/blob/for-upstream/feat/rocm-wheels/contrib/README.md#build-rocm-wheels)).
 
+Each wheel holds one backend per ROCm version: 7.14, 10.1 and 10.2. The
+extras `rocm7.14`, `rocm10.1` and `rocm10.2` add AMD's PyTorch for that ROCm
+version. It is on AMD's index only, so an extra needs one more
+`--extra-index-url` than the commands above:
+`https://stable.repo.amd.com/rocm/whl-next/` for `rocm10.1` and `rocm10.2`;
+`contrib/README.md` gives it for each extra. AMD publishes no PyTorch for ROCm
+10.2 on Python 3.10, so the `rocm10.2` extra is for Python 3.11 and newer.
+Every backend is tested in a container; the emulated-GPU tests cover the ROCm
+10.1 backend only.
+
 ## The published branch
 
 Only one branch is published: the wheels branch, named in
