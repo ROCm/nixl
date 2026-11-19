@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "project": "rocm-nixl",
+  "slug": "main-amd",
+  "branch": "main-amd",
+  "version": "1.6.0.dev20261119",
+  "sha": "0e316f20135aa3043ebb44357d60a92523b858e2",
+  "date": "2026-11-19T04:13:57Z",
+  "base_url": "https://github.com/ROCm/nixl/releases/download/nightly-main-amd",
+  "files": [
+    {
+      "file": "rocm_nixl-1.6.0.dev20261119-cp310-cp310-manylinux_2_28_x86_64.whl",
+      "url": "https://github.com/ROCm/nixl/releases/download/nightly-main-amd/rocm_nixl-1.6.0.dev20261119-cp310-cp310-manylinux_2_28_x86_64.whl",
+      "bytes": 49972067,
+      "sha256": "df26ed694cf3d4bcb150715a78b1f14366d2cb66cbe039bd476f28c4d9acfbec",
+      "python": "cp310",
+      "requires_python": ">=3.10"
+    },
+    {
+      "file": "rocm_nixl-1.6.0.dev20261119-cp311-cp311-manylinux_2_28_x86_64.whl",
+      "url": "https://github.com/ROCm/nixl/releases/download/nightly-main-amd/rocm_nixl-1.6.0.dev20261119-cp311-cp311-manylinux_2_28_x86_64.whl",
+      "bytes": 49976504,
+      "sha256": "6358d1dfe24a006491a55f9cd5c2cd69208014a5730d4b5f521138c3bd069df9",
+      "python": "cp311",
+      "requires_python": ">=3.10"
+    },
+    {
+      "file": "rocm_nixl-1.6.0.dev20261119-cp312-cp312-manylinux_2_28_x86_64.whl",
+      "url": "https://github.com/ROCm/nixl/releases/download/nightly-main-amd/rocm_nixl-1.6.0.dev20261119-cp312-cp312-manylinux_2_28_x86_64.whl",
+      "bytes": 50009722,
+      "sha256": "ea16019c045172ca99fecdd78e7fa48ff3f2333e7fb6069a31517a198b3c3e4d",
+      "python": "cp312",
+      "requires_python": ">=3.10"
+    },
+    {
+      "file": "rocm_nixl-1.6.0.dev20261119-cp313-cp313-manylinux_2_28_x86_64.whl",
+      "url": "https://github.com/ROCm/nixl/releases/download/nightly-main-amd/rocm_nixl-1.6.0.dev20261119-cp313-cp313-manylinux_2_28_x86_64.whl",
+      "bytes": 50010138,
+      "sha256": "c35d3a90cb570f2cee6d89c45aeafc07bf07ec229761badce972b4e530b0b18a",
+      "python": "cp313",
+      "requires_python": ">=3.10"
+    },
+    {
+      "file": "rocm_nixl-1.6.0.dev20261119-cp314-cp314-manylinux_2_28_x86_64.whl",
+      "url": "https://github.com/ROCm/nixl/releases/download/nightly-main-amd/rocm_nixl-1.6.0.dev20261119-cp314-cp314-manylinux_2_28_x86_64.whl",
+      "bytes": 50010392,
+      "sha256": "c6048b8c6d2756bde9720a19aae04c67f7eb326b5ef256bba914407f0e3ad867",
+      "python": "cp314",
+      "requires_python": ">=3.10"
+    }
+  ]
+}
