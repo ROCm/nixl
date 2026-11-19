@@ -2,6 +2,45 @@
  "schema": 1,
  "runs": [
   {
+   "stamp": "20261119T033017Z",
+   "run_id": 44451802940,
+   "upstream_main_sha": "95cbd342679c3c0262e9334b6f2847308601e56d",
+   "branches": [
+    {
+     "branch": "main-amd",
+     "slug": "main-amd",
+     "passed": true,
+     "supported": true,
+     "version": "1.6.0.dev20261119",
+     "sha": "0e316f20135aa3043ebb44357d60a92523b858e2"
+    },
+    {
+     "branch": "main",
+     "slug": "main",
+     "passed": false,
+     "supported": false,
+     "version": "1.6.0",
+     "sha": "e4d435d072d503eaee1baf8450b8f4d33c5c6e9f"
+    },
+    {
+     "branch": "for-upstream/ci/rocm-image",
+     "slug": "for-upstream-ci-rocm-image",
+     "passed": false,
+     "supported": false,
+     "version": "1.6.0",
+     "sha": "5f81a8cadd54494eb66b141bfd20bb406dfae899"
+    },
+    {
+     "branch": "for-upstream/feat/rocm-wheels",
+     "slug": "for-upstream-feat-rocm-wheels",
+     "passed": true,
+     "supported": true,
+     "version": "1.6.0.dev20261119",
+     "sha": "f5c316bde88db5f12597412731c0187da0d872a0"
+    }
+   ]
+  },
+  {
    "stamp": "20261118T203406Z",
    "run_id": 44392248329,
    "upstream_main_sha": "e4d435d072d503eaee1baf8450b8f4d33c5c6e9f",
