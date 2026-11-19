@@ -176,6 +176,7 @@ def _metadata(wheel):
 @pytest.fixture
 def backends(tmp_path):
     return (
+        _make_backend(tmp_path / "rocm10.2", "10.2"),
         _make_backend(tmp_path / "rocm10.1", "10.1"),
         _make_backend(tmp_path / "rocm7.14", "7.14"),
     )
@@ -203,7 +204,7 @@ def test_merged_wheel_contents(merged, backends):
         f"{dist_info}/licenses/licenses/NVIDIA-proprietary-LICENSE.txt",
     }
     expected |= {f"nixl/{p.name}" for p in (META_DIR / "nixl").glob("*.py")}
-    for package in ("nixl_rocm10_1", "nixl_rocm7_14"):
+    for package in ("nixl_rocm10_2", "nixl_rocm10_1", "nixl_rocm7_14"):
         expected |= set(_backend_files(package))
 
     with zipfile.ZipFile(merged) as whl:
@@ -213,7 +214,7 @@ def test_merged_wheel_contents(merged, backends):
         assert names[-1] == f"{dist_info}/RECORD"
         assert whl.testzip() is None
 
-        for package in ("nixl_rocm10_1", "nixl_rocm7_14"):
+        for package in ("nixl_rocm10_2", "nixl_rocm10_1", "nixl_rocm7_14"):
             for name, data in _backend_files(package).items():
                 assert whl.read(name) == data
         for name in ("nixl/__init__.py", "nixl/_api.py", "nixl_meta_utils.py"):
@@ -225,6 +226,7 @@ def test_merged_wheel_contents(merged, backends):
             "nixl",
             "nixl_meta_utils",
             "nixl_rocm10_1",
+            "nixl_rocm10_2",
             "nixl_rocm7_14",
         ]
     assert not any(n.startswith("nixl_ep") for n in names)
@@ -251,13 +253,22 @@ def test_merged_wheel_metadata(merged):
         "Requires-Dist: numpy",
         f'Requires-Dist: torch=={pins["7.14"].torch}; extra == "rocm7-14"',
         f'Requires-Dist: torch=={pins["10.1"].torch}; extra == "rocm10-1"',
+        f'Requires-Dist: torch=={pins["10.2"].torch}; extra == "rocm10-2"',
     ]
     assert [h for h in headers if h.startswith("Provides-Extra:")] == [
         "Provides-Extra: rocm7-14",
         "Provides-Extra: rocm10-1",
+        "Provides-Extra: rocm10-2",
     ]
     assert body == (META_DIR / "README.rocm.md").read_text()
     assert "backend readme" not in body
+
+
+def test_rocm_10_2_extra(merged):
+    # No Python marker: on Python 3.10, where AMD has no torch build for ROCm
+    # 10.2, pip fails rather than install rocm-nixl without PyTorch.
+    headers, _ = _metadata(merged)
+    assert 'Requires-Dist: torch==2.15.0+rocm10.2.0; extra == "rocm10-2"' in headers
 
 
 def test_pytorch_pins_are_exact_rocm_builds():
@@ -453,13 +464,14 @@ def test_command_line(tmp_path, backends):
     assert name in result.stdout
     assert "ROCm 7.14: nixl_rocm7_14" in result.stdout
     assert "ROCm 10.1: nixl_rocm10_1" in result.stdout
+    assert "ROCm 10.2: nixl_rocm10_2" in result.stdout
     assert f"wheel size: {(out / name).stat().st_size} bytes" in result.stdout
 
 
 def test_command_line_reports_refusal(tmp_path, backends):
     result = _run_script("--output-dir", tmp_path / "cli-out", backends[0], backends[0])
     assert result.returncode == 1
-    assert "ERROR: duplicate backend for ROCm 10.1" in result.stderr
+    assert "ERROR: duplicate backend for ROCm 10.2" in result.stderr
     assert "Traceback" not in result.stderr
 
 
@@ -483,6 +495,7 @@ def venv(tmp_path_factory):
     root = tmp_path_factory.mktemp("install")
     merged = _merge(
         root,
+        _make_backend(root / "rocm10.2", "10.2"),
         _make_backend(root / "rocm10.1", "10.1"),
         _make_backend(root / "rocm7.14", "7.14"),
     )
@@ -517,7 +530,12 @@ def test_installs_with_only_numpy(venv):
 
 
 @pytest.mark.parametrize(
-    "rocm_version, backend", [("10.1.0", "nixl_rocm10_1"), ("7.14.1", "nixl_rocm7_14")]
+    "rocm_version, backend",
+    [
+        ("10.2.0", "nixl_rocm10_2"),
+        ("10.1.0", "nixl_rocm10_1"),
+        ("7.14.1", "nixl_rocm7_14"),
+    ],
 )
 def test_installed_wheel_selects_backend(venv, tmp_path, rocm_version, backend):
     python, _, _ = venv
@@ -536,17 +554,18 @@ def test_installed_wheel_selects_backend(venv, tmp_path, rocm_version, backend):
     assert result.stdout.strip() == backend
 
 
-def test_extra_installs_only_the_rocm_pytorch(venv, tmp_path):
+@pytest.mark.parametrize("rocm", ["10.2", "10.1", "7.14"])
+def test_extra_installs_only_the_rocm_pytorch(venv, tmp_path, rocm):
     python, merged, _ = venv
     pip_version = _pip(python, "--version").stdout.split()[1]
     if tuple(map(int, pip_version.split(".")[:2])) < (23, 3):
         pytest.skip(f"pip {pip_version} in the venv is older than 23.3")
-    pin = wheel_merge_rocm.ROCM_PYTORCH["10.1"].torch
+    pin = wheel_merge_rocm.ROCM_PYTORCH[rocm].torch
     public = pin.split("+")[0]
     numpy = _make_wheel(
         tmp_path / "numpy", "numpy", "2.0.0", {"numpy/__init__.py": b""}
     )
-    requirement = f"rocm-nixl[rocm10.1] @ {merged.as_uri()}"
+    requirement = f"rocm-nixl[rocm{rocm}] @ {merged.as_uri()}"
 
     # Only the CUDA-style public version is available: the extra cannot resolve.
     pypi_only = tmp_path / "pypi-only"

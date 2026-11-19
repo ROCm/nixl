@@ -44,7 +44,7 @@ if TYPE_CHECKING:
             )
         except ImportError:
             try:
-                from nixl_rocm10_1._api import (  # type: ignore[import]  # noqa: F401
+                from nixl_rocm10_2._api import (  # type: ignore[import]  # noqa: F401
                     DEFAULT_COMM_PORT,
                     nixl_agent,
                     nixl_agent_config,
@@ -55,7 +55,7 @@ if TYPE_CHECKING:
                 )
             except ImportError:
                 try:
-                    from nixl_rocm7_14._api import (  # type: ignore[import]  # noqa: F401
+                    from nixl_rocm10_1._api import (  # type: ignore[import]  # noqa: F401
                         DEFAULT_COMM_PORT,
                         nixl_agent,
                         nixl_agent_config,
@@ -65,12 +65,23 @@ if TYPE_CHECKING:
                         nixl_xfer_handle,
                     )
                 except ImportError:
-                    from nixl_rocm._api import (  # type: ignore[import]  # noqa: F401
-                        DEFAULT_COMM_PORT,
-                        nixl_agent,
-                        nixl_agent_config,
-                        nixl_backend_handle,
-                        nixl_prepped_dlist_handle,
-                        nixl_thread_sync_t,
-                        nixl_xfer_handle,
-                    )
+                    try:
+                        from nixl_rocm7_14._api import (  # type: ignore[import]  # noqa: F401
+                            DEFAULT_COMM_PORT,
+                            nixl_agent,
+                            nixl_agent_config,
+                            nixl_backend_handle,
+                            nixl_prepped_dlist_handle,
+                            nixl_thread_sync_t,
+                            nixl_xfer_handle,
+                        )
+                    except ImportError:
+                        from nixl_rocm._api import (  # type: ignore[import]  # noqa: F401
+                            DEFAULT_COMM_PORT,
+                            nixl_agent,
+                            nixl_agent_config,
+                            nixl_backend_handle,
+                            nixl_prepped_dlist_handle,
+                            nixl_thread_sync_t,
+                            nixl_xfer_handle,
+                        )

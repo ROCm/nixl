@@ -90,12 +90,13 @@ def test_default_is_cuda(run_script):
     assert not [a for a in args if a.startswith("ROCM_VERSION=")]
 
 
-def test_rocm_version_selects_rocm(run_script):
-    result = run_script(*MANYLINUX, "--rocm-version", "10.1.0")
+@pytest.mark.parametrize("version", ["10.2.0", "10.1.0", "7.14.1"])
+def test_rocm_version_selects_rocm(run_script, version):
+    result = run_script(*MANYLINUX, "--rocm-version", version)
     assert result.returncode == 0, result.stderr
     args = _docker_build_args(result)
     assert "GPU_STACK=rocm" in args
-    assert "ROCM_VERSION=10.1.0" in args
+    assert f"ROCM_VERSION={version}" in args
     assert "WHL_PLATFORM=manylinux_2_28_x86_64" in args
 
 

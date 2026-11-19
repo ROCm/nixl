@@ -58,6 +58,12 @@ ROCM_PYTORCH = {
         torch="2.14.0+rocm10.1.0",
         index_url="https://stable.repo.amd.com/rocm/whl-next/",
     ),
+    # AMD publishes no Python 3.10 build of torch for ROCm 10.2: on Python 3.10
+    # pip fails to install this extra rather than leaving torch out.
+    "10.2": RocmPytorch(
+        torch="2.15.0+rocm10.2.0",
+        index_url="https://stable.repo.amd.com/rocm/whl-next/",
+    ),
 }
 
 _BACKEND_WHEEL_RE = re.compile(

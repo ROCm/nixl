@@ -130,10 +130,12 @@ def use_cuda_torch(env, monkeypatch):
 @pytest.mark.parametrize(
     "text, expected",
     [
+        ("10.2.0", (10, 2)),
         ("10.1.0", (10, 1)),
         ("7.14.1\n", (7, 14)),
         ("7.14.0-123", (7, 14)),
         ("10.1", (10, 1)),
+        ("2.15.0+rocm10.2.0", (10, 2)),
         ("2.14.0+rocm10.1.0", (10, 1)),
         ("2.12.1+rocm7.14", (7, 14)),
         ("2.14.0+cu130", None),
@@ -183,9 +185,19 @@ def test_no_version(env):
 
 
 def test_find_rocm_backends_newest_first(env):
-    for name in ("nixl_rocm7_14", "nixl_rocm10_1", "nixl_rocm", "nixl_cu12"):
+    for name in (
+        "nixl_rocm7_14",
+        "nixl_rocm10_2",
+        "nixl_rocm10_1",
+        "nixl_rocm",
+        "nixl_cu12",
+    ):
         add_backend(env, name)
-    assert env.utils.find_rocm_backends() == ["nixl_rocm10_1", "nixl_rocm7_14"]
+    assert env.utils.find_rocm_backends() == [
+        "nixl_rocm10_2",
+        "nixl_rocm10_1",
+        "nixl_rocm7_14",
+    ]
 
 
 def test_selects_backend_matching_rocm_version(env):
@@ -198,24 +210,34 @@ def test_selects_backend_matching_rocm_version(env):
 
 @pytest.mark.parametrize(
     "version, expected",
-    [("7.14.1", "nixl_rocm7_14"), ("10.1.0", "nixl_rocm10_1")],
+    [
+        ("7.14.1", "nixl_rocm7_14"),
+        ("10.1.0", "nixl_rocm10_1"),
+        ("10.2.0", "nixl_rocm10_2"),
+    ],
 )
 def test_selects_among_all_supported_rocm_backends(env, version, expected):
     add_backend(env, "nixl_rocm7_14")
     add_backend(env, "nixl_rocm10_1")
+    add_backend(env, "nixl_rocm10_2")
     set_rocm_install(env, version)
     assert selected_backend() == expected
 
 
 @pytest.mark.parametrize(
     "version, expected",
-    [("2.13.0+rocm7.14.0", "nixl_rocm7_14"), ("2.14.0+rocm10.1.0", "nixl_rocm10_1")],
+    [
+        ("2.13.0+rocm7.14.0", "nixl_rocm7_14"),
+        ("2.14.0+rocm10.1.0", "nixl_rocm10_1"),
+        ("2.15.0+rocm10.2.0", "nixl_rocm10_2"),
+    ],
 )
 def test_selects_among_all_supported_rocm_backends_by_torch(
     env, monkeypatch, version, expected
 ):
     add_backend(env, "nixl_rocm7_14")
     add_backend(env, "nixl_rocm10_1")
+    add_backend(env, "nixl_rocm10_2")
     monkeypatch.setattr(env.utils, "_distribution_version", {"torch": version}.get)
     assert selected_backend() == expected
     assert "torch" not in sys.modules

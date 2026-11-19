@@ -38,7 +38,7 @@ the image. They require OpenSSL 4 runtime libraries (`libssl.so.4` and
 ### Build ROCm wheels
 
 `rocm-nixl` is one wheel per Python version holding the NIXL backends of
-every supported ROCm version (7.14 and 10.1, x86_64 only); `import nixl`
+every supported ROCm version (7.14, 10.1 and 10.2, x86_64 only); `import nixl`
 selects the backend matching the installed ROCm. It is built in three steps,
 all run from the repository root.
 
@@ -47,7 +47,7 @@ all run from the repository root.
    ROCm release instead:
 
    ```bash
-   for rocm in 10.1.0 7.14.1; do
+   for rocm in 10.2.0 10.1.0 7.14.1; do
        ./contrib/build-container.sh \
            --dockerfile contrib/Dockerfile.manylinux \
            --rocm-version "$rocm" \
@@ -100,11 +100,12 @@ all run from the repository root.
    version.
 
 `rocm-nixl` depends on `numpy` only. It declares one extra per ROCm version
-(`rocm7.14`, `rocm10.1`), each pinning AMD's ROCm build of PyTorch exactly, so
-it can only be installed from AMD's index and never from PyPI, whose `torch`
-is the CUDA build:
+(`rocm7.14`, `rocm10.1`, `rocm10.2`), each pinning AMD's ROCm build of PyTorch
+exactly, so it can only be installed from AMD's index and never from PyPI,
+whose `torch` is the CUDA build:
 
 ```bash
+pip install "rocm-nixl[rocm10.2]" --extra-index-url https://stable.repo.amd.com/rocm/whl-next/
 pip install "rocm-nixl[rocm10.1]" --extra-index-url https://stable.repo.amd.com/rocm/whl-next/
 pip install "rocm-nixl[rocm7.14]" --extra-index-url https://repo.amd.com/rocm/whl-multi-arch/
 ```
@@ -112,6 +113,11 @@ pip install "rocm-nixl[rocm7.14]" --extra-index-url https://repo.amd.com/rocm/wh
 The extras need pip 23.3 or newer; older pip ignores them with a warning.
 AMD's PyTorch depends on AMD's pip ROCm packages (`rocm`, `rocm-sdk-core`,
 `rocm-sdk-libraries`), so the extra installs those as well.
+
+AMD publishes no Python 3.10 build of PyTorch for ROCm 10.2. The cp310 wheel
+still holds the ROCm 10.2 backend and declares the `rocm10.2` extra, but pip
+cannot install that extra on Python 3.10: it reports that no matching `torch`
+is available.
 
 The pins and index URLs are the `ROCM_PYTORCH` table in
 `wheel_merge_rocm.py`; a ROCm version without an entry cannot be merged.
