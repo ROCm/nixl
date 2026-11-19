@@ -5,6 +5,22 @@ SPDX-License-Identifier: Apache-2.0
 
 # NIXL on AMD: the ROCm fork
 
+<!-- CI status on main-amd -->
+[![AMD Nightly](https://img.shields.io/github/actions/workflow/status/ROCm/nixl/amd-nightly.yml?branch=main-amd&label=nightly&style=flat-square)](https://github.com/ROCm/nixl/actions/workflows/amd-nightly.yml)
+[![AMD Nightly Wheels](https://img.shields.io/github/actions/workflow/status/ROCm/nixl/amd-nightly-wheels.yml?branch=main-amd&label=nightly%20wheels&style=flat-square)](https://github.com/ROCm/nixl/actions/workflows/amd-nightly-wheels.yml)
+[![ROCm Wheels](https://img.shields.io/github/actions/workflow/status/ROCm/nixl/rocm-wheels.yml?label=rocm%20wheels&style=flat-square)](https://github.com/ROCm/nixl/actions/workflows/rocm-wheels.yml)
+[![AMD Copyright Checks](https://img.shields.io/github/actions/workflow/status/ROCm/nixl/amd-copyright-checks.yml?label=copyright&style=flat-square)](https://github.com/ROCm/nixl/actions/workflows/amd-copyright-checks.yml)
+[![Nightly results](https://img.shields.io/badge/nightly-results-informational?style=flat-square)](https://rocm.github.io/nixl/)
+[![Last commit](https://img.shields.io/github/last-commit/ROCm/nixl/main-amd?label=last%20commit&style=flat-square)](https://github.com/ROCm/nixl/commits/main-amd)
+
+<!-- Nightly rocm-nixl wheels -->
+[![Nightly wheel version](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Frocm.github.io%2Fnixl%2Fwheels%2Ffor-upstream-feat-rocm-wheels%2Findex.json&query=%24.version&label=rocm-nixl%20nightly&color=blue&style=flat-square)](https://rocm.github.io/nixl/wheels/for-upstream-feat-rocm-wheels/simple/rocm-nixl/)
+[![Nightly wheel date](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Frocm.github.io%2Fnixl%2Fwheels%2Ffor-upstream-feat-rocm-wheels%2Findex.json&query=%24.date&label=published&color=informational&style=flat-square)](https://github.com/ROCm/nixl/releases/tag/nightly-for-upstream-feat-rocm-wheels)
+[![Wheel index](https://img.shields.io/badge/pip%20index-wheels-blue?style=flat-square)](https://rocm.github.io/nixl/wheels/)
+[![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue?style=flat-square&logo=python&logoColor=white)](https://rocm.github.io/nixl/wheels/for-upstream-feat-rocm-wheels/simple/rocm-nixl/)
+[![ROCm](https://img.shields.io/badge/ROCm-7.14%20%7C%2010.1-ED1C24?style=flat-square)](https://rocm.docs.amd.com/)
+[![Platform](https://img.shields.io/badge/platform-manylinux__2__28%20x86__64-lightgrey?style=flat-square)](https://rocm.github.io/nixl/wheels/for-upstream-feat-rocm-wheels/simple/rocm-nixl/)
+
 This repository is AMD's fork of [NIXL](https://github.com/ai-dynamo/nixl),
 the NVIDIA Inference Xfer Library. You are reading the `main-amd` branch, which
 is upstream NIXL plus the CI that AMD runs on this fork. AMD's changes to NIXL
