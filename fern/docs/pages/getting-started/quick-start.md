@@ -21,16 +21,6 @@ pip install nixl[cu13]
 Bare `pip install nixl` defaults to `nixl[cu12]` for backwards compatibility, so existing workflows continue to work without changes.
 </Tip>
 
-For AMD ROCm (x86_64 only), install `rocm-nixl` instead of `nixl`:
-
-```bash
-pip install rocm-nixl
-```
-
-<Note>
-`rocm-nixl` and `nixl` must not be installed in the same environment. See the [README](https://github.com/ai-dynamo/nixl/blob/main/README.md#pypi-wheel) for the supported ROCm versions, the host requirements and the extras that install AMD's ROCm build of PyTorch.
-</Note>
-
 <Note>
 NIXL is supported on Linux only. It is tested on Ubuntu (22.04/24.04) and Fedora. macOS and Windows are not currently supported.
 </Note>

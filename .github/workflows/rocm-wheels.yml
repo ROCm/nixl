@@ -6,21 +6,12 @@ name: ROCm Wheels
 on:
   pull_request:
     paths:
-      - contrib/Dockerfile.manylinux
-      - contrib/build-container.sh
-      - contrib/build-wheel.sh
-      - contrib/tomlutil.py
-      - contrib/wheel_add_ucx_plugins.py
-      - contrib/wheel_merge_rocm.py
-      - meson.build
-      - meson_options.txt
-      - pyproject.toml
-      - src/api/python/**
-      - src/bindings/python/**
-      - src/plugins/rocm_ais/**
       - .ci/rocjitsu/**
+      - .ci/scripts/amd_wheels_branch.py
       - .ci/scripts/rocm_wheel_smoke_test.py
       - .ci/scripts/rocm_wheel_two_node_test.py
+      - .ci/scripts/stamp_wheel_version.py
+      - .github/amd-wheels-branch.txt
       - .github/workflows/rocm-wheels.yml
       - .github/workflows/rocm-wheels-rocjitsu.yml
       - .github/workflows/rocm-wheels-rocjitsu-2vm.yml
@@ -40,7 +31,7 @@ on:
         type: string
         default: 3.10,3.11,3.12,3.13,3.14
       ref:
-        description: Branch, tag or commit of this repository to build and test. Empty means the ref the workflow runs on.
+        description: Branch, tag or commit of this repository to build and test. Empty means the branch named in .github/amd-wheels-branch.txt.
         required: false
         type: string
         default: ''
@@ -52,7 +43,7 @@ on:
   workflow_call:
     inputs:
       ref:
-        description: Branch, tag or commit of this repository to build and test. Empty means the ref the workflow runs on.
+        description: Branch, tag or commit of this repository to build and test. Empty means the branch named in .github/amd-wheels-branch.txt.
         required: false
         type: string
         default: ''
@@ -72,7 +63,7 @@ on:
         type: string
         default: ''
       artifact-suffix:
-        description: Appended to the name of every artifact, so that one run can build several refs. For example -main-amd.
+        description: Appended to the name of every artifact, so that one run can build several refs. For example -main.
         required: false
         type: string
         default: ''
@@ -114,6 +105,8 @@ jobs:
       python-versions: ${{ steps.plan.outputs.python-versions }}
       test-python: ${{ steps.plan.outputs.test-python }}
       supported: ${{ steps.source.outputs.supported }}
+      ref: ${{ steps.ref.outputs.ref }}
+      write-cache: ${{ steps.ref.outputs.write-cache }}
       sha: ${{ steps.source.outputs.sha }}
       version: ${{ steps.source.outputs.version }}
       run-vm-tests: ${{ steps.inputs.outputs.run-vm-tests }}
@@ -186,33 +179,59 @@ jobs:
             echo "test-python=${TEST_PYTHON}"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Checkout repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          ref: ${{ inputs.ref }}
-          persist-credentials: false
-
-      # With a ref, the workspace holds that ref's source and the CI scripts
-      # come from the commit this workflow file was read from.
+      # The CI scripts and the name of the wheels branch come from the commit
+      # this workflow file was read from, never from the source that is built.
       - name: Checkout the CI files
-        if: inputs.ref != ''
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ github.sha }}
-          path: ci
-          sparse-checkout: .ci
+          sparse-checkout: |
+            .ci
+            .github
+          persist-credentials: false
+
+      # Without a ref the wheels branch is built. Every ref shares one build
+      # cache, which has room for one copy, so only a build of the wheels
+      # branch writes it. A tag's cache is readable from no other ref, and a
+      # pull request from a fork is not trusted with it, so those only read.
+      - name: Select the ref to build
+        id: ref
+        env:
+          REF: ${{ inputs.ref }}
+          MAY_WRITE_CACHE: ${{ github.ref_type != 'tag' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
+        run: |
+          set -euo pipefail
+          wheels_branch=$(python3 -I .ci/scripts/amd_wheels_branch.py .github/amd-wheels-branch.txt)
+          ref=${REF:-$wheels_branch}
+          write_cache=false
+          if [ "$ref" = "$wheels_branch" ] && [ "$MAY_WRITE_CACHE" = "true" ]; then
+            write_cache=true
+          fi
+          echo "building ${ref}; the wheels branch is ${wheels_branch}; write-cache=${write_cache}"
+          {
+            echo "ref=${ref}"
+            echo "wheels-branch=${wheels_branch}"
+            echo "write-cache=${write_cache}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout the source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ steps.ref.outputs.ref }}
+          path: source
           persist-credentials: false
 
       - name: Check that the source can build ROCm wheels
         id: source
+        working-directory: source
         env:
-          REF: ${{ inputs.ref }}
+          REF: ${{ steps.ref.outputs.ref }}
+          WHEELS_BRANCH: ${{ steps.ref.outputs.wheels-branch }}
           VERSION_SUFFIX: ${{ inputs.version-suffix }}
         run: |
           set -euo pipefail
-          ci_dir=.
-          if [ -d ci/.ci ]; then ci_dir=ci; fi
           sha=$(git rev-parse HEAD)
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
           version=$(python3 -I -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])' 2>/dev/null || true)
           missing=""
           if ! grep -q -- '--rocm-version' contrib/build-container.sh 2>/dev/null; then
@@ -221,14 +240,18 @@ jobs:
             missing="contrib/wheel_merge_rocm.py is missing"
           fi
           if [ -n "$missing" ]; then
+            if [ "$REF" = "$WHEELS_BRANCH" ]; then
+              echo "::error::${REF} (${sha:0:8}) is the wheels branch but cannot build ROCm wheels: ${missing}"
+              exit 1
+            fi
             supported=false
-            msg="ROCm wheels skipped for ${REF:-$GITHUB_REF_NAME} (${sha:0:8}): ${missing}, so this source cannot build them yet."
+            msg="ROCm wheels skipped for ${REF} (${sha:0:8}): ${missing}, so this source cannot build them yet."
             echo "::notice title=ROCm wheels not supported::${msg}"
             echo "${msg}" >> "$GITHUB_STEP_SUMMARY"
           else
             supported=true
             if [ -n "$VERSION_SUFFIX" ]; then
-              version=$(python3 -I "${ci_dir}/.ci/scripts/stamp_wheel_version.py" "$VERSION_SUFFIX")
+              version=$(python3 -I ../.ci/scripts/stamp_wheel_version.py "$VERSION_SUFFIX")
             fi
             if [ -z "$version" ]; then
               echo "::error::pyproject.toml has no [project] version"
@@ -237,7 +260,6 @@ jobs:
           fi
           {
             echo "supported=${supported}"
-            echo "sha=${sha}"
             echo "version=${version}"
           } >> "$GITHUB_OUTPUT"
 
@@ -265,11 +287,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ inputs.ref != '' && needs.plan.outputs.sha || '' }}
+          ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
 
       - name: Checkout the CI files
-        if: inputs.ref != ''
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ github.sha }}
@@ -284,9 +305,7 @@ jobs:
           PLANNED_VERSION: ${{ needs.plan.outputs.version }}
         run: |
           set -euo pipefail
-          ci_dir=.
-          if [ -d ci/.ci ]; then ci_dir=ci; fi
-          version=$(python3 -I "${ci_dir}/.ci/scripts/stamp_wheel_version.py" "$VERSION_SUFFIX")
+          version=$(python3 -I ci/.ci/scripts/stamp_wheel_version.py "$VERSION_SUFFIX")
           if [ "$version" != "$PLANNED_VERSION" ]; then
             echo "::error::stamped version ${version} is not the planned ${PLANNED_VERSION}"
             exit 1
@@ -295,7 +314,6 @@ jobs:
 
       # The Dockerfile copies the whole workspace into the image.
       - name: Remove the CI files from the build context
-        if: inputs.ref != ''
         run: rm -rf ci
 
       - name: Set up Docker Buildx
@@ -305,14 +323,12 @@ jobs:
         uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
 
       # Only the dependency stage is cached: the wheel stage starts with the
-      # source tree, so its layers are never reused. A tag's cache is readable
-      # from no other ref, so tag builds only read. So does a build of another
-      # ref's source: every ref built by one run shares this scope, and a
-      # second copy would not fit in the repository's cache.
+      # source tree, so its layers are never reused. Every build reads the
+      # cache; the plan job decides which one writes it.
       - name: Build the dependency stage
         env:
           CACHE_SCOPE: rocm-wheel-base-${{ matrix.rocm-version }}
-          WRITE_CACHE: ${{ github.ref_type != 'tag' && (inputs.ref == '' || needs.plan.outputs.sha == github.sha) }}
+          WRITE_CACHE: ${{ needs.plan.outputs.write-cache }}
         run: |
           set -euo pipefail
           cache="--cache-from type=gha,scope=${CACHE_SCOPE}"
@@ -385,7 +401,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ inputs.ref != '' && needs.plan.outputs.sha || '' }}
+          ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
 
       - name: Download the backend wheels
@@ -697,7 +713,7 @@ jobs:
       - name: Write results.json
         env:
           NEEDS: ${{ toJSON(needs) }}
-          REF: ${{ inputs.ref }}
+          REF: ${{ needs.plan.outputs.ref || inputs.ref }}
           ARTIFACT_SUFFIX: ${{ inputs.artifact-suffix }}
           CHECK_RUN_ID: ${{ job.check_run_id }}
         run: |

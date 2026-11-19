@@ -3,8 +3,9 @@
 #
 # Branches of this repository that the AMD Nightly workflow builds and tests,
 # one per line. The copy on the default branch is the one that is read.
+# The default branch itself holds no wheel code and is not listed. The branch
+# in .github/amd-wheels-branch.txt has to be among these to be published.
 # See .ci/docs/amd-ci.md.
-main-amd
 main
 # Every branch being prepared for upstream NIXL.
 for-upstream/*

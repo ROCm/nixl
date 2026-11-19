@@ -7,7 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 
 This repository is AMD's fork of [NIXL](https://github.com/ai-dynamo/nixl),
 the NVIDIA Inference Xfer Library. You are reading the `main-amd` branch, which
-is upstream NIXL plus AMD's changes for ROCm.
+is upstream NIXL plus the CI that AMD runs on this fork. AMD's changes to NIXL
+itself, such as the `rocm-nixl` wheel build, are not on this branch: each
+lives on a `for-upstream/` branch until upstream takes it.
 
 NIXL itself is described in the [project README](../README.md): what it is,
 how to build it and how to use it. This page covers only what differs in the
@@ -21,21 +23,30 @@ GitHub shows this file instead of the project README because it lives in
 | Branch | Holds |
 | --- | --- |
 | `main` | An exact copy of upstream `ai-dynamo/nixl` `main`. It never holds an AMD commit. |
-| `main-amd` | Upstream `main` plus AMD's changes. The default branch, and the base for pull requests. |
+| `main-amd` | Upstream `main` plus the fork's CI. The default branch. It holds no change to NIXL itself. |
+| `for-upstream/<name>` | A change to NIXL itself, based on `main` and proposed to upstream from there. |
 | `amd-sync/upstream-main` | The head of the pull request that brings new upstream commits into `main-amd`. |
 | `gh-pages` | The nightly results site and the pip index of the nightly wheels. Written by workflows only. |
 
-What `main-amd` adds to upstream falls into two groups:
+AMD's work is kept in two places:
 
-- **Changes meant for upstream.** ROCm support in NIXL itself, such as the
-  `rocm-nixl` wheel build under `contrib/`. Each is proposed to upstream and
-  lives here until it is merged there.
-- **Files that stay in the fork.** The CI that needs AMD's infrastructure:
-  the ROCm wheel workflows and the nightly (`.github/workflows/rocm-wheels*.yml`,
-  `.github/workflows/amd-*.yml`), the tests that run in QEMU guests with an
-  emulated AMD GPU (`.ci/rocjitsu/`, `.ci/scripts/rocm_wheel_*.py`), the
-  maintainer documents (`.ci/docs/amd-*.md`) and this file. They sit at paths
-  upstream does not use, so that merging upstream does not conflict with them.
+- **Changes meant for upstream** are on `for-upstream/` branches. That is ROCm
+  support in NIXL itself, such as the `rocm-nixl` wheel build under `contrib/`
+  on `for-upstream/feat/rocm-wheels`. Each branch is based on `main`, so it
+  holds nothing but upstream and that one change.
+- **Files that stay in the fork** are on `main-amd`, and are all that
+  `main-amd` adds to upstream. They are the CI that needs AMD's
+  infrastructure: the ROCm wheel workflows and the nightly
+  (`.github/workflows/rocm-wheels*.yml`, `.github/workflows/amd-*.yml`), the
+  tests that run in QEMU guests with an emulated AMD GPU (`.ci/rocjitsu/`,
+  `.ci/scripts/rocm_wheel_*.py`), the maintainer documents
+  (`.ci/docs/amd-*.md`) and this file. They sit at paths upstream does not
+  use, so that merging upstream does not conflict with them. Two upstream
+  workflows also carry a check that keeps them from running outside
+  `ai-dynamo/nixl`.
+
+The workflows on `main-amd` build and test the `for-upstream/` branches; they
+do not build `main-amd` itself, which has no ROCm wheel code.
 
 ## Staying in step with upstream
 
@@ -48,43 +59,55 @@ Upstream changes arrive through `main`, once a night:
 3. A maintainer reviews and merges that pull request, with a merge commit.
    The workflow never merges it.
 
-If upstream conflicts with an AMD change, merge `main-amd` into
+If upstream conflicts with one of the fork's changes, merge `main-amd` into
 `amd-sync/upstream-main`, resolve the conflict there and push. `main` stays
 untouched.
 
 AMD's changes go the other way by pull request to upstream:
 
-1. A change lands in `main-amd` first, by pull request, where the nightly
-   tests it.
-2. A change meant for upstream is then proposed to `ai-dynamo/nixl` from a
-   branch based on `main`, without the files that stay in the fork.
-3. Once upstream merges it, it comes back through the nightly sync, and the
-   difference between `main-amd` and `main` shrinks by that much.
-
-The aim is for that difference to end up as the fork-only files and nothing
-else.
+1. A change to NIXL itself is made on a `for-upstream/<name>` branch based on
+   `main`. The nightly builds and tests every such branch.
+2. It is proposed to `ai-dynamo/nixl` from that branch.
+3. Once upstream merges it, it comes back through the nightly sync, first to
+   `main` and then to `main-amd`, and the branch is no longer needed.
 
 ## Contributing
 
-Open pull requests against `main-amd`. Do not base work on `main` unless it is
-going to upstream, and do not commit to `main` or `gh-pages`.
+A change to the fork's CI or to these documents is a pull request against
+`main-amd`. A change to NIXL itself goes on a `for-upstream/` branch based on
+`main`, not into `main-amd`. Do not commit to `main` or `gh-pages`.
+
+A push to a `for-upstream/` branch does not start the wheel workflow, which
+is on `main-amd` only; the next nightly is the first to build the change. To
+build and test it before that, start the workflow on its branch by hand:
+
+```bash
+gh workflow run rocm-wheels.yml -f ref=<branch with the change>
+```
 
 ## Nightly tests and wheels
 
-Each night `AMD Nightly` builds the `rocm-nixl` wheels from `main-amd` and
-`main`, tests them in a container and in the emulated-GPU guests, and adds the
-results to the site at `https://<owner>.github.io/<repo>/`. `main` is skipped
-until upstream can build ROCm wheels.
+Each night `AMD Nightly` builds the `rocm-nixl` wheels from `main` and from
+every `for-upstream/` branch, tests them in a container and in the
+emulated-GPU guests, and adds the results to the site at
+`https://rocm.github.io/nixl/`. A branch that cannot build ROCm wheels yet is
+skipped; that is `main` until upstream can.
 
-Wheels from a night that passed are published as GitHub pre-releases, not to
-PyPI:
+One branch is published: the wheels branch, named in
+[`amd-wheels-branch.txt`](amd-wheels-branch.txt), which is
+`for-upstream/feat/rocm-wheels`. Its wheels from a night that passed go out as
+a GitHub pre-release, not to PyPI. Every other branch is built and tested
+only.
 
 ```bash
 pip install --pre \
-    --index-url https://<owner>.github.io/<repo>/wheels/main-amd/simple/ \
+    --index-url https://rocm.github.io/nixl/wheels/for-upstream-feat-rocm-wheels/simple/ \
     --extra-index-url https://pypi.org/simple \
     rocm-nixl
 ```
+
+The older index `wheels/main-amd/` and the release `nightly-main-amd` are no
+longer updated.
 
 More detail:
 
@@ -92,4 +115,5 @@ More detail:
   repository settings and the results site.
 - [Nightly rocm-nixl wheels](../.ci/docs/amd-wheels.md): installing a nightly
   and what the versions mean.
-- [Building the wheels](../contrib/README.md).
+- [Building the wheels](https://github.com/ROCm/nixl/blob/for-upstream/feat/rocm-wheels/contrib/README.md#build-rocm-wheels),
+  on the wheels branch.

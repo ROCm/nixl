@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# The wheels branch: the one branch of this repository whose nightly ROCm
+# wheels are published, whose build may write the shared build cache, and
+# that the ROCm Wheels workflow builds when it is given no ref, as on a pull
+# request. Exactly one name. See .ci/docs/amd-ci.md.
+for-upstream/feat/rocm-wheels

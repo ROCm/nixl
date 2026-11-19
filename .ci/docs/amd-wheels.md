@@ -5,23 +5,25 @@ SPDX-License-Identifier: Apache-2.0
 
 # Nightly rocm-nixl wheels
 
-The fork builds `rocm-nixl` wheels every night and publishes the ones that
-passed. They are development builds for people who want to try a change before
-it is released. They are **not PyPI releases**: nothing in this flow uploads to
-PyPI, and the wheels have only been tested against emulated devices on hosted
-runners, never on hardware.
+The fork builds `rocm-nixl` wheels every night and publishes those of one
+branch, the wheels branch, when it passed. They are development builds for
+people who want to try a change before it is released. They are **not PyPI
+releases**: nothing in this flow uploads to PyPI, and the wheels have only been
+tested against emulated devices on hosted runners, never on hardware.
 
 ## Installing
 
 ```bash
 pip install --pre \
-    --index-url https://<owner>.github.io/<repo>/wheels/<slug>/simple/ \
+    --index-url https://rocm.github.io/nixl/wheels/for-upstream-feat-rocm-wheels/simple/ \
     --extra-index-url https://pypi.org/simple \
     rocm-nixl
 ```
 
-`<owner>` and `<repo>` name the fork and `<slug>` the branch: `main-amd` or
-`main`.
+The index path is `https://<owner>.github.io/<repo>/wheels/<slug>/simple/`.
+`<owner>` and `<repo>` name the fork, and `<slug>` is the published branch
+with each `/` replaced by `-`: `for-upstream-feat-rocm-wheels` for
+`for-upstream/feat/rocm-wheels`.
 
 All three options matter:
 
@@ -50,25 +52,35 @@ pip install --no-cache-dir \
 The version currently published is the `version` field of
 `https://<owner>.github.io/<repo>/wheels/<slug>/index.json`, which also gives
 the commit, the date and each file's size and SHA-256.
-`https://<owner>.github.io/<repo>/wheels/` lists both branches.
+`https://<owner>.github.io/<repo>/wheels/` lists every index and says which
+are no longer updated.
 
 `--no-cache-dir` is for the case where a nightly is rebuilt on the same day:
 the version is the same, the contents are not, and pip would otherwise reuse
 its cached copy.
 
 A ROCm installation matching one of the wheel's backends is still needed at
-run time; see `contrib/README.md`.
+run time; see `contrib/README.md` on the wheels branch
+([here](https://github.com/ROCm/nixl/blob/for-upstream/feat/rocm-wheels/contrib/README.md#build-rocm-wheels)).
 
-## The two branches
+## The published branch
+
+Only one branch is published: the wheels branch, named in
+`.github/amd-wheels-branch.txt` on `main-amd`.
 
 | Slug | Branch | What it is |
 | --- | --- | --- |
-| `main-amd` | `main-amd` | Upstream `main` plus AMD's changes. This is the fork's default branch and the one to use. |
-| `main` | `main` | An exact mirror of upstream `ai-dynamo/nixl` `main`. |
+| `for-upstream-feat-rocm-wheels` | `for-upstream/feat/rocm-wheels` | Upstream `main` plus the ROCm wheel build. The wheels branch, and the one to use. |
+| `main-amd` | `main-amd` | No longer updated. `main-amd` holds the fork's CI only and builds no wheels. The index and the `nightly-main-amd` release keep the last build made from it. |
 
-`main` produces wheels only once upstream itself can build ROCm wheels. Until
-then the nightly detects that the branch has no ROCm wheel support, skips it
-with a notice, and no `main` index or `nightly-main` release exists.
+The nightly also builds and tests `main` and every other `for-upstream/`
+branch, without publishing them. `main` cannot build ROCm wheels until upstream
+can; the nightly skips it with a notice. Another `for-upstream/` branch is
+built as `main` plus its own change, so its wheels do not hold the wheels
+branch's changes; the branches are never combined.
+
+When the wheels branch changes, the new branch is published under its own
+slug. The old slug's index and release stay as they are.
 
 ## Versions
 
@@ -86,8 +98,8 @@ published.
 ## How it is published
 
 `.github/workflows/amd-nightly-wheels.yml` ("AMD Nightly Wheels") runs when an
-"AMD Nightly" run finishes, or by hand with the id of such a run. For each of
-`main-amd` and `main`:
+"AMD Nightly" run finishes, or by hand with the id of such a run. For the
+wheels branch:
 
 1. The branch is published only if its entry in the nightly's
    `nightly-summary.json` has `passed: true`, that is, the branch is
