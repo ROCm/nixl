@@ -165,7 +165,7 @@ jobs:
     continue-on-error: ${{ inputs.allow-failure }}
     container:
       # <qemu-ref> of .ci/rocjitsu/fleet-overlay-2vm.xml.
-      image: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user:20261112.gdca6903-qemu11.1.3-vfu.05bb5e5@sha256:7e07fe0e696e8cf2fb6bf3151944b0ef5a37c7fef2f3a2e6e12cae12e34cb07d
+      image: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20261112.gdca6903-qemu.4cb9698-vfu.3719c3a@sha256:f7e61be3f29c82aeac60b8fa3f88ac3c434ab0f19a79bd144cb87ed9054aca03
       # QEMU runs in sibling containers started through the host's docker
       # socket: the images directory must be the same path on both sides and
       # quick-start must see host pids.
