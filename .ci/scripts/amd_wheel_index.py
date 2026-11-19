@@ -16,7 +16,9 @@ a notice on stderr.
 at URL/<wheel file>, DIR/wheels/SLUG/index.json describing that night, and the
 landing page DIR/wheels/index.html. Only the wheels named on the command line
 are listed, so each run replaces the previous night. The wheels themselves are
-never copied into DIR. Nothing outside DIR/wheels/SLUG/ is deleted.
+never copied into DIR. Nothing outside DIR/wheels/SLUG/ is deleted: the index
+of a branch that is no longer published stays, and the landing page marks
+every index older than the newest one as no longer updated.
 
 Standard library only.
 """
@@ -175,7 +177,7 @@ def project_page(files: list[dict[str, Any]]) -> str:
 
 
 def landing_page(wheels_dir: pathlib.Path) -> str:
-    rows = []
+    indexes = []
     for index in sorted(wheels_dir.glob("*/index.json")):
         try:
             data = json.loads(index.read_text(encoding="utf-8"))
@@ -183,18 +185,25 @@ def landing_page(wheels_dir: pathlib.Path) -> str:
             continue
         if not isinstance(data, dict):
             continue
-        slug = index.parent.name
+        indexes.append((index.parent.name, data))
+    # One branch is published at a time, so an index older than the newest
+    # belongs to a branch that is no longer published.
+    newest = max((str(data.get("date") or "") for _, data in indexes), default="")
+    rows = []
+    for slug, data in indexes:
+        date = str(data.get("date") or "")
         cells = [
             f'<a href="{html.escape(urllib.parse.quote(slug), quote=True)}/simple/">'
             f"{html.escape(slug)}</a>",
             html.escape(str(data.get("branch") or "")),
             f"<code>{html.escape(str(data.get('version') or ''))}</code>",
             f"<code>{html.escape(str(data.get('sha') or '')[:12])}</code>",
-            html.escape(str(data.get("date") or "")),
+            html.escape(date),
             html.escape(str(len(data.get("files") or []))),
+            "updated nightly" if date == newest else "no longer updated",
         ]
         rows.append("<tr>" + "".join(f"<td>{cell}</td>" for cell in cells) + "</tr>")
-    head = ["Index", "Branch", "Version", "Commit", "Built (UTC)", "Wheels"]
+    head = ["Index", "Branch", "Version", "Commit", "Built (UTC)", "Wheels", "Status"]
     return "\n".join(
         [
             "<!DOCTYPE html>",
@@ -207,9 +216,11 @@ def landing_page(wheels_dir: pathlib.Path) -> str:
             "</head>",
             "<body>",
             f"<h1>{PROJECT} nightly wheels</h1>",
-            "<p>Development builds from the last successful nightly of each branch. "
-            "They are not PyPI releases and have only been tested against emulated "
-            "devices, not on hardware. Each index lists the latest night only.</p>",
+            "<p>Development builds from the last successful nightly of the published "
+            "branch. They are not PyPI releases and have only been tested against "
+            "emulated devices, not on hardware. Each index lists the latest night "
+            "only. An index that is no longer updated holds the last build of a "
+            "branch that used to be published.</p>",
             "<p><code>pip install --pre --index-url "
             "&lt;this page&gt;&lt;index&gt;/simple/ "
             f"--extra-index-url https://pypi.org/simple {PROJECT}</code></p>",

@@ -23,12 +23,11 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  PUBLISH_BRANCHES: main-amd main
   NIGHTLY_WORKFLOW: .github/workflows/amd-nightly.yml
 
 jobs:
   plan:
-    name: Select the branches to publish
+    name: Select the branch to publish
     # A nightly run that is not publishable (another branch, a pull request, a
     # fork) is skipped here; a run id given by hand is checked, and refused
     # with an error, in the first step.
@@ -58,7 +57,9 @@ jobs:
       uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       with:
         persist-credentials: false
-        sparse-checkout: .ci/scripts
+        sparse-checkout: |
+          .ci/scripts
+          .github
 
     # Wheels are published only from a finished "AMD Nightly" run of this
     # repository's default branch, never from a pull request or a fork.
@@ -85,16 +86,17 @@ jobs:
         fi
         echo "run-id=${RUN_ID}" >> "$GITHUB_OUTPUT"
 
-    - name: Select the branches that passed
+    # Only the wheels branch is published, and only when it passed.
+    - name: Select the wheels branch if it passed
       id: select
       run: |
         set -euo pipefail
+        wheels_branch=$(python3 -I .ci/scripts/amd_wheels_branch.py .github/amd-wheels-branch.txt)
         summary="$RUNNER_TEMP/summary"
         publish='[]'
         if gh run download "$RUN_ID" --name amd-nightly-summary --dir "$summary"; then
-          read -ra branches <<< "$PUBLISH_BRANCHES"
           publish=$(python3 .ci/scripts/amd_wheel_index.py select \
-            --summary "$summary/nightly-summary.json" --branch "${branches[@]}")
+            --summary "$summary/nightly-summary.json" --branch "$wheels_branch")
         else
           echo "::notice title=Nightly wheels not published::run ${RUN_ID} has no amd-nightly-summary artifact; every release is left as it is"
         fi

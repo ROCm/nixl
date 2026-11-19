@@ -9,20 +9,64 @@ This is for maintainers of the AMD fork of NIXL. It covers the branches, the
 `AMD Nightly` workflow ([`amd-nightly.yml`](../../.github/workflows/amd-nightly.yml)),
 the repository settings the workflow needs, and the results site. How to
 install the nightly wheels is in [amd-wheels.md](amd-wheels.md); how the wheels
-are built is in [`contrib/README.md`](../../contrib/README.md).
+are built is in `contrib/README.md` on the wheels branch
+([here](https://github.com/ROCm/nixl/blob/for-upstream/feat/rocm-wheels/contrib/README.md#build-rocm-wheels)).
 
 ## Branches
 
 | Branch | Holds | Changes by |
 | --- | --- | --- |
 | `main` | An exact copy of upstream `ai-dynamo/nixl` `main`. No AMD commits, ever. | The nightly fast-forwards it. |
-| `main-amd` | Upstream `main` plus AMD's changes. The default branch. | Pull requests only. Nothing pushes to it, neither a person nor a workflow. |
+| `main-amd` | Upstream `main` plus the fork's CI: the workflows, the test scripts and these documents. No change to NIXL itself. The default branch. | Pull requests only. Nothing pushes to it, neither a person nor a workflow. |
+| `for-upstream/<name>` | A change to NIXL itself, based on `main`, until upstream takes it. | Whoever prepares the change for upstream. |
 | `amd-sync/upstream-main` | The head of the pull request that brings new upstream commits into `main-amd`. | The nightly, and a maintainer who has a conflict to resolve. |
 | `gh-pages` | The results site and the pip index of the nightly wheels. | The nightly and the wheel publisher, one commit per run. |
 
 `main-amd` is the default branch because GitHub reads scheduled workflows,
 `workflow_run` workflows and the "Run workflow" button from the default branch
 only. The VM-based tests stay on this fork and are not proposed upstream.
+
+`main-amd` has no ROCm wheel code, so its workflows never build `main-amd`
+itself; they build the `for-upstream/` branches. Apart from upstream commits
+it has not merged yet, `main-amd` differs from `main` only by the fork's CI.
+
+### The wheels branch
+
+[`.github/amd-wheels-branch.txt`](../../.github/amd-wheels-branch.txt) names
+one branch, today `for-upstream/feat/rocm-wheels`. It is the branch:
+
+- whose nightly wheels are published, when it passed;
+- whose build writes the shared build cache;
+- that `ROCm Wheels` builds when it is given no ref, which is what a pull
+  request into `main-amd` does.
+
+It has to be able to build ROCm wheels: a run that finds it cannot fails
+instead of skipping it. It also has to be among the branches the nightly
+builds, or nothing is published.
+
+To change it, put the other branch's name in the file by pull request into
+`main-amd`. The next night publishes under the new branch's own release and
+index; those of the previous branch stay as they are and are no longer
+updated. Once upstream can build ROCm wheels the name becomes `main`.
+
+The new index does not exist until that first publication. To publish sooner,
+start `AMD Nightly Wheels` by hand on a nightly run in which the new branch
+passed:
+
+```bash
+gh workflow run amd-nightly-wheels.yml -f run-id=<id of the AMD Nightly run>
+```
+
+The documents name the branch too. The same pull request has to update the
+install command, the table of slugs and the links to `contrib/README.md` in
+[`.github/README.md`](../../.github/README.md), [amd-wheels.md](amd-wheels.md)
+and this file.
+
+Only one branch is published. A second `for-upstream/` branch that also
+changes NIXL is built and tested by the nightly on its own, as `main` plus
+that one change. Nothing merges two branches into one build, so its wheels do
+not contain the wheels branch's changes and are not published. To publish two
+changes together, put both on the wheels branch.
 
 Merge every pull request into `main-amd` with a merge commit. The branch
 protection must not require linear history: after a squash or a rebase of the
@@ -36,15 +80,14 @@ Once, in this order:
 1. Create `main-amd` at the commit of upstream `main`.
 2. Make `main-amd` the default branch and protect it: require a pull request,
    do not require linear history.
-3. Merge the ROCm wheel build support (`feat/rocm-wheels`, the part meant for
-   upstream) into `main-amd` by pull request.
+3. Push the ROCm wheel build support, the part meant for upstream, as
+   `for-upstream/feat/rocm-wheels`, based on `main`. It is not merged into
+   `main-amd`.
 4. Open the CI series, which holds the wheel workflows, the VM tests and the
-   nightly, as a pull request against `main-amd` from its own branch
-   (`amd/ci-nightly`, based on the tip of `feat/rocm-wheels`) and merge it.
-5. Open the wheel publishing series as a pull request against `main-amd` from
-   its own branch (`amd/wheel-publishing`, based on `amd/ci-nightly`) and merge
-   it last. Its workflow is started by `AMD Nightly` and uses the artifacts of
-   that workflow, so it has nothing to do before step 4.
+   nightly, as a pull request against `main-amd` and merge it.
+5. Open the wheel publishing series as a pull request against `main-amd` and
+   merge it last. Its workflow is started by `AMD Nightly` and uses the
+   artifacts of that workflow, so it has nothing to do before step 4.
 6. Set the variable and the secret from the settings below and enable the
    schedule, then start `AMD Nightly` once by hand. That run creates
    `gh-pages` and warns that Pages is not being served.
@@ -80,7 +123,9 @@ worked and whether or not the sync pull request has been merged.
 A branch that cannot build ROCm wheels is skipped with a notice and does not
 fail the run. That is `main` today: upstream has neither the `--rocm-version`
 option of `contrib/build-container.sh` nor `contrib/wheel_merge_rocm.py`. The
-skip ends by itself once upstream has both.
+skip ends by itself once upstream has both. A `for-upstream/` branch that
+changes something other than the wheel build is skipped the same way. The
+wheels branch is the exception: the run fails if it cannot build them.
 
 The run fails when the sync fails, or when a branch that can build ROCm wheels
 does not pass. A branch passes when the `plan`, `build`, `merge`, `test` and
@@ -149,25 +194,58 @@ gh workflow disable request-nvskills-ci.yml
 
 `pre-commit.yml` also runs on every push and can be left on or disabled.
 
-Two upstream pull-request checks fail on pull requests into `main-amd`, so
-neither can be a required check there; `gh workflow disable` switches them off:
+Upstream's `copyright-checks` is skipped in the fork, which cannot pull its
+container image. `AMD Copyright Checks`
+([`amd-copyright-checks.yml`](../../.github/workflows/amd-copyright-checks.yml))
+runs the same script, `.github/workflows/copyright-check.sh`, on every pull
+request instead.
 
-- `copyright-checks` cannot start in the fork, because the pull of its
-  container image is denied. Run `.github/workflows/copyright-check.sh <base>`
-  locally instead.
+One upstream pull-request check fails on pull requests into `main-amd`, so it
+cannot be a required check there; `gh workflow disable` switches it off:
+
 - `PR Size Check` fails a pull request that adds more than 500 lines to files
   that already exist.
 
 The dependency stage of the wheel build is cached per ROCm version, about
-3.5 GB each against a limit of 10 GB for the repository. Only a build of the
-commit the workflow runs at writes that cache, which for the nightly is the
-`main-amd` leg; every other build reads it. Pull requests into `main-amd` read
-it as well.
+3.5 GB each against a limit of 10 GB for the repository. Every build reads
+that cache. Only a build of the wheels branch writes it, which for the nightly
+is that branch's leg; a build of any other ref does not. A build started by a
+tag or by a pull request from a fork never writes it. A pull request from a
+branch of this repository builds the wheels branch and so may write, but what
+a pull request caches is readable by that pull request only.
 
 Every branch the nightly builds is trusted as much as `main-amd`. The build
 runs the branch's own `contrib/build-container.sh` with access to that shared
 build cache and to the run's artifacts, which the wheel publisher reads. Only
-list, or start a run on, a branch whose contents you would merge.
+list, or start a run on, a branch whose contents you would merge. That holds
+most of all for the wheels branch, whose build writes the cache and whose
+wheels are published.
+
+## Pull requests into `main-amd`
+
+A pull request that changes the wheel workflows, the scripts they run, the VM
+definitions or `.github/amd-wheels-branch.txt` starts `ROCm Wheels`. The pull
+request holds no wheel code to build, so the workflow builds the wheels
+branch, for Python 3.12 only, and tests it with the pull request's own
+workflow files, scripts and VM definitions. A change to the CI is tried end to
+end this way before it is merged. Nothing is published from a pull request.
+
+A change to NIXL itself does not start `ROCm Wheels`. The workflow is on
+`main-amd` only, so neither a push to a `for-upstream/` branch nor a pull
+request into one runs it, and the change is first built by the next nightly.
+To try it before it reaches the wheels branch, push it as a branch of this
+repository and start the workflow on it by hand:
+
+```bash
+gh workflow run rocm-wheels.yml -f ref=<branch with the change>
+```
+
+A wheels branch that does not build also fails `ROCm Wheels` on each pull
+request into `main-amd` that starts it, whatever that pull request changes.
+
+A `v*` tag pushed on a commit of `main-amd` starts `ROCm Wheels` as well. That
+run builds the wheels branch as it is at that moment, not the tagged commit,
+and publishes nothing.
 
 ## Adding a branch
 
@@ -184,31 +262,33 @@ under a listed prefix can therefore have it built; see the note on trust above.
 The limit of six counts the branches a prefix matches, and the run fails when
 it is exceeded.
 
-A new branch is tested and shown on the results site. Whether its wheels are
-published is the wheel publisher's decision; see [amd-wheels.md](amd-wheels.md).
+A new branch is tested and shown on the results site. Its wheels are not
+published unless it is [the wheels branch](#the-wheels-branch).
 
 ## Running one branch by hand
 
 For the whole nightly on chosen branches, results site included:
 
 ```bash
-gh workflow run amd-nightly.yml -f branches="main-amd" -f skip-sync=true
+gh workflow run amd-nightly.yml -f branches="for-upstream/feat/rocm-wheels" -f skip-sync=true
 ```
 
 `branches` is a list separated by spaces and replaces the file for that run.
-When `main-amd` or `main` is among them and passes, `AMD Nightly Wheels`
-republishes that branch's nightly wheels as well: the version is the same as
-that day's scheduled run, the contents are new. Use the form below when
-nothing should be published.
+When the wheels branch is among them and passes, `AMD Nightly Wheels`
+republishes its nightly wheels as well: the version is the same as that day's
+scheduled run, the contents are new. Use the form below when nothing should be
+published.
 
 For the wheel workflow alone, with nothing published:
 
 ```bash
-gh workflow run rocm-wheels.yml -f ref=main-amd -f version-suffix=.dev20261118
+gh workflow run rocm-wheels.yml -f ref=for-upstream/feat/rocm-wheels -f version-suffix=.dev20261118
 ```
 
-Both inputs are optional. Without `ref` the workflow builds the ref it runs
-on; without `version-suffix` the version is the one in `pyproject.toml`.
+Both inputs are optional. Without `ref` the workflow builds the wheels branch;
+without `version-suffix` the version is the one in `pyproject.toml`. The
+workflow files and the test scripts are those of the branch the run is started
+on, whatever `ref` is.
 
 ## Reading the site
 

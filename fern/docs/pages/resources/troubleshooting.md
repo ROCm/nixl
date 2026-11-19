@@ -98,29 +98,6 @@ export LD_LIBRARY_PATH=/path/to/nixl/build:$LD_LIBRARY_PATH
 pip install nixl
 ```
 
-On AMD ROCm (x86_64 only), install `rocm-nixl` instead:
-
-```bash
-pip install rocm-nixl
-```
-
-`import nixl` selects the backend matching the installed ROCm version. If it fails because no backend matches the detected version, or selects the wrong one, see the [README](https://github.com/ai-dynamo/nixl/blob/main/README.md#pypi-wheel) for the supported versions and how the version is detected (`ROCM_PATH`).
-
-The wheel does not bundle the ROCm runtime. If a ROCm library (e.g. `libamdhip64.so`) cannot be opened, install ROCm on the host and add its library directory to the loader path before starting Python (use `/opt/rocm/core-<X.Y>/lib` if `/opt/rocm/lib` does not exist):
-
-```bash
-export LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH
-```
-
-If `import nixl` fails with a message saying that a CUDA build of PyTorch was found, the default `torch` from PyPI is installed; it is the CUDA build. Replace it with AMD's ROCm build through the `rocm<X>.<Y>` extra and AMD's package index for that ROCm version (pip 23.3 or newer):
-
-```bash
-pip uninstall torch
-pip install "rocm-nixl[rocm10.1]" --extra-index-url https://stable.repo.amd.com/rocm/whl-next/
-```
-
-`rocm-nixl` and `nixl` must not be installed in the same environment. If both were installed, run `pip uninstall nixl nixl-cu12 nixl-cu13 torch` and then `pip install --force-reinstall rocm-nixl`.
-
 ### Plug-in Shared Library Not Found at Runtime
 
 If NIXL cannot find backend plug-ins at runtime, set the plug-in directory:
