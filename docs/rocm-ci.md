@@ -18,11 +18,77 @@ DOCKER_BUILDKIT=1 docker build -f .ci/dockerfiles/Dockerfile.rocm \
     -t nixl-rocm .
 ```
 
+The default base is ROCm 7.14. ROCm 10.1 and 10.2 are selected through build
+args only. The torch layer installs `torch==${TORCH_VERSION}+rocm<X.Y.Z>`, where
+`X.Y.Z` is read from the base image (`/opt/rocm/core/.info/version`), so
+`TORCH_VERSION` and `TORCH_INDEX_URL` must name a torch that AMD publishes for
+that ROCm release. ROCm 10 wheels are not on the default index:
+
+```bash
+DOCKER_BUILDKIT=1 docker build -f .ci/dockerfiles/Dockerfile.rocm \
+    --build-arg ROCM_BASE_IMAGE=rocm/dev-ubuntu-24.04:10.1.0-full \
+    --build-arg TORCH_VERSION=2.14.0 \
+    --build-arg TORCH_INDEX_URL=https://stable.repo.amd.com/rocm/whl-next/ \
+    -t nixl-rocm:10.1 .
+```
+
+ROCm 10.2 uses the same index with a newer torch:
+
+```bash
+DOCKER_BUILDKIT=1 docker build -f .ci/dockerfiles/Dockerfile.rocm \
+    --build-arg ROCM_BASE_IMAGE=rocm/dev-ubuntu-24.04:10.2.0-full \
+    --build-arg TORCH_VERSION=2.15.0 \
+    --build-arg TORCH_INDEX_URL=https://stable.repo.amd.com/rocm/whl-next/ \
+    -t nixl-rocm:10.2 .
+```
+
+AMD publishes torch for ROCm 10.2 for Python 3.11 and later only, so use an
+Ubuntu 24.04 base; Ubuntu 22.04 ships Python 3.10.
+
+| Build arg | Default (ROCm 7.14) | ROCm 10.1 | ROCm 10.2 |
+| --- | --- | --- | --- |
+| `ROCM_BASE_IMAGE` | `rocm/dev-ubuntu-24.04:7.14.0-full` | `rocm/dev-ubuntu-24.04:10.1.0-full` | `rocm/dev-ubuntu-24.04:10.2.0-full` |
+| `TORCH_VERSION` | `2.11.0` | `2.14.0` | `2.15.0` |
+| `TORCH_INDEX_URL` | `https://repo.amd.com/rocm/whl-multi-arch/` | `https://stable.repo.amd.com/rocm/whl-next/` | `https://stable.repo.amd.com/rocm/whl-next/` |
+
+The image is x86_64 only.
+
 `Dockerfile.rocm` is a BuildKit-parallel refactor of the sequential
 `build-rocm.sh` flow: each source dependency builds in its own stage so the DAG
-scheduler runs them concurrently. `build-rocm.sh` remains the reference for the
-sequential build and for configuring NIXL/nixlbench
-(`-Dnixlbench_gpu=rocm -Drocm_path=...`).
+scheduler runs them concurrently. `build-rocm.sh` remains the reference for
+configuring NIXL/nixlbench (`-Dnixlbench_gpu=rocm -Drocm_path=...`); run it
+inside the image with `PRE_INSTALLED_ENV=1 PRE_INSTALLED_UCX_ENV=1`.
+
+### GPU memory support in UCX and libfabric
+
+Both transports are built against the ROCm prefix `${ROCM_PATH}/core`
+(`ROCM_PATH` is set by the ROCm base image; the build fails early if it is
+empty):
+
+- UCX is configured with `--with-rocm`, and the build fails if no UCX ROCm
+  module was produced.
+- libfabric is configured with `--with-rocr --enable-rocr-dlopen`, which
+  compiles in the ROCr memory interface (`FI_HMEM_ROCR`) used by the NIXL
+  libfabric plugin. libfabric does not link the ROCm runtime; it loads
+  `libhsa-runtime64.so` with `dlopen()` when it initializes. The image puts
+  `${ROCM_PATH}/core/lib` on `LD_LIBRARY_PATH` so that it is found.
+
+### Building behind a TLS-intercepting proxy
+
+`Dockerfile.rocm` accepts the proxy's root CA certificate as an optional
+BuildKit secret named `proxy_ca`. When it is given, the certificate is added to
+the image's system trust store before the
+first HTTPS fetch that follows the base package install; without it the step
+does nothing. A secret is not part of the layer cache key, so also pass the
+certificate's checksum as the `PROXY_CA_SHA256` build argument; otherwise a
+layer cached from a build without the certificate is reused.
+
+```bash
+DOCKER_BUILDKIT=1 docker build -f .ci/dockerfiles/Dockerfile.rocm \
+    --secret id=proxy_ca,src=/path/to/proxy-root-ca.pem \
+    --build-arg PROXY_CA_SHA256="$(sha256sum < /path/to/proxy-root-ca.pem | cut -d' ' -f1)" \
+    -t nixl-rocm .
+```
 
 ## AIS on AMD GPU (docker + nixlbench)
 
