@@ -24,7 +24,7 @@ on:
         description: ROCm versions to build for, as comma-separated X.Y.Z.
         required: false
         type: string
-        default: 7.14.1,10.1.0
+        default: 7.14.1,10.1.0,10.2.0
       python-versions:
         description: Python versions to build for, comma-separated. Must include 3.12, which the test jobs use.
         required: false
@@ -153,7 +153,7 @@ jobs:
           TEST_PYTHON: "3.12"
         run: |
           set -euo pipefail
-          rocm=${ROCM_VERSIONS:-7.14.1,10.1.0}
+          rocm=${ROCM_VERSIONS:-7.14.1,10.1.0,10.2.0}
           python=${PYTHON_VERSIONS:-3.10,3.11,3.12,3.13,3.14}
           if [ "$EVENT_NAME" = "pull_request" ]; then
             python=$TEST_PYTHON

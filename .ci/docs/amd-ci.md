@@ -109,16 +109,26 @@ Neither workflow does anything before its file is on `main-amd`.
    from the default branch and resolves each branch to a commit.
 3. **wheels (`<branch>`).** One call of the `ROCm Wheels` workflow
    ([`rocm-wheels.yml`](../../.github/workflows/rocm-wheels.yml)) per branch:
-   the wheels for Python 3.10 to 3.14, stamped `<version>.dev<YYYYMMDD>` with
-   the UTC date of the run, then the container test and the rocjitsu VM tests.
-   The source is the branch's; the test scripts and the VM definitions are
-   those of the commit the nightly itself runs at.
+   the wheels for ROCm 7.14, 10.1 and 10.2 and Python 3.10 to 3.14, stamped
+   `<version>.dev<YYYYMMDD>` with the UTC date of the run, then the container
+   test and the rocjitsu VM tests. The source is the branch's; the test
+   scripts and the VM definitions are those of the commit the nightly itself
+   runs at.
 4. **Report.** Collects one `results.json` per branch, writes
    `nightly-summary.json` (artifact `amd-nightly-summary`) and adds the run to
    the results site.
 
 The tests run on the branches as they are that night, whether or not the sync
 worked and whether or not the sync pull request has been merged.
+
+The container test runs for each ROCm version. The rocjitsu VM tests cover the
+ROCm 10.1 backend only: the one published guest image carries ROCm 10.1, so
+for 7.14 and 10.2 the rocjitsu jobs skip their test with a notice and succeed.
+
+Every branch is built for all three ROCm versions. The merge fails for a
+branch whose `contrib/wheel_merge_rocm.py` has no PyTorch pin for one of them,
+so a ROCm version is added to the wheels branch before it is added to the
+`rocm-versions` default of `rocm-wheels.yml`.
 
 A branch that cannot build ROCm wheels is skipped with a notice and does not
 fail the run. That is `main` today: upstream has neither the `--rocm-version`
@@ -207,7 +217,7 @@ cannot be a required check there; `gh workflow disable` switches it off:
   that already exist.
 
 The dependency stage of the wheel build is cached per ROCm version, about
-3.5 GB each against a limit of 10 GB for the repository. Every build reads
+1.3 GB each against a limit of 10 GB for the repository. Every build reads
 that cache. Only a build of the wheels branch writes it, which for the nightly
 is that branch's leg; a build of any other ref does not. A build started by a
 tag or by a pull request from a fork never writes it. A pull request from a
