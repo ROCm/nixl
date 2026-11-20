@@ -1,0 +1,240 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema = 1
+lane = "vm1-local"
+lane_id = "V-LOCAL"
+env_class = "gha-kvm-vm1"
+timing_trust = "emulated"
+topology = "single"
+status = "active"
+aa_case = "vm1-local/posix/AIO/buffered/WRITE/N"
+description = "One rocjitsu guest: storage on the two NVMe drives QEMU emulates, and UCX tcp between two processes in the guest"
+
+[defaults]
+tier = "pr"
+timeout_s = 180
+attach = "pcie-qemu"
+
+# The storage cases up to GUSLI are the LBA-STD set. vm1-fabric and vm1-pcie
+# repeat them with the same workload keys, so the three attachments join.
+
+# A READ case fails its data check on a file that a WRITE case left behind:
+# nixlbench fills a file with the pattern READ expects only when the file is
+# shorter than the buffer. Hence one directory per operation.
+[[case]]
+key = "vm1-local/posix/{api}/{io}/{op}/S"
+workload = "posix/{api}/{io}/{op}/S"
+profile = "S"
+backend = "POSIX"
+engine = "{api}"
+tgt_mem = "FILE"
+role = "gate"
+flags = { posix_api_type = "{api}", filepath = "{posix_dir}/{op}" }
+[case.axes]
+api = ["AIO", "URING", "POSIXAIO"]
+io = ["buffered", "direct"]
+op = ["WRITE", "READ"]
+[[case.when]]
+match = { io = "direct" }
+set = { direct = true }
+[[case.when]]
+match = { api = "URING" }
+set = { needs = ["io_uring"] }
+
+[[case]]
+key = "vm1-local/posix/URING/direct/{op}/N"
+workload = "posix/URING/direct/{op}/N"
+profile = "N"
+backend = "POSIX"
+engine = "URING"
+tgt_mem = "FILE"
+direct = true
+role = "track"
+tier = "nightly"
+timeout_s = 360
+needs = ["io_uring"]
+flags = { posix_api_type = "URING", filepath = "{posix_dir}/{op}" }
+[case.axes]
+op = ["WRITE", "READ"]
+
+[[case]]
+key = "vm1-local/posix/AIO/buffered/WRITE/N"
+workload = "posix/AIO/buffered/WRITE/N"
+profile = "N"
+backend = "POSIX"
+engine = "AIO"
+tgt_mem = "FILE"
+op = "WRITE"
+role = "track"
+tier = "nightly"
+timeout_s = 360
+sentinel = true
+flags = { posix_api_type = "AIO", filepath = "{posix_dir}/WRITE" }
+
+# The seed is fixed so that every night visits the same offsets.
+[[case]]
+key = "vm1-local/posix/URING/direct-blockaligned/{op}/S"
+workload = "posix/URING/direct-blockaligned/{op}/S"
+profile = "S"
+backend = "POSIX"
+engine = "URING"
+tgt_mem = "FILE"
+direct = true
+role = "gate"
+needs = ["io_uring"]
+[case.flags]
+posix_api_type = "URING"
+filepath = "{posix_dir}/{op}"
+randomize_location_mode = "blockaligned"
+randomize_location_mode_seed = 1
+[case.axes]
+op = ["WRITE", "READ"]
+
+# QUERY has no data to check: nixlbench writes the file itself, then asks
+# whether it exists.
+[[case]]
+key = "vm1-local/posix/AIO/buffered/QUERY/S"
+workload = "posix/AIO/buffered/QUERY/S"
+profile = "S"
+backend = "POSIX"
+engine = "AIO"
+tgt_mem = "FILE"
+op = "QUERY"
+flags = { posix_api_type = "AIO", filepath = "{posix_dir}/QUERY" }
+
+# The two environments are those of rocm_wheel_smoke_test.py: fast-required
+# refuses the compatibility path and, like that test, opens the file with
+# O_DIRECT; compat-allowed accepts either path.
+[[case]]
+key = "vm1-local/ais/{path}/{op}/S"
+workload = "ais/{path}/{op}/S"
+profile = "S"
+backend = "AIS"
+engine = "{path}"
+init_mem = "VRAM"
+tgt_mem = "FILE"
+flags = { gds_mt_num_threads = 4, filepath = "{ais_dir}/{op}" }
+[case.axes]
+path = ["compat-allowed", "fast-required"]
+op = ["WRITE", "READ"]
+[[case.when]]
+match = { path = "compat-allowed" }
+[case.when.set]
+role = "gate"
+env = { HIPFILE_ALLOW_COMPAT_MODE = "true", HIPFILE_UNSUPPORTED_FILE_SYSTEMS = "true" }
+[[case.when]]
+match = { path = "fast-required" }
+[case.when.set]
+direct = true
+env = { HIPFILE_ALLOW_COMPAT_MODE = "false", HIPFILE_FORCE_COMPAT_MODE = "false" }
+
+[[case]]
+key = "vm1-local/ais/compat-allowed/WRITE/N"
+workload = "ais/compat-allowed/WRITE/N"
+profile = "N"
+backend = "AIS"
+engine = "compat-allowed"
+init_mem = "VRAM"
+tgt_mem = "FILE"
+op = "WRITE"
+role = "track"
+tier = "nightly"
+timeout_s = 360
+flags = { gds_mt_num_threads = 4, filepath = "{ais_dir}/WRITE" }
+env = { HIPFILE_ALLOW_COMPAT_MODE = "true", HIPFILE_UNSUPPORTED_FILE_SYSTEMS = "true" }
+
+# nixlbench turns direct I/O on for GUSLI whatever it is told, and echoes it.
+# READ comes first, and the environment must have written 0xaa over the first
+# 32 MiB after the 1 MiB offset of the raw device: nixlbench fills only a
+# type F file with the pattern READ checks for, and WRITE leaves 0xbb there.
+# Batch 1: nixlbench indexes its device list by the position in the batch,
+# so with one device a larger batch runs off the end of it.
+[[case]]
+key = "vm1-local/gusli/K/{op}/S"
+workload = "gusli/K/{op}/S"
+profile = "S"
+backend = "GUSLI"
+engine = "K"
+tgt_mem = "BLK"
+direct = true
+role = "gate"
+needs = ["blkdev"]
+flags = { device_list = "11:K:{gusli_blkdev}", start_batch_size = 1, max_batch_size = 1 }
+[case.axes]
+op = ["READ", "WRITE"]
+
+# Two processes in one guest over 127.0.0.1. With VRAM both share the one
+# emulated GPU, which the runner orders last.
+[[case]]
+key = "vm1-local/ucx/tcp/{mem}/{op}/S"
+workload = "ucx/tcp/{mem}/{op}/S"
+profile = "S"
+backend = "UCX"
+transport = "tcp"
+attach = "none"
+[case.axes]
+mem = ["DD", "VV", "DV", "VD"]
+op = ["WRITE", "READ"]
+[[case.when]]
+match = { mem = "DD" }
+set = { role = "gate" }
+
+[[case]]
+key = "vm1-local/ucx/tcp/{mem}/WRITE/N"
+workload = "ucx/tcp/{mem}/WRITE/N"
+profile = "N"
+backend = "UCX"
+transport = "tcp"
+op = "WRITE"
+attach = "none"
+role = "track"
+tier = "nightly"
+timeout_s = 360
+[case.axes]
+mem = ["DD", "VV"]
+[[case.when]]
+match = { mem = "DD" }
+set = { sentinel = true }
+
+[[pair]]
+key = "vm1-local/vram-dram/tcp/WRITE/N"
+kind = "vram-dram"
+num = "vm1-local/ucx/tcp/VV/WRITE/N"
+den = "vm1-local/ucx/tcp/DD/WRITE/N"
+
+[[pair]]
+key = "vm1-local/direct-buffered/AIO/WRITE/S"
+kind = "direct-buffered"
+num = "vm1-local/posix/AIO/direct/WRITE/S"
+den = "vm1-local/posix/AIO/buffered/WRITE/S"
+
+[[pair]]
+key = "vm1-local/direct-buffered/AIO/READ/S"
+kind = "direct-buffered"
+num = "vm1-local/posix/AIO/direct/READ/S"
+den = "vm1-local/posix/AIO/buffered/READ/S"
+
+[[pair]]
+key = "vm1-local/direct-buffered/URING/WRITE/S"
+kind = "direct-buffered"
+num = "vm1-local/posix/URING/direct/WRITE/S"
+den = "vm1-local/posix/URING/buffered/WRITE/S"
+
+[[pair]]
+key = "vm1-local/direct-buffered/URING/READ/S"
+kind = "direct-buffered"
+num = "vm1-local/posix/URING/direct/READ/S"
+den = "vm1-local/posix/URING/buffered/READ/S"
+
+[[pair]]
+key = "vm1-local/direct-buffered/POSIXAIO/WRITE/S"
+kind = "direct-buffered"
+num = "vm1-local/posix/POSIXAIO/direct/WRITE/S"
+den = "vm1-local/posix/POSIXAIO/buffered/WRITE/S"
+
+[[pair]]
+key = "vm1-local/direct-buffered/POSIXAIO/READ/S"
+kind = "direct-buffered"
+num = "vm1-local/posix/POSIXAIO/direct/READ/S"
+den = "vm1-local/posix/POSIXAIO/buffered/READ/S"

@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+check_consistency = true
+warmup_iter = 16
+num_iter = 128
+large_blk_iter_ftr = 4
+total_buffer_size = 2097152
+start_block_size = 4096
+# A Key Value namespace takes values of at most 128 KiB.
+max_block_size = 131072
+start_batch_size = 1
+max_batch_size = 8
+
+[amd]
+name = "KV-W"
+rows = 24
+description = "Key Value store: values of 4 KiB to 128 KiB in batches of 1 to 8"

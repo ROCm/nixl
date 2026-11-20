@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Test fixture of test_amd_bench_lib.py and test_amd_bench_collect.py. The
+# golden values in those tests change when this file does.
+
+schema = 1
+lane = "fab"
+lane_id = "F-LBA"
+env_class = "gha-kvm-vm1-nvmeof"
+timing_trust = "emulated"
+topology = "single"
+status = "blocked"
+blocked_by = ["W9"]
+description = "Blocked as a whole"
+
+[[case]]
+key = "fab/posix/AIO/direct/{op}/S"
+workload = "posix/AIO/direct/{op}/S"
+profile = "S"
+backend = "POSIX"
+engine = "AIO"
+tgt_mem = "FILE"
+direct = true
+attach = "fabric-rdma"
+flags = { posix_api_type = "AIO", filepath = "{posix_dir}" }
+[case.axes]
+op = ["WRITE", "READ"]
+
+[[case]]
+key = "fab/kv/WRITE/S"
+workload = "kv/WRITE/S"
+profile = "S"
+backend = "NVME_KV"
+op = "WRITE"
+tgt_mem = "KV"
+attach = "fabric-rdma"
+status = "blocked"
+blocked_by = ["W13", "W9"]

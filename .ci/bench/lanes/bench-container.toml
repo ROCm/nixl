@@ -1,0 +1,242 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema = 1
+lane = "bench-container"
+lane_id = "C-BENCH"
+env_class = "gha-container"
+timing_trust = "container"
+topology = "single"
+status = "active"
+aa_case = "bench-container/ucx/tcp/DD/WRITE/N"
+description = "A job container with the ROCm runtime and the nixlbench wheel, no GPU; redis, etcd and an S3 server run in the job"
+
+[defaults]
+tier = "pr"
+timeout_s = 120
+
+# A READ case fails its data check on a file that a WRITE case left behind:
+# nixlbench fills a file with the pattern READ expects only when the file is
+# shorter than the buffer. Hence one directory per operation.
+[[case]]
+key = "bench-container/posix/{api}/{io}/{op}/S"
+workload = "posix/{api}/{io}/{op}/S"
+profile = "S"
+backend = "POSIX"
+engine = "{api}"
+tgt_mem = "FILE"
+role = "gate"
+flags = { posix_api_type = "{api}", filepath = "{posix_dir}/{op}" }
+[case.axes]
+api = ["AIO", "URING", "POSIXAIO"]
+io = ["buffered", "direct"]
+op = ["WRITE", "READ"]
+[[case.when]]
+match = { io = "direct" }
+set = { direct = true }
+[[case.when]]
+match = { api = "URING" }
+set = { needs = ["io_uring"] }
+
+[[case]]
+key = "bench-container/posix/URING/direct/{op}/N"
+workload = "posix/URING/direct/{op}/N"
+profile = "N"
+backend = "POSIX"
+engine = "URING"
+tgt_mem = "FILE"
+direct = true
+role = "track"
+tier = "nightly"
+timeout_s = 300
+needs = ["io_uring"]
+flags = { posix_api_type = "URING", filepath = "{posix_dir}/{op}" }
+[case.axes]
+op = ["WRITE", "READ"]
+
+# UCX_TLS=shm fails in createBackend with the real nixlbench ("Destination is
+# unreachable" at endpoint creation, also with shm,self and posix,sysv,self),
+# so the shm cases wait for a transport list that works.
+[[case]]
+key = "bench-container/ucx/{transport}/DD/{op}/S"
+workload = "ucx/{transport}/DD/{op}/S"
+profile = "S"
+backend = "UCX"
+role = "gate"
+[case.axes]
+transport = ["tcp", "shm"]
+op = ["WRITE", "READ"]
+[[case.when]]
+match = { transport = "shm" }
+set = { role = "info", status = "blocked", blocked_by = ["ucx-shm-ep"] }
+
+[[case]]
+key = "bench-container/ucx/{transport}/DD/{op}/N"
+workload = "ucx/{transport}/DD/{op}/N"
+profile = "N"
+backend = "UCX"
+role = "track"
+tier = "nightly"
+timeout_s = 300
+[case.axes]
+transport = ["tcp", "shm"]
+op = ["WRITE", "READ"]
+[[case.when]]
+match = { transport = "tcp", op = "WRITE" }
+set = { sentinel = true }
+[[case.when]]
+match = { transport = "shm" }
+set = { status = "blocked", blocked_by = ["ucx-shm-ep"] }
+
+# The Redis plugin registers its keys as object segments.
+[[case]]
+key = "bench-container/redis/{op}/S"
+workload = "redis/{op}/S"
+profile = "S"
+backend = "REDIS"
+tgt_mem = "OBJ"
+attach = "local-svc"
+needs = ["redis"]
+role = "gate"
+env = { REDIS_HOST = "{redis_host}", REDIS_PORT = "{redis_port}" }
+[case.axes]
+op = ["WRITE", "READ"]
+
+[[case]]
+key = "bench-container/redis/{op}/N"
+workload = "redis/{op}/N"
+profile = "N"
+backend = "REDIS"
+tgt_mem = "OBJ"
+attach = "local-svc"
+needs = ["redis"]
+role = "track"
+tier = "nightly"
+timeout_s = 300
+env = { REDIS_HOST = "{redis_host}", REDIS_PORT = "{redis_port}" }
+[case.axes]
+op = ["WRITE", "READ"]
+# For READ nixlbench seeds each key once, with max_block_size bytes, and the
+# plugin fails a GET whose reply is not the size asked for: every row below
+# the largest block fails.
+[[case.when]]
+match = { op = "READ" }
+set = { status = "blocked", blocked_by = ["nixlbench-redis-read-sweep"] }
+
+# The CRT client takes only objects at or above obj_crt_min_limit, so the
+# limit is the profile's smallest block; above it every transfer would use
+# the standard client.
+[[case]]
+key = "bench-container/obj/{engine}/{op}/S"
+workload = "obj/{engine}/{op}/S"
+profile = "S"
+backend = "OBJ"
+tgt_mem = "OBJ"
+attach = "http"
+needs = ["s3"]
+role = "gate"
+[case.flags]
+obj_endpoint_override = "{s3_endpoint}"
+obj_scheme = "http"
+obj_bucket_name = "{s3_bucket}"
+obj_access_key = "{s3_access_key}"
+obj_secret_key = "{s3_secret_key}"
+obj_use_virtual_addressing = false
+[case.axes]
+engine = ["std", "crt"]
+op = ["WRITE", "READ"]
+[[case.when]]
+match = { engine = "crt" }
+set = { flags = { obj_crt_min_limit = 65536 } }
+
+[[case]]
+key = "bench-container/obj/{engine}/{op}/N"
+workload = "obj/{engine}/{op}/N"
+profile = "N"
+backend = "OBJ"
+tgt_mem = "OBJ"
+attach = "http"
+needs = ["s3"]
+role = "track"
+tier = "nightly"
+timeout_s = 300
+[case.flags]
+obj_endpoint_override = "{s3_endpoint}"
+obj_scheme = "http"
+obj_bucket_name = "{s3_bucket}"
+obj_access_key = "{s3_access_key}"
+obj_secret_key = "{s3_secret_key}"
+obj_use_virtual_addressing = false
+[case.axes]
+engine = ["std", "crt"]
+op = ["WRITE", "READ"]
+[[case.when]]
+match = { engine = "crt" }
+set = { flags = { obj_crt_min_limit = 4096 } }
+
+# nixlbench turns direct I/O on for GUSLI whatever it is told, and echoes it.
+# READ comes first because nixlbench creates and fills a type F file only for
+# READ. Batch 1: nixlbench indexes its device list by the position in the
+# batch, so with one device a larger batch runs off the end of it.
+[[case]]
+key = "bench-container/gusli/F/{op}/S"
+workload = "gusli/F/{op}/S"
+profile = "S"
+backend = "GUSLI"
+engine = "F"
+tgt_mem = "BLK"
+direct = true
+role = "gate"
+flags = { device_list = "11:F:{gusli_file}", start_batch_size = 1, max_batch_size = 1 }
+[case.axes]
+op = ["READ", "WRITE"]
+
+[[case]]
+key = "bench-container/libfabric/tcp/DD/{op}/S"
+workload = "libfabric/tcp/DD/{op}/S"
+profile = "S"
+backend = "LIBFABRIC"
+transport = "tcp"
+status = "blocked"
+blocked_by = ["E8"]
+needs = ["libfabric"]
+flags = { enable_pt = true, progress_threads = 1 }
+env = { FI_UNIVERSE_SIZE = "16" }
+[case.axes]
+op = ["WRITE", "READ"]
+
+[[pair]]
+key = "bench-container/direct-buffered/AIO/WRITE/S"
+kind = "direct-buffered"
+num = "bench-container/posix/AIO/direct/WRITE/S"
+den = "bench-container/posix/AIO/buffered/WRITE/S"
+
+[[pair]]
+key = "bench-container/direct-buffered/AIO/READ/S"
+kind = "direct-buffered"
+num = "bench-container/posix/AIO/direct/READ/S"
+den = "bench-container/posix/AIO/buffered/READ/S"
+
+[[pair]]
+key = "bench-container/direct-buffered/URING/WRITE/S"
+kind = "direct-buffered"
+num = "bench-container/posix/URING/direct/WRITE/S"
+den = "bench-container/posix/URING/buffered/WRITE/S"
+
+[[pair]]
+key = "bench-container/direct-buffered/URING/READ/S"
+kind = "direct-buffered"
+num = "bench-container/posix/URING/direct/READ/S"
+den = "bench-container/posix/URING/buffered/READ/S"
+
+[[pair]]
+key = "bench-container/direct-buffered/POSIXAIO/WRITE/S"
+kind = "direct-buffered"
+num = "bench-container/posix/POSIXAIO/direct/WRITE/S"
+den = "bench-container/posix/POSIXAIO/buffered/WRITE/S"
+
+[[pair]]
+key = "bench-container/direct-buffered/POSIXAIO/READ/S"
+kind = "direct-buffered"
+num = "bench-container/posix/POSIXAIO/direct/READ/S"
+den = "bench-container/posix/POSIXAIO/buffered/READ/S"

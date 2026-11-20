@@ -1,0 +1,4 @@
+# synthetic: a data row with one column missing
+Block Size (B)      Batch Size     B/W (GB/Sec)   Avg Lat. (us)  Avg Prep (us)  P99 Prep (us)  Avg Post (us)  P99 Post (us)  Avg Tx (us)    P99 Tx (us)
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+65536               4              4.429712       3.7            5.0            5.0            14.1           31.0           0.6

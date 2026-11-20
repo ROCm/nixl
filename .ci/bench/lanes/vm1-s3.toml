@@ -1,0 +1,102 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema = 1
+lane = "vm1-s3"
+lane_id = "S3-HTTP"
+env_class = "gha-kvm-vm1-s3"
+timing_trust = "emulated"
+topology = "single"
+status = "blocked"
+blocked_by = ["W4"]
+aa_case = ""
+description = "One rocjitsu guest and the rocm-ernic S3 store: the OBJ plugin over HTTP and, with the hipObject engine, over RDMA"
+
+# Waits for its job, which selects the rocm-ernic s3 backend with a compose
+# override. S3-RDMA runs in the same boot.
+
+[defaults]
+tier = "nightly"
+timeout_s = 180
+
+# The store rejects an HTTP body above 16 KiB, so these stop at 8 KiB.
+[[case]]
+key = "vm1-s3/obj/std/{op}/small"
+workload = "obj/std/{op}/small"
+profile = "S"
+backend = "OBJ"
+engine = "std"
+tgt_mem = "OBJ"
+attach = "http"
+needs = ["s3"]
+[case.flags]
+start_block_size = 4096
+max_block_size = 8192
+obj_endpoint_override = "{s3_endpoint}"
+obj_scheme = "http"
+obj_bucket_name = "{s3_bucket}"
+obj_access_key = "{s3_access_key}"
+obj_secret_key = "{s3_secret_key}"
+obj_use_virtual_addressing = false
+[case.axes]
+op = ["WRITE", "READ"]
+
+# S3-RDMA. The flag naming the NIC comes with the hipObject engine, so the
+# flags here are not yet the whole command line.
+[[case]]
+key = "vm1-s3/obj/hipobj/{init_mem}/{op}/S"
+workload = "obj/hipobj/{init_mem}/{op}/S"
+profile = "S"
+backend = "OBJ"
+engine = "hipobj"
+tgt_mem = "OBJ"
+attach = "http-rdma"
+status = "blocked"
+blocked_by = ["W14", "W11"]
+needs = ["s3", "rdma"]
+env = { HIPOBJ_REQUIRE_GPU_DIRECT = "1" }
+[case.flags]
+obj_accelerated_enable = true
+obj_accelerated_type = "hipobj"
+obj_endpoint_override = "{s3_endpoint}"
+obj_scheme = "http"
+obj_bucket_name = "{s3_bucket}"
+obj_access_key = "{s3_access_key}"
+obj_secret_key = "{s3_secret_key}"
+obj_use_virtual_addressing = false
+[case.axes]
+init_mem = ["DRAM", "VRAM"]
+op = ["WRITE", "READ"]
+
+[[case]]
+key = "vm1-s3/obj/hipobj/{init_mem}/WRITE/N"
+workload = "obj/hipobj/{init_mem}/WRITE/N"
+profile = "N"
+backend = "OBJ"
+engine = "hipobj"
+tgt_mem = "OBJ"
+op = "WRITE"
+attach = "http-rdma"
+role = "track"
+timeout_s = 360
+status = "blocked"
+blocked_by = ["W14", "W11"]
+needs = ["s3", "rdma"]
+env = { HIPOBJ_REQUIRE_GPU_DIRECT = "1" }
+[case.flags]
+obj_accelerated_enable = true
+obj_accelerated_type = "hipobj"
+obj_endpoint_override = "{s3_endpoint}"
+obj_scheme = "http"
+obj_bucket_name = "{s3_bucket}"
+obj_access_key = "{s3_access_key}"
+obj_secret_key = "{s3_secret_key}"
+obj_use_virtual_addressing = false
+[case.axes]
+init_mem = ["DRAM", "VRAM"]
+
+[[pair]]
+key = "vm1-s3/vram-dram/hipobj/WRITE/N"
+kind = "vram-dram"
+num = "vm1-s3/obj/hipobj/VRAM/WRITE/N"
+den = "vm1-s3/obj/hipobj/DRAM/WRITE/N"

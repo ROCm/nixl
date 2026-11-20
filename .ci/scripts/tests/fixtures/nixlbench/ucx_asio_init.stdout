@@ -1,0 +1,48 @@
+Using address 127.0.0.1 port 12345 for ASIO runtime
+WARNING: Adjusting num_iter to 112 to allow equal distribution to 1 threads
+WARNING: Adjusting warmup_iter to 16 to allow equal distribution to 1 threads
+Init nixl worker, dev all rank 0, type initiator, hostname host
+Waiting for all processes to start... (expecting 2 total: 1 initiators and 1 targets)
+All processes are ready to proceed
+****************************************************************************************************************************************************************
+NIXLBench Configuration
+****************************************************************************************************************************************************************
+Runtime (--runtime_type=[ETCD,ASIO])                        : ASIO
+ASIO Address (--asio_address)                               : 127.0.0.1
+ASIO Port (--asio_port)                                     : 12345
+Worker type (--worker_type=[nixl,nvshmem])                  : nixl
+Backend (--backend=[UCX,GDS,GDS_MT,AIS,POSIX,MOONCAKE,HF3FS,OBJ,REDIS,GUSLI,AZURE_BLOB,DOCA_MEMOS]): UCX
+Enable pt (--enable_pt=[0,1])                               : 0
+Progress threads (--progress_threads=N)                     : 0
+Device list (--device_list=dev1,dev2,...)                   : all
+Enable VMM (--enable_vmm=[0,1])                             : 0
+VMM GPUDirect RDMA capable (--vmm_gdr_capable=[0,1])        : 1
+VMM locality domain (--use_localized=[-1,0,1])              : -1
+Recreate xfer each iteration (--recreate_xfer=[0,1])        : 0
+Re-register memory each iteration (--reregister_mem=[0,1])  : 0
+Prepared xfer (prep+make) (--prepared_xfer=[0,1])           : 0
+Pipeline depth (--pipeline_depth=N)                         : 1
+Use hugepages (--use_hugepages=[0,1])                       : 0
+Initiator seg type (--initiator_seg_type=[DRAM,VRAM])       : DRAM
+Target seg type (--target_seg_type=[DRAM,VRAM])             : DRAM
+Scheme (--scheme=[pairwise,manytoone,onetomany,tp])         : pairwise
+Mode (--mode=[SG,MG])                                       : SG
+Op type (--op_type=[READ,WRITE,QUERY])                      : WRITE
+Check consistency (--check_consistency=[0,1])               : 1
+Total buffer size (--total_buffer_size=N)                   : 80000000
+Num initiator dev (--num_initiator_dev=N)                   : 1
+Num target dev (--num_target_dev=N)                         : 1
+Start block size (--start_block_size=N)                     : 16384
+Max block size (--max_block_size=N)                         : 16384
+Start batch size (--start_batch_size=N)                     : 4
+Max batch size (--max_batch_size=N)                         : 4
+Num iter (--num_iter=N)                                     : 112
+Warmup iter (--warmup_iter=N)                               : 16
+Large block iter factor (--large_blk_iter_ftr=N)            : 16
+Num threads (--num_threads=N)                               : 1
+Use Device API (--use_device_api=[0,1])                     : 0
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Block Size (B)      Batch Size     B/W (GB/Sec)   Avg Lat. (us)  Avg Prep (us)  P99 Prep (us)  Avg Post (us)  P99 Post (us)  Avg Tx (us)    P99 Tx (us)
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+16384               4              3.030566       5.4            3.0            3.0            4.4            7.0            17.2           43.0

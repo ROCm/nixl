@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+check_consistency = true
+warmup_iter = 16
+num_iter = 128
+large_blk_iter_ftr = 4
+total_buffer_size = 67108864
+start_block_size = 65536
+max_block_size = 65536
+start_batch_size = 1
+max_batch_size = 32
+
+[amd]
+name = "B"
+rows = 6
+description = "Batch shape: 64 KiB blocks in batches of 1 to 32, data checked"

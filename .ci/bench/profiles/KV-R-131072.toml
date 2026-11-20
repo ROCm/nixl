@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+check_consistency = true
+warmup_iter = 16
+num_iter = 128
+large_blk_iter_ftr = 4
+# nixlbench seeds one value of the registered size, so the buffer, the block
+# and the value must all be the same size.
+total_buffer_size = 131072
+start_block_size = 131072
+max_block_size = 131072
+start_batch_size = 1
+max_batch_size = 1
+
+[amd]
+name = "KV-R-131072"
+rows = 1
+description = "Key Value retrieve: one value of 131072 bytes"

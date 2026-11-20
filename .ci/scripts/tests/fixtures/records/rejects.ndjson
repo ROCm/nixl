@@ -1,0 +1,9 @@
+{"kind":"sample","case_uid":"ffffffffffffffffffff","block_size":
+[1,2,3]
+{"kind":"mystery","x":1}
+{"kind":"sample","case_uid":"ffffffffffffffffffff","block_size":4096,"batch_size":1,"bw_gbps":1.5,"agg_bw_gbps":null,"net_util_pct":null,"lat_avg_us":null,"prep_avg_us":null,"prep_p99_us":null,"post_avg_us":null,"post_p99_us":null,"tx_avg_us":null,"tx_p99_us":null}
+{"kind":"test","run_uid":"eeeeeeeeeeeeeeeeeeee","suite":"probe","test_id":"ibv/start","status":"fail","duration_s":null,"sanitizer":null,"error_excerpt":""}
+{"kind":"counter","case_uid":"ffffffffffffffffffff","name":"x","value":NaN,"unit":"s","deterministic":false}
+{"kind":"counter","case_uid":"ffffffffffffffffffff","name":"ucx_warn_lines","value":0,"unit":"count","deterministic":false,"colour":"red"}
+{"kind":"case","run_uid":"eeeeeeeeeeeeeeeeeeee","case_uid":"34e39fb0cf7cdf552411","case_key":"net/ucx/tcp/DD/WRITE/S","workload_key":"ucx/tcp/DD/WRITE/S","pair_key":"net/rc-tcp/DD/WRITE/S,net/vram-dram/tcp/WRITE/S","pair_role":"den,den","params_sha":"d65261afacb2ac564c69c3b89804739836743f8a31927531e7e5f87be2209e87","profile":"S","role":"gate","required":true,"tier":"nightly","variant":"head","round":0,"order":0,"backend":"UCX","engine":"","transport_req":"tcp","transport_obs":null,"init_mem":"DRAM","tgt_mem":"DRAM","op":"WRITE","scheme":"pairwise","runtime":"ASIO","threads":1,"direct":false,"flags":"","total_buffer":33554432,"attach":"net-tcp","target_impl":null,"ns_type":null,"ns_lba_bs":null,"ns_bytes":null,"consistency":null,"path_observed":null,"status":"pass","skip_reason":null,"blocked_by":[],"exit_init":null,"exit_tgt":null,"error_class":"","error_excerpt":"","duration_s":null,"rows_expected":1,"rows_seen":null,"load1_before":null,"load1_after":null,"steal_pct":null,"cmdline":null,"log_ref":null,"started_at":null}
+{"kind":"counter","case_uid":"ffffffffffffffffffff","name":"x","value":1e999,"unit":"s","deterministic":false}

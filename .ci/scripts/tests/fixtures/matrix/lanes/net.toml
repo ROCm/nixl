@@ -1,0 +1,63 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Test fixture of test_amd_bench_lib.py and test_amd_bench_collect.py. The
+# golden values in those tests change when this file does.
+
+schema = 1
+lane = "net"
+lane_id = "T-NET"
+env_class = "gha-kvm-vm2"
+timing_trust = "emulated"
+topology = "two-host"
+status = "active"
+aa_case = ""
+description = "Two guests"
+
+[defaults]
+attach = "net-tcp"
+
+[[case]]
+key = "net/ucx/{transport}/{mem}/{op}/S"
+workload = "ucx/{transport}/{mem}/{op}/S"
+profile = "S"
+backend = "UCX"
+[case.axes]
+transport = ["tcp", "rc"]
+mem = ["DD", "VV", "DV"]
+op = ["WRITE"]
+[[case.when]]
+match = { transport = ["rc", "ud"] }
+set = { attach = "net-rdma" }
+[[case.when]]
+match = { transport = "tcp", init_mem = "DRAM", tgt_mem = "DRAM" }
+set = { role = "gate", required = true }
+
+[[case]]
+key = "net/ucx/tcp/{mem}/WRITE/N"
+workload = "ucx/tcp/{mem}/WRITE/N"
+profile = "N"
+backend = "UCX"
+transport = "tcp"
+op = "WRITE"
+role = "track"
+[case.axes]
+mem = ["DD", "VV"]
+
+[[pair]]
+key = "net/vram-dram/tcp/WRITE/S"
+kind = "vram-dram"
+num = "net/ucx/tcp/VV/WRITE/S"
+den = "net/ucx/tcp/DD/WRITE/S"
+
+[[pair]]
+key = "net/rc-tcp/DD/WRITE/S"
+kind = "rc-tcp"
+num = "net/ucx/rc/DD/WRITE/S"
+den = "net/ucx/tcp/DD/WRITE/S"
+
+[[pair]]
+key = "net/vram-dram/tcp/WRITE/N"
+kind = "vram-dram"
+num = "net/ucx/tcp/VV/WRITE/N"
+den = "net/ucx/tcp/DD/WRITE/N"
