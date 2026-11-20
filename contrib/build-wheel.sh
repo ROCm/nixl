@@ -406,9 +406,18 @@ repair_wheel() {
     fi
 }
 
-# Fail if the repaired wheel vendors a ROCm runtime or DOCA library, its import package
-# is not nixl_<variant>, or it carries what wheel_merge_rocm.py adds to the
-# rocm-nixl wheel (the nixl dispatcher) or what belongs to CUDA builds (nixl_ep).
+# A backend wheel is later merged with those for the other ROCm versions into
+# the rocm-nixl wheel (wheel_merge_rocm.py). Fail here, in the build that went
+# wrong, rather than in the merge or on a user's machine, if the repaired wheel:
+# - vendors a ROCm runtime library. auditwheel copies in every library that no
+#   --exclude matches; such a copy would be loaded next to the host's ROCm,
+#   which the backend was selected for and the application (e.g. PyTorch) uses;
+# - vendors a DOCA library, which comes from the host as in the CUDA wheels;
+# - has an import package other than nixl_<variant>, the name the dispatcher
+#   imports and what lets the backends for several ROCm versions share a wheel;
+# - carries the nixl dispatcher (nixl/, nixl_meta_utils.py), which
+#   wheel_merge_rocm.py adds once and which would collide between backends;
+# - carries nixl_ep, which is CUDA-only.
 check_rocm_wheel() {
     python3 - "$1" "$ROCM_VARIANT" "${ROCM_RUNTIME_LIBS[*]}" "${ROCM_PREFIX_LIBS[*]}" <<'EOF'
 import os

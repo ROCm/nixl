@@ -95,10 +95,18 @@ FROM manylinux_base AS wheel_base_rocm
 
 ARG ARCH="x86_64"
 ARG ROCM_VERSION="10.1.0"
+# Not configurable: the ROCm rpms install under /opt/rocm/core-<X.Y>.
 ENV ROCM_PATH=/opt/rocm
 
-# The component rpms populate /opt/rocm/core-<X.Y> only; link the unversioned
-# view instead of installing the gfx metapackage. amdrocm-runtime-devel (HIP and
+# ROCm 10 and newer are on stable.repo.amd.com; 7.13 and 7.14 are on
+# repo.amd.com (packages-multi-arch). 7.14 is the oldest release accepted:
+# 7.13 has no amdrocm-hipfile packages, and the releases before it are
+# published elsewhere.
+#
+# The component rpms populate /opt/rocm/core-<X.Y> only. The unversioned
+# /opt/rocm/{bin,include,lib} that NIXL builds against is linked below instead
+# of installing the amdrocm-core metapackages that normally create it, which
+# would pull in the whole math and ML stack. amdrocm-runtime-devel (HIP and
 # HSA headers) is installed without dependencies: the only one not already there
 # is amdrocm-llvm-devel (2 GB, unused). Of amdrocm-llvm only the two libraries
 # libamd_comgr links are kept; the ldd check fails the build if that changes.
@@ -107,13 +115,17 @@ RUN if [ "$ARCH" != "x86_64" ]; then \
         exit 1; \
     fi && \
     ROCM_MM="$(echo "$ROCM_VERSION" | cut -d. -f1,2)" && \
-    if [ "${ROCM_VERSION%%.*}" = "7" ]; then \
-        ROCM_REPO_URL="https://repo.amd.com/rocm/packages-multi-arch/rhel8/x86_64/"; \
-        ROCM_REPO_GPG="https://repo.amd.com/rocm/packages-multi-arch/gpg/rocm.gpg"; \
-    else \
-        ROCM_REPO_URL="https://stable.repo.amd.com/rocm/core/packages/rhel8/x86_64/"; \
-        ROCM_REPO_GPG="https://stable.repo.amd.com/rocm/gpg/packages.gpg"; \
-    fi && \
+    case "$ROCM_MM" in \
+        7.14) \
+            ROCM_REPO_URL="https://repo.amd.com/rocm/packages-multi-arch/rhel8/x86_64/"; \
+            ROCM_REPO_GPG="https://repo.amd.com/rocm/packages-multi-arch/gpg/rocm.gpg" ;; \
+        [1-9][0-9].*) \
+            ROCM_REPO_URL="https://stable.repo.amd.com/rocm/core/packages/rhel8/x86_64/"; \
+            ROCM_REPO_GPG="https://stable.repo.amd.com/rocm/gpg/packages.gpg" ;; \
+        *) \
+            echo "ERROR: ROCm $ROCM_VERSION is not supported: the wheel build needs ROCm 7.14, or 10.0 and newer" >&2; \
+            exit 1 ;; \
+    esac && \
     printf '[amdrocm]\nname=AMD ROCm %s\nbaseurl=%s\nenabled=1\ngpgcheck=1\ngpgkey=%s\ntimeout=300\nretries=20\n' \
         "$ROCM_VERSION" "$ROCM_REPO_URL" "$ROCM_REPO_GPG" > /etc/yum.repos.d/amdrocm.repo && \
     ROCM_PKGS="" && \
@@ -124,12 +136,15 @@ RUN if [ "$ARCH" != "x86_64" ]; then \
     dnf download --destdir /tmp/rocm-rpm "amdrocm-runtime-devel${ROCM_MM}-${ROCM_VERSION}" && \
     rpm -K /tmp/rocm-rpm/*.rpm | grep 'signatures OK' && \
     rpm -i --nodeps /tmp/rocm-rpm/*.rpm && \
-    rm -rf /tmp/rocm-rpm && \
+    rm -r /tmp/rocm-rpm && \
     dnf clean all && \
-    ROCM_CORE="/opt/rocm/core-${ROCM_MM}" && \
+    ROCM_CORE="$ROCM_PATH/core-${ROCM_MM}" && \
     find "$ROCM_CORE/lib/llvm" -mindepth 1 \( -type f -o -type l \) \
         ! -name 'libLLVM.so*' ! -name 'libLLVM-*.so' ! -name 'libclang-cpp.so*' -delete && \
     rm -f "$ROCM_CORE/bin/hipify-clang" && \
+    # No package installed here creates /opt/rocm/{bin,include,lib}: they are
+    # update-alternatives links made by the amdrocm-core metapackages. .info is
+    # linked too, so that the ROCm version can be read from $ROCM_PATH.
     for entry in bin include lib .info; do \
         [ -e "$ROCM_PATH/$entry" ] || ln -s "$ROCM_CORE/$entry" "$ROCM_PATH/$entry"; \
     done && \
@@ -286,6 +301,9 @@ RUN cd /tmp && \
     rm -rf "/tmp/hiredis-${HIREDIS_VERSION}" "/tmp/hiredis-${HIREDIS_VERSION}.tar.gz"
 
 # Build Abseil from source (required for absl/log).
+# The ROCm build removes each source tree in the RUN that built it, to keep the
+# layer small. These rm take no -f on purpose: if a path has moved (WORKDIR,
+# clone directory, version) the build must fail, not silently keep the tree.
 RUN --mount=type=secret,id=ghconfig,target=/root/.gitconfig git clone https://github.com/abseil/abseil-cpp.git && \
     cd abseil-cpp && \
     git fetch --depth 1 origin ${ABSL_TAG} && \
@@ -301,7 +319,7 @@ RUN --mount=type=secret,id=ghconfig,target=/root/.gitconfig git clone https://gi
     make -j${NPROC:-$(nproc)} && \
     make install && \
     ldconfig && \
-    if [ "$GPU_STACK" = "rocm" ]; then rm -rf /workspace/abseil-cpp; fi
+    if [ "$GPU_STACK" = "rocm" ]; then rm -r /workspace/abseil-cpp; fi
 
 ARG GRPC_NPROC
 RUN --mount=type=secret,id=ghconfig,target=/root/.gitconfig git clone --recurse-submodules -b ${GRPC_TAG} --depth 1 --shallow-submodules https://github.com/grpc/grpc && \
@@ -325,7 +343,7 @@ RUN --mount=type=secret,id=ghconfig,target=/root/.gitconfig git clone --recurse-
     make -j${GRPC_NPROC:-$(nproc)} && \
     make install && \
     ldconfig && \
-    if [ "$GPU_STACK" = "rocm" ]; then rm -rf /workspace/grpc; fi
+    if [ "$GPU_STACK" = "rocm" ]; then rm -r /workspace/grpc; fi
 
 ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib64:$LD_LIBRARY_PATH
 
@@ -342,7 +360,7 @@ RUN wget ${WGET_RETRY_OPTS} https://curl.se/download/curl-8.19.0.tar.gz && \
     tar xzf curl-8.19.0.tar.gz && cd curl-8.19.0 && \
     ./configure --prefix=/usr/local --with-ssl=/usr/local/openssl --without-libpsl --enable-shared && \
     make -j${NPROC:-$(nproc)} && make install && \
-    if [ "$GPU_STACK" = "rocm" ]; then rm -rf /workspace/curl-8.19.0 /workspace/curl-8.19.0.tar.gz; fi
+    if [ "$GPU_STACK" = "rocm" ]; then rm -r /workspace/curl-8.19.0 /workspace/curl-8.19.0.tar.gz; fi
 
 # The ROCm build clones in the RUN that builds, so that the layer can drop the 2 GB tree.
 RUN --mount=type=secret,id=ghconfig,target=/root/.gitconfig if [ "$GPU_STACK" != "rocm" ]; then \
@@ -362,7 +380,7 @@ RUN --mount=type=secret,id=ghconfig,target=/root/.gitconfig if [ "$GPU_STACK" = 
         -DCURL_INCLUDE_DIR=/usr/local/include \
         -DOPENSSL_USE_STATIC_LIBS=OFF && \
     make -j${NPROC:-$(nproc)} && make install && \
-    if [ "$GPU_STACK" = "rocm" ]; then rm -rf /workspace/aws-sdk-cpp /workspace/aws_sdk_build; fi
+    if [ "$GPU_STACK" = "rocm" ]; then rm -r /workspace/aws-sdk-cpp /workspace/aws_sdk_build; fi
 
 ENV PKG_CONFIG_PATH=$PKG_CONFIG_PATH:/usr/local/lib64/pkgconfig:/usr/lib64/pkgconfig:/usr/lib/pkgconfig
 
@@ -377,7 +395,7 @@ RUN --mount=type=secret,id=ghconfig,target=/root/.gitconfig git clone --depth 1 
     cd libxml2 && \
     ACLOCAL_PATH=/usr/share/aclocal ./autogen.sh && make -j${NPROC:-$(nproc)} && \
     make install && \
-    if [ "$GPU_STACK" = "rocm" ]; then rm -rf /workspace/libxml2; fi
+    if [ "$GPU_STACK" = "rocm" ]; then rm -r /workspace/libxml2; fi
 
 # Fetch the upstream fix with its parent so git show can produce the patch.
 RUN --mount=type=secret,id=ghconfig,target=/root/.gitconfig git clone --depth 1 https://github.com/Azure/azure-sdk-for-cpp.git --branch azure-storage-blobs_12.15.0 && \
@@ -399,7 +417,7 @@ RUN --mount=type=secret,id=ghconfig,target=/root/.gitconfig git clone --depth 1 
     cmake --install sdk/storage/azure-storage-common && \
     cmake --install sdk/storage/azure-storage-blobs && \
     cmake --install sdk/identity && \
-    if [ "$GPU_STACK" = "rocm" ]; then rm -rf /workspace/azure-sdk-for-cpp; fi
+    if [ "$GPU_STACK" = "rocm" ]; then rm -r /workspace/azure-sdk-for-cpp; fi
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
@@ -440,7 +458,7 @@ RUN wget ${WGET_RETRY_OPTS} https://www.mellanox.com/downloads/DOCA/DOCA_v3.5.0/
     # Check that gpunetio and telemetry-exporter development packages are installed correctly
     # The ROCm build drops the 900 MB bundle and its unpacked package repository.
     if [ "$GPU_STACK" = "rocm" ]; then \
-        rm -f /workspace/doca-host.rpm && rpm -e doca-host && dnf clean all; \
+        rm /workspace/doca-host.rpm && rpm -e doca-host && dnf clean all; \
     else \
         pkg-config --cflags --libs doca-gpunetio; \
     fi && \
@@ -492,7 +510,7 @@ RUN wget ${WGET_RETRY_OPTS} \
     make -j${NPROC:-$(nproc)} && \
     make install && \
     ldconfig && \
-    if [ "$GPU_STACK" = "rocm" ]; then rm -rf /workspace/libfabric-*; fi
+    if [ "$GPU_STACK" = "rocm" ]; then rm -r /workspace/libfabric-*; fi
 
 # By default, uv downloads python packages to $HOME/.cache/uv and hard links them
 # from the virtual environment. This means that the files reside in /root/.cache/uv,
@@ -585,7 +603,7 @@ RUN --mount=type=secret,id=ghconfig,target=/root/.gitconfig cd /usr/local/src &&
              echo "ERROR: UCX was built without its ROCm module (no *rocm* under /usr/lib64/ucx)" >&2; \
              exit 1; \
          fi && \
-         rm -rf /usr/local/src/ucx; \
+         rm -r /usr/local/src/ucx; \
      fi
 
 FROM $wheel_base AS wheel
