@@ -29,6 +29,7 @@ import os
 import re
 import signal
 import sys
+from collections.abc import Iterator
 from importlib import metadata
 from typing import NamedTuple, NoReturn
 
@@ -59,15 +60,14 @@ def _fail(message: str) -> NoReturn:
     sys.exit(1)
 
 
-def rocm_search_root() -> str:
-    """Where find_rocm() starts: $ROCM_PATH, or the default install root."""
-    return os.environ.get("ROCM_PATH") or _DEFAULT_ROCM_ROOT
-
-
 def no_rocm_text() -> str:
-    """Where find_rocm() looked, for the warning that it found nothing."""
-    hint = "" if os.environ.get("ROCM_PATH") else " (set ROCM_PATH)"
-    return f"no ROCm install found under {rocm_search_root()}{hint}"
+    """Where find_rocm() looked, for the warning that it selected no install."""
+    rocm_path = os.environ.get("ROCM_PATH")
+    if rocm_path:
+        where = f"{rocm_path} or AMD's pip ROCm packages"
+    else:
+        where = f"AMD's pip ROCm packages or {_DEFAULT_ROCM_ROOT} (set ROCM_PATH)"
+    return f"found no ROCm install, or several versions side by side, in {where}"
 
 
 def _rocm_install(root: str) -> RocmInstall | None:
@@ -81,19 +81,50 @@ def _rocm_install(root: str) -> RocmInstall | None:
     return RocmInstall(root, (int(match.group(1)), int(match.group(2))))
 
 
+def _pip_rocm_root() -> str | None:
+    """The prefix of a ROCm installed from AMD's pip packages, if one is."""
+    try:
+        import rocm_sdk
+
+        # <site-packages>/_rocm_sdk_core/lib/libamdhip64.so.<N>
+        library = str(rocm_sdk.find_libraries("amdhip64")[0])
+    except Exception:
+        # Not installed, without its core package, or not AMD's package.
+        return None
+    return os.path.dirname(os.path.dirname(library))
+
+
+def _rocm_roots() -> Iterator[str]:
+    """The prefixes find_rocm() looks for a ROCm install under, in order."""
+    rocm_path = os.environ.get("ROCM_PATH")
+    if rocm_path:
+        yield rocm_path
+    pip_root = _pip_rocm_root()
+    if pip_root is not None:
+        yield pip_root
+    if not rocm_path:
+        yield _DEFAULT_ROCM_ROOT
+
+
 def find_rocm() -> RocmInstall | None:
-    """The ROCm install nixlbench should load its HIP runtime from."""
-    root = rocm_search_root()
-    candidates = [root, os.path.join(root, "core")]
-    # The component packages populate only <root>/core-<X.Y>. Several versions
-    # side by side are ambiguous.
-    versioned = glob.glob(os.path.join(root, "core-*"))
-    if len(versioned) == 1:
-        candidates.append(versioned[0])
-    for candidate in candidates:
-        install = _rocm_install(candidate)
-        if install is not None:
-            return install
+    """The ROCm install nixlbench should load its HIP runtime from.
+
+    Keep in step with find_rocm() in nixl_meta_utils.py, which selects the NIXL
+    backend: this is its search of the installs on disk.
+    """
+    for root in _rocm_roots():
+        candidates = [root, os.path.join(root, "core")]
+        # The component packages populate only <root>/core-<X.Y>. Several
+        # versions side by side are ambiguous.
+        versioned = {
+            os.path.realpath(path) for path in glob.glob(os.path.join(root, "core-*"))
+        }
+        if len(versioned) == 1:
+            candidates.extend(versioned)
+        for candidate in candidates:
+            install = _rocm_install(candidate)
+            if install is not None:
+                return install
     return None
 
 

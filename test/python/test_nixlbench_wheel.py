@@ -592,12 +592,19 @@ def _run(code, site, default_root, args=(), env=None):
     )
 
 
+# No ROCm of the machine running the tests: neither under the default root nor
+# from pip.
+_ISOLATE_BACKEND = (
+    "backend._DEFAULT_ROCM_ROOT = os.environ['TEST_ROCM_ROOT']\n"
+    "backend._pip_rocm_root = lambda: os.environ.get('TEST_PIP_ROCM')\n"
+)
+
+
+NO_ROCM = "found no ROCm install, or several versions side by side, in"
+
+
 def _launch(site, default_root, package="nixlbench_rocm10_1", **kwargs):
-    code = (
-        f"import os, {package} as backend\n"
-        "backend._DEFAULT_ROCM_ROOT = os.environ['TEST_ROCM_ROOT']\n"
-        "backend.main()\n"
-    )
+    code = f"import os, {package} as backend\n{_ISOLATE_BACKEND}backend.main()\n"
     return _run(
         code, site if isinstance(site, list) else [site], default_root, **kwargs
     )
@@ -677,29 +684,89 @@ def test_launcher_finds_a_single_versioned_core(site, tmp_path):
 
     _rocm(root / "core-10.2", "10.2.0")
     result = _launch(site, root)
-    assert f"no ROCm install found under {root} (set ROCM_PATH)" in result.stderr
+    assert f"{NO_ROCM} AMD's pip ROCm packages or {root} (set ROCM_PATH)" in (
+        result.stderr
+    )
     assert _value(result, "LD_LIBRARY_PATH") == "<unset>"
 
     result = _launch(site, tmp_path / "elsewhere", env={"ROCM_PATH": str(root)})
-    assert f"no ROCm install found under {root}; relying on" in result.stderr
+    assert f"{NO_ROCM} {root} or AMD's pip ROCm packages; relying on" in result.stderr
     assert _value(result, "LD_LIBRARY_PATH") == "<unset>"
+
+
+def test_launcher_finds_a_single_versioned_core_behind_links(site, tmp_path):
+    root = tmp_path / "rocm"
+    _rocm(root / "core-10.1")
+    (root / "core-10").symlink_to(root / "core-10.1")
+    result = _launch(site, root)
+    assert result.stderr == ""
+    assert _value(result, "LD_LIBRARY_PATH") == f"{root}/core-10.1/lib"
+
+
+def test_launcher_uses_pip_rocm_after_rocm_path(site, tmp_path):
+    default = _rocm(tmp_path / "default", "10.2.0")
+    pip = _rocm(tmp_path / "pip")
+    result = _launch(site, default, env={"TEST_PIP_ROCM": str(pip)})
+    assert result.stderr == ""
+    assert _value(result, "LD_LIBRARY_PATH") == f"{pip}/lib"
+
+    # ROCM_PATH without ROCm: the default root is not used, pip ROCm is.
+    empty = {"TEST_PIP_ROCM": str(pip), "ROCM_PATH": str(tmp_path / "empty")}
+    result = _launch(site, default, env=empty)
+    assert _value(result, "LD_LIBRARY_PATH") == f"{pip}/lib"
+
+    rocm = _rocm(tmp_path / "rocm")
+    result = _launch(
+        site, default, env={"TEST_PIP_ROCM": str(pip), "ROCM_PATH": str(rocm)}
+    )
+    assert _value(result, "LD_LIBRARY_PATH") == f"{rocm}/lib"
+
+
+def test_launcher_locates_pip_rocm(site, tmp_path):
+    def pip_rocm_root():
+        code = (
+            "import sys, nixlbench_rocm10_1 as backend\n"
+            "sys.stdout.write(str(backend._pip_rocm_root()))\n"
+        )
+        return _run(code, [tmp_path / "pip", site], tmp_path).stdout
+
+    # Ahead of a rocm_sdk installed next to the tests' interpreter.
+    package = tmp_path / "pip" / "rocm_sdk"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    assert pip_rocm_root() == "None"
+
+    prefix = tmp_path / "pip" / "_rocm_sdk_core"
+    (package / "__init__.py").write_text(
+        "import pathlib\n"
+        "def find_libraries(*shortnames):\n"
+        "    assert shortnames == ('amdhip64',)\n"
+        f"    return [pathlib.Path({str(prefix)!r}) / 'lib' / 'libamdhip64.so.7']\n"
+    )
+    assert pip_rocm_root() == str(prefix)
+
+    (package / "__init__.py").write_text(
+        "def find_libraries(*shortnames):\n"
+        "    raise ModuleNotFoundError('Missing required rocm libraries')\n"
+    )
+    assert pip_rocm_root() == "None"
 
 
 def test_launcher_needs_a_version_and_the_hip_runtime(site, tmp_path):
     root = _rocm(tmp_path / "rocm")
     (root / "lib" / "libamdhip64.so.7").unlink()
-    assert "no ROCm install found" in _launch(site, root).stderr
+    assert NO_ROCM in _launch(site, root).stderr
     (root / "lib" / "libamdhip64.so.7").write_bytes(b"")
     (root / ".info" / "version").write_text("unknown\n")
-    assert "no ROCm install found" in _launch(site, root).stderr
+    assert NO_ROCM in _launch(site, root).stderr
 
 
 def test_launcher_without_rocm_leaves_the_loader_path_alone(site, no_rocm):
     result = _launch(site, no_rocm)
     assert result.returncode == 0
     assert (
-        f"nixlbench: no ROCm install found under {no_rocm} (set ROCM_PATH); "
-        "relying on the dynamic loader" in result.stderr
+        f"nixlbench: {NO_ROCM} AMD's pip ROCm packages or {no_rocm} (set "
+        "ROCM_PATH); relying on the dynamic loader" in result.stderr
     )
     assert _value(result, "LD_LIBRARY_PATH") == "<unset>"
 
@@ -860,8 +927,8 @@ def _dispatch(site, default_root, **kwargs):
         "import importlib, os, nixlbench\n"
         "for name in nixlbench.find_backends().values():\n"
         "    backend = importlib.import_module(name)\n"
-        "    backend._DEFAULT_ROCM_ROOT = os.environ['TEST_ROCM_ROOT']\n"
-        "nixlbench.main()\n"
+        + "".join(f"    {line}\n" for line in _ISOLATE_BACKEND.splitlines())
+        + "nixlbench.main()\n"
     )
     return _run(code, [site], default_root, **kwargs)
 
@@ -906,7 +973,7 @@ def test_dispatcher_refuses_a_rocm_without_backend(merged_site, tmp_path):
 def test_dispatcher_without_rocm_runs_the_newest_backend(merged_site, tmp_path):
     result = _dispatch(merged_site, tmp_path / "none")
     assert result.returncode == 0
-    assert "no ROCm install found" in result.stderr
+    assert NO_ROCM in result.stderr
     assert "newest ROCm version (10.2)" in result.stderr
     assert _value(result, "BINARY") == str(
         merged_site / "nixlbench_rocm10_2/bin/nixlbench"
