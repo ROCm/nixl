@@ -16,15 +16,17 @@
 
 import importlib
 import sys
+import warnings
 from typing import TYPE_CHECKING
 
 from nixl_meta_utils import (
     detect_cuda_major,
     detect_rocm,
-    detect_rocm_version,
     detect_torch_cuda,
     find_cuda_backends,
+    find_rocm,
     find_rocm_backends,
+    load_rocm,
 )
 
 
@@ -68,10 +70,14 @@ def _load_cuda_backend() -> str:
     # No CUDA stack detected: pick the backend matching the ROCm version, unless
     # a CUDA backend is installed, which keeps the selection below unchanged.
     cuda_backends = find_cuda_backends()
-    rocm_version = None if cuda_backends else detect_rocm_version()
+    rocm = None if cuda_backends else find_rocm()
     rocm_backends = [] if cuda_backends else find_rocm_backends()
-    if rocm_version is not None:
-        mod_name = "nixl_rocm{}_{}".format(*rocm_version)
+    if rocm is not None:
+        mod_name = "nixl_rocm{}_{}".format(*rocm.version)
+        if mod_name in rocm_backends:
+            # The backend's plugins find the HIP runtime by library name only:
+            # load it from the install the backend was selected for.
+            load_rocm(rocm)
         try:
             return importlib.import_module(mod_name).__name__
         except ModuleNotFoundError as e:
@@ -79,14 +85,26 @@ def _load_cuda_backend() -> str:
                 raise
             if rocm_backends:
                 raise ImportError(
-                    "detected ROCm {0}.{1} but this rocm-nixl has no backend for "
-                    "it (backends included: {2})".format(
-                        *rocm_version, ", ".join(rocm_backends)
+                    "detected ROCm {0}.{1} from {2} but this rocm-nixl has no "
+                    "backend for it (backends included: {3})".format(
+                        *rocm.version, rocm.source, ", ".join(rocm_backends)
                     )
                 ) from e
-    # Otherwise use whatever backend is installed.
+            # No nixl_rocm<X>_<Y> backend is installed, so none can mismatch:
+            # fall through to the legacy nixl_rocm package, whose name carries
+            # no ROCm version, or to the error below.
+    elif rocm_backends:
+        warnings.warn(
+            "could not tell which ROCm install to select the NIXL backend for: "
+            "found none, or several versions side by side (set ROCM_PATH to "
+            "the one to use). Using the backend for the newest ROCm version, "
+            f"{rocm_backends[0]}",
+            RuntimeWarning,
+        )
+    # ROCm version unknown, or only the legacy backend: use whatever backend is
+    # installed.
     backends = ("nixl_cu13", "nixl_cu12", *rocm_backends, "nixl_rocm")
-    if rocm_version is not None or detect_rocm():
+    if rocm is not None or detect_rocm():
         backends = (*rocm_backends, "nixl_rocm", "nixl_cu13", "nixl_cu12")
     for mod_name in backends:
         try:

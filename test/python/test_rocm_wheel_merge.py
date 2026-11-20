@@ -541,6 +541,8 @@ def test_installed_wheel_selects_backend(venv, tmp_path, rocm_version, backend):
     python, _, _ = venv
     (tmp_path / ".info").mkdir()
     (tmp_path / ".info" / "version").write_text(rocm_version + "\n")
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "lib" / "libamdhip64.so.7").write_bytes(b"")
     env = {k: v for k, v in os.environ.items() if not k.startswith("PYTHON")}
     env.update(ROCM_PATH=str(tmp_path), PYTHONDONTWRITEBYTECODE="1")
     result = subprocess.run(
