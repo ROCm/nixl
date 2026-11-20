@@ -39,14 +39,26 @@ from typing import NamedTuple
 DIST_NAME = "rocm-nixl"
 WHEEL_PREFIX = "rocm_nixl"
 README_NAME = "README.rocm.md"
+STUB_NAME = "nixl/_api.py"
+# Read by the nixl dispatcher, for its error about a CUDA build of PyTorch.
+PYTORCH_INSTALL_NAME = "nixl/rocm_pytorch_install.txt"
 GENERATOR = "wheel_merge_rocm"
 
 
 class RocmPytorch(NamedTuple):
     torch: str
     index_url: str
+    # Oldest Python AMD publishes this torch for, when newer than NIXL's own
+    # minimum. Only stated in the README: the extra has no Python marker, so on
+    # an older Python pip fails to install it rather than leaving torch out.
+    min_python: str = ""
 
 
+# The ROCm versions rocm-nixl supports. The extras, the README, the type stub
+# and the install commands in the dispatcher's error message are generated from
+# the backends given and this table. README.rocm.md in the source tree shows
+# the result for every entry; test_rocm_wheel_merge.py fails if it is stale.
+#
 # Pinned exactly: the "+rocm" local version exists only on AMD's index, so pip
 # can never satisfy the extra with the CUDA build of torch from PyPI.
 ROCM_PYTORCH = {
@@ -58,11 +70,10 @@ ROCM_PYTORCH = {
         torch="2.14.0+rocm10.1.0",
         index_url="https://stable.repo.amd.com/rocm/whl-next/",
     ),
-    # AMD publishes no Python 3.10 build of torch for ROCm 10.2: on Python 3.10
-    # pip fails to install this extra rather than leaving torch out.
     "10.2": RocmPytorch(
         torch="2.15.0+rocm10.2.0",
         index_url="https://stable.repo.amd.com/rocm/whl-next/",
+        min_python="3.11",
     ),
 }
 
@@ -300,6 +311,57 @@ def build_metadata(
     return "\n".join(lines) + "\n\n" + readme
 
 
+def pytorch_install(backends: list[Backend]) -> str:
+    """The pip commands installing rocm-nixl with AMD's PyTorch, newest ROCm first."""
+    installs = []
+    for backend in reversed(backends):
+        pytorch = ROCM_PYTORCH[backend.rocm_version]
+        note = f" (Python {pytorch.min_python} or newer)" if pytorch.min_python else ""
+        installs.append(
+            f"# ROCm {backend.rocm_version}{note}\n"
+            f'pip install "rocm-nixl[rocm{backend.rocm_version}]" '
+            f"--extra-index-url {pytorch.index_url}"
+        )
+    return "\n\n".join(installs)
+
+
+def render_readme(template: str, backends: list[Backend]) -> str:
+    """Regenerate the README regions that depend on the ROCm versions merged.
+
+    A region runs from <!-- NAME ... --> to <!-- /NAME -->. The markers are
+    dropped, so the README of the wheel carries no comment.
+    """
+    versions = [backend.rocm_version for backend in backends]
+    regions = {
+        # "7.14", "7.14 and 10.1", "7.14, 10.1 and 10.2"
+        "rocm-versions": " and ".join(
+            filter(None, [", ".join(versions[:-1]), versions[-1]])
+        ),
+        "rocm-pytorch-install": f"```bash\n{pytorch_install(backends)}\n```",
+    }
+    for name, text in regions.items():
+        region = re.compile(rf"<!-- {name}\b.*?-->.*?<!-- /{name} -->", re.DOTALL)
+        if len(region.findall(template)) != 1:
+            raise MergeError(f"{README_NAME}: expected one <!-- {name} --> region")
+        template = region.sub(lambda _: text, template)
+    return template
+
+
+def retarget_stub(stub: bytes, package: str) -> bytes:
+    """Point the nixl._api type stub at a backend that is in the merged wheel.
+
+    The stub in the source tree falls back to the single-backend nixl_rocm
+    package. Every backend installs the same _api.py, so one stands for all.
+    """
+    legacy = b"from nixl_rocm._api import"
+    if stub.count(legacy) != 1:
+        raise MergeError(
+            f"{STUB_NAME} in the dispatcher dir: expected one "
+            f"'{legacy.decode()}', found {stub.count(legacy)}"
+        )
+    return stub.replace(legacy, f"from {package}._api import".encode())
+
+
 def build_wheel_file(backend: Backend) -> str:
     lines = [
         "Wheel-Version: 1.0",
@@ -355,12 +417,16 @@ def merge(backend_wheels: list[str], output_dir: str, dispatcher_dir: str) -> st
     readme_path = os.path.join(dispatcher_dir, README_NAME)
     try:
         with open(readme_path, encoding="utf-8") as f:
-            readme = f.read()
+            readme = render_readme(f.read(), backends)
     except OSError as e:
         raise MergeError(f"cannot read {readme_path}: {e}") from e
 
     dist_info = f"{WHEEL_PREFIX}-{first.version}.dist-info"
     generated = dispatcher_files(dispatcher_dir)
+    generated[STUB_NAME] = retarget_stub(
+        generated.get(STUB_NAME, b""), backends[-1].package
+    )
+    generated[PYTORCH_INSTALL_NAME] = f"{pytorch_install(backends)}\n".encode("utf-8")
     # Wheel path -> where it comes from, to report collisions.
     owners = {name: "the nixl dispatcher" for name in generated}
 

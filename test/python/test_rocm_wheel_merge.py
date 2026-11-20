@@ -27,6 +27,7 @@ import io
 import os
 import pathlib
 import platform
+import re
 import subprocess
 import sys
 import zipfile
@@ -165,6 +166,26 @@ def _merge(tmp_path, *backends):
     )
 
 
+def _parsed_backends(*rocm):
+    return [
+        wheel_merge_rocm.parse_backend(
+            f"nixl_rocm{version.replace('.', '_')}-{VERSION}-"
+            f"{PY_TAG}-{ABI_TAG}-{PLATFORM}.whl"
+        )
+        for version in rocm
+    ]
+
+
+def _install_command(rocm):
+    index_url = wheel_merge_rocm.ROCM_PYTORCH[rocm].index_url
+    return f'pip install "rocm-nixl[rocm{rocm}]" --extra-index-url {index_url}'
+
+
+def _type_stub(wheel):
+    with zipfile.ZipFile(wheel) as whl:
+        return whl.read("nixl/_api.py").decode()
+
+
 def _metadata(wheel):
     dist_info = f"rocm_nixl-{VERSION}.dist-info"
     with zipfile.ZipFile(wheel) as whl:
@@ -204,6 +225,7 @@ def test_merged_wheel_contents(merged, backends):
         f"{dist_info}/licenses/licenses/NVIDIA-proprietary-LICENSE.txt",
     }
     expected |= {f"nixl/{p.name}" for p in (META_DIR / "nixl").glob("*.py")}
+    expected.add("nixl/rocm_pytorch_install.txt")
     for package in ("nixl_rocm10_2", "nixl_rocm10_1", "nixl_rocm7_14"):
         expected |= set(_backend_files(package))
 
@@ -217,7 +239,7 @@ def test_merged_wheel_contents(merged, backends):
         for package in ("nixl_rocm10_2", "nixl_rocm10_1", "nixl_rocm7_14"):
             for name, data in _backend_files(package).items():
                 assert whl.read(name) == data
-        for name in ("nixl/__init__.py", "nixl/_api.py", "nixl_meta_utils.py"):
+        for name in ("nixl/__init__.py", "nixl_meta_utils.py"):
             assert whl.read(name) == (META_DIR / name).read_bytes()
 
         lib = whl.getinfo(".nixl_rocm10_1.mesonpy.libs/plugins/libplugin_UCX.so")
@@ -260,8 +282,13 @@ def test_merged_wheel_metadata(merged):
         "Provides-Extra: rocm10-1",
         "Provides-Extra: rocm10-2",
     ]
-    assert body == (META_DIR / "README.rocm.md").read_text()
     assert "backend readme" not in body
+    template = (META_DIR / "README.rocm.md").read_text()
+    assert body.splitlines()[0] == template.splitlines()[0]
+    assert "<!--" not in body
+    assert "7.14, 10.1 and 10.2" in body
+    for rocm in pins:
+        assert _install_command(rocm) in body
 
 
 def test_rocm_10_2_extra(merged):
@@ -275,7 +302,98 @@ def test_pytorch_pins_are_exact_rocm_builds():
     for rocm, pin in wheel_merge_rocm.ROCM_PYTORCH.items():
         assert pin.torch.split("+rocm")[1].startswith(rocm + ".")
         assert pin.index_url.startswith("https://") and pin.index_url.endswith("/")
-        assert pin.index_url in (META_DIR / "README.rocm.md").read_text()
+
+
+VERSIONS_REGION = "<!-- rocm-versions -->stale<!-- /rocm-versions -->"
+INSTALL_REGION = (
+    "<!-- rocm-pytorch-install: a note\nover two lines -->\n"
+    "stale\n"
+    "<!-- /rocm-pytorch-install -->"
+)
+
+
+def test_readme_names_the_merged_rocm_versions():
+    template = f"Supports {VERSIONS_REGION}.\n{INSTALL_REGION}\nEnd.\n"
+
+    def render(*rocm):
+        return wheel_merge_rocm.render_readme(template, _parsed_backends(*rocm))
+
+    assert render("7.14", "10.1", "10.2") == (
+        "Supports 7.14, 10.1 and 10.2.\n"
+        "```bash\n"
+        "# ROCm 10.2 (Python 3.11 or newer)\n"
+        f"{_install_command('10.2')}\n\n"
+        "# ROCm 10.1\n"
+        f"{_install_command('10.1')}\n\n"
+        "# ROCm 7.14\n"
+        f"{_install_command('7.14')}\n"
+        "```\n"
+        "End.\n"
+    )
+    assert render("7.14", "10.1").startswith(
+        "Supports 7.14 and 10.1.\n```bash\n# ROCm 10.1\n"
+    )
+    assert render("10.1").startswith("Supports 10.1.\n```bash\n# ROCm 10.1\n")
+
+
+def test_readme_in_the_source_tree_shows_every_supported_version():
+    # It is what the repository and the dispatcher's error message link to.
+    template = (META_DIR / "README.rocm.md").read_text()
+    backends = _parsed_backends(*wheel_merge_rocm.ROCM_PYTORCH)
+    backends.sort(key=lambda backend: backend.rocm)
+    rendered = wheel_merge_rocm.render_readme(template, backends)
+    assert rendered == re.sub(
+        r"<!-- /?rocm-.*?-->\n?", "", template, flags=re.S
+    ), "README.rocm.md does not match ROCM_PYTORCH: update its generated regions"
+
+
+@pytest.mark.parametrize(
+    "template, region",
+    [
+        (INSTALL_REGION, "rocm-versions"),
+        (VERSIONS_REGION, "rocm-pytorch-install"),
+        (VERSIONS_REGION * 2 + INSTALL_REGION, "rocm-versions"),
+    ],
+)
+def test_refuses_readme_without_exactly_one_of_each_region(template, region):
+    with pytest.raises(
+        wheel_merge_rocm.MergeError,
+        match=f"README.rocm.md: expected one <!-- {region} --> region",
+    ):
+        wheel_merge_rocm.render_readme(template, _parsed_backends("10.1"))
+
+
+def test_install_commands_for_the_dispatcher(merged):
+    # nixl/__init__.py prints them when it finds a CUDA build of PyTorch.
+    with zipfile.ZipFile(merged) as whl:
+        commands = whl.read("nixl/rocm_pytorch_install.txt").decode()
+    assert commands == (
+        "# ROCm 10.2 (Python 3.11 or newer)\n"
+        f"{_install_command('10.2')}\n\n"
+        "# ROCm 10.1\n"
+        f"{_install_command('10.1')}\n\n"
+        "# ROCm 7.14\n"
+        f"{_install_command('7.14')}\n"
+    )
+    _, body = _metadata(merged)
+    assert commands in body
+
+
+def test_type_stub_names_the_newest_merged_backend(merged):
+    source = (META_DIR / "nixl" / "_api.py").read_text()
+    assert _type_stub(merged) == source.replace(
+        "from nixl_rocm._api import", "from nixl_rocm10_2._api import"
+    )
+    assert "from nixl_rocm._api import" not in _type_stub(merged)
+
+
+@pytest.mark.parametrize("stub", [b"", b"from nixl_rocm._api import a\n" * 2])
+def test_refuses_type_stub_it_cannot_retarget(stub):
+    with pytest.raises(
+        wheel_merge_rocm.MergeError,
+        match=re.escape("expected one 'from nixl_rocm._api import'"),
+    ):
+        wheel_merge_rocm.retarget_stub(stub, "nixl_rocm10_1")
 
 
 def test_merged_wheel_tag(merged):
@@ -338,6 +456,21 @@ def test_single_backend_merge(tmp_path):
     ]
     with zipfile.ZipFile(merged) as whl:
         assert "nixl/__init__.py" in whl.namelist()
+
+
+def test_subset_merge_names_only_its_backends(tmp_path):
+    merged = _merge(
+        tmp_path,
+        _make_backend(tmp_path / "rocm10.1", "10.1"),
+        _make_backend(tmp_path / "rocm7.14", "7.14"),
+    )
+    _, body = _metadata(merged)
+    assert "7.14 and 10.1" in body
+    assert _install_command("10.1") in body
+    assert "10.2" not in body
+    assert "from nixl_rocm10_1._api import" in _type_stub(merged)
+    with zipfile.ZipFile(merged) as whl:
+        assert "10.2" not in whl.read("nixl/rocm_pytorch_install.txt").decode()
 
 
 def test_refuses_version_mismatch(tmp_path):
@@ -554,6 +687,27 @@ def test_installed_wheel_selects_backend(venv, tmp_path, rocm_version, backend):
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == backend
+
+
+def test_installed_wheel_names_the_commands_that_replace_a_cuda_torch(venv, tmp_path):
+    python, _, _ = venv
+    (tmp_path / "torch").mkdir()
+    (tmp_path / "torch" / "__init__.py").write_text("")
+    (tmp_path / "torch" / "version.py").write_text('cuda = "12.6"\n')
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PYTHON")}
+    env.update(PYTHONPATH=str(tmp_path), PYTHONDONTWRITEBYTECODE="1")
+    result = subprocess.run(
+        [str(python), "-c", "import nixl"],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=tmp_path,
+    )
+    assert result.returncode != 0
+    assert "found a CUDA build of PyTorch (CUDA 12.6)" in result.stderr
+    assert 'Run "pip uninstall torch", then the command for your ROCm' in result.stderr
+    for rocm in wheel_merge_rocm.ROCM_PYTORCH:
+        assert _install_command(rocm) in result.stderr
 
 
 @pytest.mark.parametrize("rocm", ["10.2", "10.1", "7.14"])

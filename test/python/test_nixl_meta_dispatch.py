@@ -585,9 +585,13 @@ def test_cuda_torch_with_only_rocm_backends_is_an_error(env, monkeypatch):
     assert "CUDA build of PyTorch (CUDA 13.0)" in message
     assert "only ROCm NIXL backends are installed" in message
     assert "nixl_rocm10_1, nixl_rocm7_14" in message
-    assert '"rocm-nixl[rocm<X>.<Y>]" --extra-index-url' in message
-    assert "extras available: rocm10.1, rocm7.14" in message
-    assert "http" not in message
+    # The pip commands are only in the rocm-nixl wheel, which the merge writes
+    # them into (test_rocm_wheel_merge.py). Here there is the README to go by.
+    assert message.endswith(
+        "Replace the CUDA build: see https://github.com/ai-dynamo/nixl/blob/main/"
+        "src/bindings/python/nixl-meta/README.rocm.md"
+    )
+    assert (META_DIR / "README.rocm.md").is_file()
 
 
 def test_cuda_torch_on_disk_with_only_rocm_backends_is_an_error(env, monkeypatch):

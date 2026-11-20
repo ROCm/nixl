@@ -1,5 +1,4 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,8 +15,9 @@
 
 # This file is a type stub for static analysis tools (pyright, mypy, IDEs).
 # At runtime it is shadowed by the actual nixl_cu12._api, nixl_cu13._api, or
-# nixl_rocm<X>_<Y>._api module, which __init__.py injects into
-# sys.modules["nixl._api"].
+# nixl_rocm._api module, which __init__.py injects into sys.modules["nixl._api"].
+# A build for ROCm replaces nixl_rocm below with its nixl_rocm<X>_<Y> package
+# (nixl/meson.build, contrib/wheel_merge_rocm.py), so no ROCm version is listed.
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -43,45 +43,12 @@ if TYPE_CHECKING:
                 nixl_xfer_handle,
             )
         except ImportError:
-            try:
-                from nixl_rocm10_2._api import (  # type: ignore[import]  # noqa: F401
-                    DEFAULT_COMM_PORT,
-                    nixl_agent,
-                    nixl_agent_config,
-                    nixl_backend_handle,
-                    nixl_prepped_dlist_handle,
-                    nixl_thread_sync_t,
-                    nixl_xfer_handle,
-                )
-            except ImportError:
-                try:
-                    from nixl_rocm10_1._api import (  # type: ignore[import]  # noqa: F401
-                        DEFAULT_COMM_PORT,
-                        nixl_agent,
-                        nixl_agent_config,
-                        nixl_backend_handle,
-                        nixl_prepped_dlist_handle,
-                        nixl_thread_sync_t,
-                        nixl_xfer_handle,
-                    )
-                except ImportError:
-                    try:
-                        from nixl_rocm7_14._api import (  # type: ignore[import]  # noqa: F401
-                            DEFAULT_COMM_PORT,
-                            nixl_agent,
-                            nixl_agent_config,
-                            nixl_backend_handle,
-                            nixl_prepped_dlist_handle,
-                            nixl_thread_sync_t,
-                            nixl_xfer_handle,
-                        )
-                    except ImportError:
-                        from nixl_rocm._api import (  # type: ignore[import]  # noqa: F401
-                            DEFAULT_COMM_PORT,
-                            nixl_agent,
-                            nixl_agent_config,
-                            nixl_backend_handle,
-                            nixl_prepped_dlist_handle,
-                            nixl_thread_sync_t,
-                            nixl_xfer_handle,
-                        )
+            from nixl_rocm._api import (  # type: ignore[import]  # noqa: F401
+                DEFAULT_COMM_PORT,
+                nixl_agent,
+                nixl_agent_config,
+                nixl_backend_handle,
+                nixl_prepped_dlist_handle,
+                nixl_thread_sync_t,
+                nixl_xfer_handle,
+            )

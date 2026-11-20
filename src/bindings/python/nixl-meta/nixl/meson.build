@@ -15,5 +15,18 @@
 
 fs = import('fs')
 nixl_init_copy = fs.copyfile('__init__.py')
-nixl_api_copy = fs.copyfile('_api.py')
+if wheel_pkg_dir.startswith('nixl_rocm') and wheel_pkg_dir != 'nixl_rocm'
+  # The type stub names the unversioned nixl_rocm package: point it at the
+  # nixl_rocm<X>_<Y> package this build installs, as wheel_merge_rocm.py does.
+  nixl_api_copy = configure_file(
+    input: '_api.py',
+    output: '_api.py',
+    capture: true,
+    command: [
+      'sed', 's/from nixl_rocm\\._api import/from ' + wheel_pkg_dir + '._api import/', '@INPUT@',
+    ],
+  )
+else
+  nixl_api_copy = fs.copyfile('_api.py')
+endif
 nixl_logging_copy = fs.copyfile('logging.py')
