@@ -540,7 +540,7 @@ if [ -n "$ROCM_VERSION" ]; then
         error "ERROR:" "--torch-cuda-index (or TORCH_CUDA_INDEX in the environment) cannot be used with --rocm-version"
     fi
     if [ -n "$WHL_TORCH_VERSIONS" ]; then
-        error "ERROR:" "--torch-versions cannot be used with --rocm-version (the ROCm wheel is not built against torch)"
+        error "ERROR:" "--torch-versions cannot be used with --rocm-version (it selects the PyTorch versions nixl_ep is built against, and nixl_ep is CUDA-only)"
     fi
     if [ "$BUILD_NIXL_EP" = "true" ]; then
         error "ERROR:" "--build-nixl-ep cannot be used with --rocm-version (nixl_ep is CUDA-only)"

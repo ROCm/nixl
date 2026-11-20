@@ -105,11 +105,23 @@ def test_gpu_stack_is_not_an_option(run_script):
     result = run_script(*MANYLINUX, "--gpu-stack", "rocm")
     assert result.returncode != 0
     assert "DOCKER build" not in result.stdout
+    # A caller that also drives scripts that had the option tells them apart by
+    # searching for its name: it must not come back, even in a message.
+    assert "--gpu-stack" not in (CONTRIB_DIR / "build-container.sh").read_text()
+
+
+def test_explicit_wheel_base_is_kept_for_rocm(run_script):
+    result = run_script(
+        *MANYLINUX, "--rocm-version", "10.1.0", "--wheel-base", "manylinux_2_34"
+    )
+    assert result.returncode == 0, result.stderr
+    assert "WHL_PLATFORM=manylinux_2_34_x86_64" in _docker_build_args(result)
 
 
 @pytest.mark.parametrize(
     "args, message",
     [
+        (["--rocm-version"], "--rocm-version requires an argument"),
         (["--rocm-version", "10.1"], "invalid --rocm-version '10.1'"),
         (["--rocm-version", "10.1.0", "--arch", "aarch64"], "only supported on x86_64"),
         (["--rocm-version", "10.1.0", "--cuda-version", "12.9"], "--cuda-version"),
@@ -126,6 +138,7 @@ def test_gpu_stack_is_not_an_option(run_script):
             ["--rocm-version", "10.1.0", "--proxy-ca-cert", "/nonexistent/ca.pem"],
             "--proxy-ca-cert file not found",
         ),
+        (["--proxy-ca-cert"], "--proxy-ca-cert requires an argument"),
     ],
 )
 def test_rejected_combinations(run_script, args, message):
@@ -151,7 +164,54 @@ def test_cuda_version_in_the_environment_is_rejected_for_rocm(run_script):
     assert "--cuda-version" in result.stderr
 
 
+def test_torch_cuda_index_in_the_environment_is_rejected_for_rocm(run_script):
+    result = run_script(
+        *MANYLINUX, "--rocm-version", "10.1.0", env={"TORCH_CUDA_INDEX": "cu129"}
+    )
+    assert result.returncode != 0
+    assert "--torch-cuda-index" in result.stderr
+
+
 ROCM = [*MANYLINUX, "--rocm-version", "10.1.0"]
+
+
+@pytest.fixture
+def proxy_ca(tmp_path_factory):
+    path = tmp_path_factory.mktemp("proxy-ca") / "ca.pem"
+    path.write_text("not a real certificate\n")
+    return path
+
+
+def test_proxy_ca_cert_is_passed_as_a_secret(run_script, proxy_ca):
+    result = run_script(*ROCM, "--proxy-ca-cert", str(proxy_ca))
+    assert result.returncode == 0, result.stderr
+    args = _docker_build_args(result)
+    assert f"id=proxy_ca,src={proxy_ca.resolve()}" in args
+    digest = hashlib.sha256(proxy_ca.read_bytes()).hexdigest()
+    assert f"PROXY_CA_SHA256={digest}" in args
+
+
+def test_no_proxy_ca_cert_leaves_the_build_unchanged(run_script):
+    args = _docker_build_args(run_script(*ROCM))
+    assert not [a for a in args if a.startswith(("id=proxy_ca", "PROXY_CA_SHA256="))]
+
+
+def test_proxy_ca_cert_needs_a_dockerfile_that_consumes_it(run_script, proxy_ca):
+    result = run_script(
+        "--dockerfile", "contrib/Dockerfile", "--proxy-ca-cert", str(proxy_ca)
+    )
+    assert result.returncode != 0
+    assert "requires a dockerfile that consumes the proxy_ca secret" in result.stderr
+    assert "DOCKER build" not in result.stdout
+
+
+def test_wheel_output_dir_needs_a_dockerfile_with_a_wheel_dist_stage(run_script):
+    result = run_script(
+        "--dockerfile", "contrib/Dockerfile", "--wheel-output-dir", "/tmp/wheels"
+    )
+    assert result.returncode != 0
+    assert "requires a dockerfile with a wheel_dist stage" in result.stderr
+    assert "DOCKER build" not in result.stdout
 
 
 def test_nixlbench_wheel_output_dir(run_script, tmp_path_factory):
