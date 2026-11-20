@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema = 1
+env_class = "gha-container"
+# What the bench-container job sets up before the runner starts. io_uring is
+# there only when the container runs with seccomp unconfined.
+provides = ["etcd", "io_uring", "redis", "s3"]
+
+[roles]
+init = "local"
+tgt = "local"
+
+[hosts.local]
+kind = "local"
+work_dir = "/tmp/amd-bench/run"
+
+[vars]
+asio_port_base = 21000
+posix_dir = "/tmp/amd-bench/posix"
+gusli_file = "/tmp/amd-bench/gusli.img"
+redis_host = "127.0.0.1"
+redis_port = 6379
+# nixlbench hands this to `aws --endpoint-url`, which wants the scheme. The
+# server must accept nixlbench's default region, eu-central-1, and hold the
+# bucket.
+s3_endpoint = "http://127.0.0.1:9000"
+s3_bucket = "nixlbench-bucket"
+# Throwaway credentials of the in-job server: nixlbench prints them.
+s3_access_key = "ci"
+s3_secret_key = "ci"
+etcd_endpoints = "http://127.0.0.1:2379"

@@ -1,0 +1,5 @@
+# synthetic: the 12-column table nixlbench prints for pairwise SG with more than 2 processes
+Block Size (B)      Batch Size     B/W (GB/Sec)   Aggregate B/W (GB/Sec)   Network Util (%)    Avg Lat. (us)  Avg Prep (us)  P99 Prep (us)  Avg Post (us)  P99 Post (us)  Avg Tx (us)    P99 Tx (us)
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+4096                1              0.512000       1.024000                 0.409600            7.9            2.0            3.0            4.1            9.0            1.8            6.0
+8192                1              0.998400       1.996800                 0.798720            8.1            2.0            3.0            4.2            9.0            1.9            6.0

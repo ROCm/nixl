@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+check_consistency = true
+warmup_iter = 16
+num_iter = 128
+large_blk_iter_ftr = 4
+total_buffer_size = 268435456
+start_block_size = 4096
+max_block_size = 4194304
+start_batch_size = 4
+max_batch_size = 4
+
+[amd]
+name = "N"
+rows = 11
+description = "Nightly sweep: blocks of 4 KiB to 4 MiB in batches of 4, data checked"
+
+# The emulated GPU has 1024 MiB, shared by every process of a guest.
+[amd.when_vram]
+total_buffer_size = 67108864

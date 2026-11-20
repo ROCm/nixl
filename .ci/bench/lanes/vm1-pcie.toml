@@ -1,0 +1,187 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema = 1
+lane = "vm1-pcie"
+lane_id = "P-LBA"
+env_class = "gha-kvm-vm1-spdk"
+timing_trust = "emulated"
+topology = "single"
+status = "blocked"
+blocked_by = ["W10"]
+aa_case = ""
+description = "One rocjitsu guest and an SPDK vfio-user NVMe controller: storage and Key Value on local PCIe"
+
+# Waits for the SPDK controller in the guest's stack. P-KV runs in the same
+# boot.
+
+[defaults]
+tier = "nightly"
+timeout_s = 180
+attach = "pcie-spdk"
+
+# LBA-STD: the storage cases of vm1-local.toml, which explains them, with the
+# same workload keys.
+[[case]]
+key = "vm1-pcie/posix/{api}/{io}/{op}/S"
+workload = "posix/{api}/{io}/{op}/S"
+profile = "S"
+backend = "POSIX"
+engine = "{api}"
+tgt_mem = "FILE"
+role = "gate"
+flags = { posix_api_type = "{api}", filepath = "{posix_dir}/{op}" }
+[case.axes]
+api = ["AIO", "URING", "POSIXAIO"]
+io = ["buffered", "direct"]
+op = ["WRITE", "READ"]
+[[case.when]]
+match = { io = "direct" }
+set = { direct = true }
+[[case.when]]
+match = { api = "URING" }
+set = { needs = ["io_uring"] }
+
+[[case]]
+key = "vm1-pcie/posix/URING/direct/{op}/N"
+workload = "posix/URING/direct/{op}/N"
+profile = "N"
+backend = "POSIX"
+engine = "URING"
+tgt_mem = "FILE"
+direct = true
+role = "track"
+timeout_s = 360
+needs = ["io_uring"]
+flags = { posix_api_type = "URING", filepath = "{posix_dir}/{op}" }
+[case.axes]
+op = ["WRITE", "READ"]
+
+[[case]]
+key = "vm1-pcie/posix/AIO/buffered/WRITE/N"
+workload = "posix/AIO/buffered/WRITE/N"
+profile = "N"
+backend = "POSIX"
+engine = "AIO"
+tgt_mem = "FILE"
+op = "WRITE"
+role = "track"
+timeout_s = 360
+flags = { posix_api_type = "AIO", filepath = "{posix_dir}/WRITE" }
+
+[[case]]
+key = "vm1-pcie/posix/URING/direct-blockaligned/{op}/S"
+workload = "posix/URING/direct-blockaligned/{op}/S"
+profile = "S"
+backend = "POSIX"
+engine = "URING"
+tgt_mem = "FILE"
+direct = true
+role = "gate"
+needs = ["io_uring"]
+[case.flags]
+posix_api_type = "URING"
+filepath = "{posix_dir}/{op}"
+randomize_location_mode = "blockaligned"
+randomize_location_mode_seed = 1
+[case.axes]
+op = ["WRITE", "READ"]
+
+[[case]]
+key = "vm1-pcie/posix/AIO/buffered/QUERY/S"
+workload = "posix/AIO/buffered/QUERY/S"
+profile = "S"
+backend = "POSIX"
+engine = "AIO"
+tgt_mem = "FILE"
+op = "QUERY"
+flags = { posix_api_type = "AIO", filepath = "{posix_dir}/QUERY" }
+
+[[case]]
+key = "vm1-pcie/ais/{path}/{op}/S"
+workload = "ais/{path}/{op}/S"
+profile = "S"
+backend = "AIS"
+engine = "{path}"
+init_mem = "VRAM"
+tgt_mem = "FILE"
+flags = { gds_mt_num_threads = 4, filepath = "{ais_dir}/{op}" }
+[case.axes]
+path = ["compat-allowed", "fast-required"]
+op = ["WRITE", "READ"]
+[[case.when]]
+match = { path = "compat-allowed" }
+[case.when.set]
+role = "gate"
+env = { HIPFILE_ALLOW_COMPAT_MODE = "true", HIPFILE_UNSUPPORTED_FILE_SYSTEMS = "true" }
+[[case.when]]
+match = { path = "fast-required" }
+[case.when.set]
+direct = true
+env = { HIPFILE_ALLOW_COMPAT_MODE = "false", HIPFILE_FORCE_COMPAT_MODE = "false" }
+
+[[case]]
+key = "vm1-pcie/ais/compat-allowed/WRITE/N"
+workload = "ais/compat-allowed/WRITE/N"
+profile = "N"
+backend = "AIS"
+engine = "compat-allowed"
+init_mem = "VRAM"
+tgt_mem = "FILE"
+op = "WRITE"
+role = "track"
+timeout_s = 360
+flags = { gds_mt_num_threads = 4, filepath = "{ais_dir}/WRITE" }
+env = { HIPFILE_ALLOW_COMPAT_MODE = "true", HIPFILE_UNSUPPORTED_FILE_SYSTEMS = "true" }
+
+[[case]]
+key = "vm1-pcie/gusli/K/{op}/S"
+workload = "gusli/K/{op}/S"
+profile = "S"
+backend = "GUSLI"
+engine = "K"
+tgt_mem = "BLK"
+direct = true
+role = "gate"
+needs = ["blkdev"]
+flags = { device_list = "11:K:{gusli_blkdev}", start_batch_size = 1, max_batch_size = 1 }
+[case.axes]
+op = ["READ", "WRITE"]
+
+# KV-STD. The NVME_KV backend, the flag that names its device and the data
+# check these profiles ask for all come with the plugin, so the flags here
+# are not yet the whole command line.
+[[case]]
+key = "vm1-pcie/kv/{init_mem}/WRITE/KV-W"
+workload = "kv/{init_mem}/WRITE/KV-W"
+profile = "KV-W"
+backend = "NVME_KV"
+tgt_mem = "KV"
+op = "WRITE"
+status = "blocked"
+blocked_by = ["W13", "W11"]
+[case.axes]
+init_mem = ["DRAM", "VRAM"]
+
+[[case]]
+key = "vm1-pcie/kv/{init_mem}/READ/KV-R-{size}"
+workload = "kv/{init_mem}/READ/KV-R-{size}"
+profile = "KV-R-{size}"
+backend = "NVME_KV"
+tgt_mem = "KV"
+op = "READ"
+status = "blocked"
+blocked_by = ["W13", "W11"]
+[case.axes]
+init_mem = ["DRAM", "VRAM"]
+size = [4096, 16384, 65536, 131072]
+
+[[case]]
+key = "vm1-pcie/kv/DRAM/QUERY/KV-R-4096"
+workload = "kv/DRAM/QUERY/KV-R-4096"
+profile = "KV-R-4096"
+backend = "NVME_KV"
+tgt_mem = "KV"
+op = "QUERY"
+status = "blocked"
+blocked_by = ["W13", "W11"]

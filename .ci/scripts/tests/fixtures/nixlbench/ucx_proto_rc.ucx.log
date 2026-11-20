@@ -1,0 +1,27 @@
+# synthetic: UCX_PROTO_INFO=y tables in the layout rocm_wheel_two_node_test.py parses; no real sample exists
+[1700000000.000000] [host:4242 :0]   +--------------------------------+
+[1700000000.000000] [host:4242 :0]   | nixlbench self cfg#2 |
+[1700000000.000000] [host:4242 :0]   | remote memory write by ucp_put* from rocm memory to rocm memory |
+[1700000000.000000] [host:4242 :0]   +--------------------------------+
+[1700000000.000000] [host:4242 :0]   | 0..inf | copy-in | self/memory |
+[1700000000.000000] [host:4242 :0]   +--------------------------------+
+[1700000000.000000] [host:4242 :0]   +--------------------------------+
+[1700000000.000000] [host:4242 :0]   | nixlbench inter-node cfg#1 |
+[1700000000.000000] [host:4242 :0]   | active message by ucp_am_send* from host memory |
+[1700000000.000000] [host:4242 :0]   +--------------------------------+
+[1700000000.000000] [host:4242 :0]   | 0..inf | copy-in | tcp/eth0 |
+[1700000000.000000] [host:4242 :0]   +--------------------------------+
+[1700000000.000000] [host:4242 :0]   +--------------------------------+
+[1700000000.000000] [host:4242 :0]   | nixlbench inter-node cfg#0 |
+[1700000000.000000] [host:4242 :0]   | remote memory write by ucp_put*(fast-completion) from rocm memory to rocm memory |
+[1700000000.000000] [host:4242 :0]   +--------------------------------+
+[1700000000.000000] [host:4242 :0]   | 0..8192 | copy-in | rc_verbs/ernic0:1 |
+[1700000000.000000] [host:4242 :0]   | 8193..inf | zero-copy | rc_verbs/ernic0:1 rocm_copy/rocm |
+[1700000000.000000] [host:4242 :0]   +--------------------------------+
+[1700000000.000000] [host:4242 :0]   +--------------------------------+
+[1700000000.000000] [host:4242 :0]   | nixlbench inter-node cfg#0 |
+[1700000000.000000] [host:4242 :0]   | remote memory read by ucp_get* into rocm memory from rocm memory |
+[1700000000.000000] [host:4242 :0]   +--------------------------------+
+[1700000000.000000] [host:4242 :0]   | 0..inf | zero-copy | rc_verbs/ernic0:1 rocm_copy/rocm |
+[1700000000.000000] [host:4242 :0]   +--------------------------------+
+[1700000001.000000] [host:4242 :0]   ib_md.c:1 UCX  WARN  synthetic warning line

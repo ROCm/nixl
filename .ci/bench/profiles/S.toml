@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+check_consistency = true
+warmup_iter = 16
+num_iter = 64
+large_blk_iter_ftr = 4
+total_buffer_size = 33554432
+start_block_size = 65536
+max_block_size = 65536
+start_batch_size = 4
+max_batch_size = 4
+
+[amd]
+name = "S"
+rows = 1
+description = "Gate: one row, 64 KiB blocks in batches of 4, data checked"

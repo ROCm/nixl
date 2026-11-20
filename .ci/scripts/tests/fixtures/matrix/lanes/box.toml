@@ -1,0 +1,100 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Test fixture of test_amd_bench_lib.py and test_amd_bench_collect.py. The
+# golden values in those tests change when this file does.
+
+schema = 1
+lane = "box"
+lane_id = "C-BOX"
+env_class = "gha-container"
+timing_trust = "container"
+topology = "single"
+aa_case = "box/posix/AIO/buffered/WRITE/N"
+description = "One container: storage, a service and a blocked pair"
+
+[defaults]
+tier = "pr"
+timeout_s = 120
+tgt_mem = "FILE"
+
+[[case]]
+key = "box/posix/{api}/{io}/{op}/S"
+workload = "posix/{api}/{io}/{op}/S"
+profile = "S"
+backend = "POSIX"
+engine = "{api}"
+role = "gate"
+required = true
+flags = { posix_api_type = "{api}", filepath = "{posix_dir}" }
+[case.axes]
+api = ["AIO", "URING"]
+io = ["buffered", "direct"]
+op = ["WRITE", "READ"]
+[[case.when]]
+match = { io = "direct" }
+set = { direct = true }
+[[case.when]]
+match = { api = "URING" }
+set = { needs = ["io_uring"], role = "info", required = false }
+
+[[case]]
+key = "box/posix/AIO/buffered/WRITE/N"
+workload = "posix/AIO/buffered/WRITE/N"
+profile = "N"
+backend = "POSIX"
+engine = "AIO"
+op = "WRITE"
+tier = "nightly"
+role = "track"
+sentinel = true
+flags = { posix_api_type = "AIO", filepath = "{posix_dir}" }
+
+[[case]]
+key = "box/obj/std/WRITE/S"
+workload = "obj/std/WRITE/S"
+profile = "S"
+backend = "OBJ"
+engine = "std"
+op = "WRITE"
+tgt_mem = "OBJ"
+tier = "nightly"
+attach = "http"
+needs = ["s3"]
+env = { AWS_EC2_METADATA_DISABLED = "true", S3_SESSION_TOKEN = "{s3_token}" }
+[case.flags]
+obj_access_key = "{s3_access_key}"
+obj_secret_key = "{s3_secret_key}"
+obj_bucket_name = "{s3_bucket}"
+obj_use_virtual_addressing = false
+
+[[case]]
+key = "box/libfabric/tcp/DD/WRITE/S"
+workload = "libfabric/tcp/DD/WRITE/S"
+profile = "S"
+backend = "LIBFABRIC"
+transport = "tcp"
+op = "WRITE"
+tgt_mem = "DRAM"
+tier = "nightly"
+status = "blocked"
+blocked_by = ["E8"]
+needs = ["libfabric"]
+
+[[case]]
+key = "box/posix/AIO/buffered/WRITE/S/t{threads}"
+workload = "posix/AIO/buffered/WRITE/S/t{threads}"
+profile = "S"
+backend = "POSIX"
+engine = "AIO"
+op = "WRITE"
+tier = "weekly"
+flags = { posix_api_type = "AIO", filepath = "{posix_dir}", num_files = "{threads}" }
+[case.axes]
+threads = [1, 2]
+
+[[pair]]
+key = "box/direct-buffered/AIO/WRITE/S"
+kind = "direct-buffered"
+num = "box/posix/AIO/direct/WRITE/S"
+den = "box/posix/AIO/buffered/WRITE/S"

@@ -129,26 +129,26 @@ answer and the URL of the run it came from.
 | # | Question | How to run it | Answer |
 | --- | --- | --- | --- |
 | E1 | How long do `hipMemset` and a whole-buffer read-back take for 64 to 256 MiB in the ROCm 10.1 guest? | No probe yet. | not yet run |
-| E2 | What does the guest offer (`ulimit -l`, `ais-stats`, `nvme-rdma` and `nvme-fabrics`, free disk, CPUs, memory, the cost of `apt-get update`), and how much disk does the runner have before and after a VM job? | `probes=guest-facts`; the runner figures are in every VM job. | not yet run |
-| E3 | Does nixlbench compile with the manylinux toolchain against the ROCm 10.1 HIP headers, do it and every plugin resolve their libraries in the guest and in `ubuntu:24.04`, and how long does the bundle job take? | No probe yet; needs the bundle job. | not yet run |
+| E2 | What does the guest offer (`ulimit -l`, `ais-stats`, `nvme-rdma` and `nvme-fabrics`, free disk, CPUs, memory, the cost of `apt-get update`), and how much disk does the runner have before and after a VM job? | `probes=guest-facts`; the runner figures are in every VM job. | Guest (ROCm 10.1.0, Ubuntu 26.04, kernel 7.2.6): 4 CPUs, 8 GB, memlock unlimited, `ais-stats` present, `nvme-rdma` and `nvme-fabrics` present, io_uring works, `apt-get update` 13 s. Absent: etcd, redis-server, the `aws` CLI, libgflags, libhwloc, libfabric. Runner: 87 GB free before boot, 74 GB after (run 44649409003). |
+| E3 | Does nixlbench compile with the manylinux toolchain against the ROCm 10.1 HIP headers, do it and every plugin resolve their libraries in the guest and in `ubuntu:24.04`, and how long does the bundle job take? | No probe yet; needs the bundle job. | Partly. nixlbench compiles with the manylinux toolchain against ROCm 10.1 and runs from a wheel in a clean `ubuntu:24.04` container (local build of `for-upstream/feat/nixlbench-wheel`). The guest and the build time in CI are not yet run. |
 | E4 | Does a block of 16 MiB or more fail cleanly on the mesh; what is the limit on `loopback`; does an interrupted RDMA transfer leave the device usable? | No probe yet; needs nixlbench. `probes=ernic-backend-loopback` shows only that `loopback` carries a ping-pong. | not yet run |
 | E5 | Do two nixlbench processes work on device 0 with VRAM in one guest? | No probe yet; needs nixlbench. | not yet run |
 | E6 | What are the spread between rows and the duration of a case in each job type? | No probe yet; needs nixlbench. | not yet run |
 | E7 | Does `queue: max` work on job-level concurrency, so that every `gh-pages` writer can share one group? | No probe yet. | not yet run |
 | E8 | Does `libplugin_LIBFABRIC.so` load in each environment, which libfabric does it resolve, and which interface does it bind across guests? | No probe yet; needs the wheel and the bundle. | not yet run |
-| E10 | For `nvmeof`: is the TAP needed; does `ip=` on the guest's subnet work, and with which neighbour address; does the multi-namespace grammar parse; do the LBA and KV namespaces appear? | `probes=ernic-backend-nvmeof`. Two NIC servers with different backends in one guest are not covered. | not yet run |
-| E19 | Does `--security-opt seccomp=unconfined` in a job container's options enable io_uring on hosted runners? | `probes=container-uring`. | not yet run |
+| E10 | For `nvmeof`: is the TAP needed; does `ip=` on the guest's subnet work, and with which neighbour address; does the multi-namespace grammar parse; do the LBA and KV namespaces appear? | `probes=ernic-backend-nvmeof`. Two NIC servers with different backends in one guest are not covered. | No TAP is needed. `ip=192.168.100.1` works with a static neighbour entry; the target answers no ARP, so any link-layer address does (`02:00:00:00:c0:01` was used). Three namespaces parse and appear; a 1 MiB O_DIRECT write reads back on both LBA namespaces; the KV namespace has a generic node only (run 44649409003). |
+| E19 | Does `--security-opt seccomp=unconfined` in a job container's options enable io_uring on hosted runners? | `probes=container-uring`. | Yes. `io_uring_setup` fails with EPERM under the default profile and works with `seccomp=unconfined` (run 44649409003). |
 | E20 | Which S3 server suits the container lanes: versitygw, Garage or SeaweedFS, or a frozen MinIO binary? | No probe yet; needs nixlbench. | not yet run |
 
 The `ernic-backend` job also records what the override depends on:
 
 | Check | Question | Answer |
 | --- | --- | --- |
-| `compose.merge` | Does compose replace, not append to, `command` and `healthcheck.test`? | not yet run |
-| `backend.container` | Is the compose project named after the stack directory? | not yet run |
-| `image.backends`, `image.backend-string` | Does the pinned NIC server image have `loopback`, `nvmeof` and `s3`, and accept the backend strings? | not yet run |
-| `guest.nvme-rdma` | Does the guest kernel have `nvme-rdma`? | not yet run |
-| `nvmeof.namespaces`, `nvmeof.kv-generic-node` | How are the namespaces named in sysfs, and does the KV one appear as `/dev/ngXnY` only? | not yet run |
-| `s3.put`, `s3.get`, `s3.rdma-client` | Does the S3 store take and return an object over HTTP and over RDMA? | not yet run |
-| `server.state` | How much memory does the NIC server use with RAM-backed namespaces? | not yet run |
+| `compose.merge` | Does compose replace, not append to, `command` and `healthcheck.test`? | Yes, both are replaced and there is no entrypoint (run 44649409003). |
+| `backend.container` | Is the compose project named after the stack directory? | Yes: `nixl-rocjitsu-backend` (run 44649409003). |
+| `image.backends`, `image.backend-string` | Does the pinned NIC server image have `loopback`, `nvmeof` and `s3`, and accept the backend strings? | Yes to both (run 44649409003). |
+| `guest.nvme-rdma` | Does the guest kernel have `nvme-rdma`? | Yes (run 44649409003). |
+| `nvmeof.namespaces`, `nvmeof.kv-generic-node` | How are the namespaces named in sysfs, and does the KV one appear as `/dev/ngXnY` only? | Names do not follow namespace ids: nsid 3 (KV) is `nvme1n1`, nsid 2 is `nvme1n2`, nsid 1 is `nvme1n3`. The KV namespace has `/dev/ng1n1` and a hidden, zero-size block device (run 44649409003). |
+| `s3.put`, `s3.get`, `s3.rdma-client` | Does the S3 store take and return an object over HTTP and over RDMA? | Yes: an 8 KiB object over HTTP, and all 24 checks of `s3_rdma_client -F` over RDMA (run 44649409003). |
+| `server.state` | How much memory does the NIC server use with RAM-backed namespaces? | 7 to 10 MiB at rest, before any namespace is written (run 44649409003). |
 | none | Does `--p4` work beside `nvmeof` or `s3`? Not covered by the probe. | not yet run |

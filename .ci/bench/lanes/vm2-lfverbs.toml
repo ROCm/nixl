@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema = 1
+lane = "vm2-lfverbs"
+lane_id = "LF-VERBS"
+env_class = "gha-kvm-vm2"
+timing_trust = "emulated"
+topology = "two-host"
+status = "blocked"
+blocked_by = ["W15", "W11"]
+aa_case = ""
+description = "The two guests of vm2-net: LIBFABRIC over its verbs provider between host and GPU memory"
+
+# Waits for the plugin to select the verbs provider and for a libfabric built
+# with verbs to reach the guests.
+
+[defaults]
+tier = "nightly"
+timeout_s = 180
+attach = "net-rdma"
+
+[[case]]
+key = "vm2-lfverbs/libfabric/verbs/{mem}/{op}/S"
+workload = "libfabric/verbs/{mem}/{op}/S"
+profile = "S"
+backend = "LIBFABRIC"
+transport = "verbs"
+needs = ["libfabric"]
+flags = { enable_pt = true, progress_threads = 1 }
+env = { FI_UNIVERSE_SIZE = "16" }
+[case.axes]
+mem = ["DD", "VV"]
+op = ["WRITE", "READ"]
