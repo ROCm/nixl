@@ -1,0 +1,48 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema = 1
+env_class = "gha-kvm-vm1-nvmeof"
+# A template: the lane job renders it to JSON with 'amd_bench_ci.py env', which
+# sets every "@job" value and takes out of 'provides' what the job could not
+# set up. A case whose need is taken out ends as skip/env.
+provides = ["blkdev", "gpu", "io_uring"]
+
+[roles]
+init = "guest"
+tgt = "guest"
+
+[hosts.guest]
+kind = "ssh"
+ssh_config = "@job"
+ssh_host = "guest"
+# Both are relative to the guest's home directory.
+work_dir = "amd-bench/run"
+nixlbench = "amd-bench/venv/bin/nixlbench"
+
+[vars]
+asio_port_base = 21000
+# Namespace 1 of the NVMe-over-Fabrics target, which the job formats with
+# ext4.
+posix_dir = "/mnt/amd-bench/fs/posix"
+ais_dir = "/mnt/amd-bench/fs/ais"
+# Namespace 2, raw: the job gives the guest's user access to it and writes
+# the pattern the GUSLI READ case checks for.
+gusli_blkdev = "@job"
+
+# After each case that used the GPU: a compute device node that is gone or
+# empty makes the rest of the GPU cases skip/device-suspect.
+[[probe]]
+name = "gpu-kfd"
+when = "between"
+classes = ["gpu"]
+cmd = "test -r /dev/kfd -a -w /dev/kfd && grep -q . /sys/class/kfd/kfd/topology/nodes/*/name"
+
+# Namespace 3 is the Key Value one, which has a generic node only. The job
+# links that node here; no case uses it yet, so this is the lane's only
+# record of it.
+[[probe]]
+name = "kv-generic-node"
+when = "start"
+classes = []
+cmd = "test -c /run/amd-bench/kv"

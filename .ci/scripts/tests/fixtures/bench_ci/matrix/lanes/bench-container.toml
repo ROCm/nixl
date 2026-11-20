@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Test fixture of test_amd_bench_ci.py: a synthetic matrix, not the lanes the
+# workflows run.
+
+schema = 1
+lane = "bench-container"
+lane_id = "C-BENCH"
+env_class = "gha-container"
+timing_trust = "container"
+topology = "single"
+description = "Active in both tiers"
+
+[defaults]
+tier = "pr"
+tgt_mem = "FILE"
+
+[[case]]
+key = "bench-container/posix/AIO/buffered/{op}/S"
+workload = "posix/AIO/buffered/{op}/S"
+profile = "S"
+backend = "POSIX"
+engine = "AIO"
+flags = { posix_api_type = "AIO", filepath = "{posix_dir}/{op}" }
+[case.axes]
+op = ["WRITE", "READ"]

@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema = 1
+env_class = "gha-kvm-vm1-loopback"
+# A template: the lane job renders it to JSON with 'amd_bench_ci.py env', which
+# sets every "@job" value and takes out of 'provides' what the job could not
+# set up. A case whose need is taken out ends as skip/env.
+provides = ["gpu", "rdma"]
+
+[roles]
+init = "guest"
+tgt = "guest"
+
+[hosts.guest]
+kind = "ssh"
+ssh_config = "@job"
+ssh_host = "guest"
+# Both are relative to the guest's home directory.
+work_dir = "amd-bench/run"
+nixlbench = "amd-bench/venv/bin/nixlbench"
+
+[hosts.guest.vars]
+ip = "192.168.100.11"
+# ernic0 is the name the job gives the RDMA device. It takes "rdma" out of
+# 'provides' when the device could not be named so or its port is not active.
+ucx_net_devices = "ernic0:1"
+
+[vars]
+asio_port_base = 21000
+
+# After each case that used the GPU: a compute device node that is gone or
+# empty makes the rest of the GPU cases skip/device-suspect.
+[[probe]]
+name = "gpu-kfd"
+when = "between"
+classes = ["gpu"]
+cmd = "test -r /dev/kfd -a -w /dev/kfd && grep -q . /sys/class/kfd/kfd/topology/nodes/*/name"
+
+[[probe]]
+name = "rdma-port"
+when = "between"
+classes = ["rdma"]
+cmd = "grep -q ACTIVE /sys/class/infiniband/ernic0/ports/1/state"

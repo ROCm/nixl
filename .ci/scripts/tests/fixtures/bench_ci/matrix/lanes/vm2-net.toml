@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Test fixture of test_amd_bench_ci.py: a synthetic matrix, not the lanes the
+# workflows run.
+
+schema = 1
+lane = "vm2-net"
+lane_id = "T-NET"
+env_class = "gha-kvm-vm2"
+timing_trust = "emulated"
+topology = "two-host"
+description = "Nightly only"
+
+[defaults]
+tier = "nightly"
+attach = "net-tcp"
+
+[[case]]
+key = "vm2-net/ucx/tcp/DD/{op}/S"
+workload = "ucx/tcp/DD/{op}/S"
+profile = "S"
+backend = "UCX"
+transport = "tcp"
+[case.axes]
+op = ["WRITE", "READ"]

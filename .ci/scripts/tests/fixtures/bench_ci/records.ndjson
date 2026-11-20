@@ -1,0 +1,11 @@
+{"kind":"case","case_uid":"c0","case_key":"vm1-local/ucx/tcp/DD/WRITE/S","variant":"head","round":0,"init_mem":"DRAM","tgt_mem":"DRAM","status":"pass","error_class":"","skip_reason":null}
+{"kind":"counter","case_uid":"c0","name":"proc_wall_s.init","value":3.25,"unit":"s","deterministic":false}
+{"kind":"case","case_uid":"c1","case_key":"vm1-local/ucx/tcp/VV/WRITE/S","variant":"head","round":0,"init_mem":"VRAM","tgt_mem":"VRAM","status":"pass","error_class":"","skip_reason":null}
+{"kind":"counter","case_uid":"c1","name":"proc_wall_s.init","value":9.5,"unit":"s","deterministic":false}
+{"kind":"counter","case_uid":"c1","name":"proc_wall_s.tgt","value":8.25,"unit":"s","deterministic":false}
+{"kind":"counter","case_uid":"c1","name":"pair_skew_s","value":1.02,"unit":"s","deterministic":false}
+not json
+{"kind":"case","case_uid":"c2","case_key":"vm1-local/ucx/tcp/DV/WRITE/S","variant":"head","round":0,"init_mem":"DRAM","tgt_mem":"VRAM","status":"crash","error_class":"asio","skip_reason":null}
+{"kind":"counter","case_uid":"c2","name":"proc_wall_s.init","value":16.125,"unit":"s","deterministic":false}
+{"kind":"counter","case_uid":"c2","name":"proc_wall_s.tgt","value":17.5,"unit":"s","deterministic":false}
+{"kind":"case","case_uid":"c3","case_key":"vm1-local/ucx/tcp/VD/WRITE/S","variant":"head","round":0,"init_mem":"VRAM","tgt_mem":"DRAM","status":"skip","error_class":"","skip_reason":"device-suspect"}

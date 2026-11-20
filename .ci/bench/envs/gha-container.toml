@@ -3,9 +3,12 @@
 
 schema = 1
 env_class = "gha-container"
-# What the bench-container job sets up before the runner starts. io_uring is
-# there only when the container runs with seccomp unconfined.
-provides = ["etcd", "io_uring", "redis", "s3"]
+# A template: the bench-container job renders it to JSON with
+# 'amd_bench_ci.py env', which takes out of 'provides' what the job could not
+# set up. io_uring is there only when the container runs with seccomp
+# unconfined. The job starts no S3 server and no etcd, so the OBJ cases end as
+# skip/env until a server is chosen.
+provides = ["io_uring", "redis"]
 
 [roles]
 init = "local"
@@ -14,6 +17,7 @@ tgt = "local"
 [hosts.local]
 kind = "local"
 work_dir = "/tmp/amd-bench/run"
+nixlbench = "/tmp/amd-bench/venv/bin/nixlbench"
 
 [vars]
 asio_port_base = 21000
@@ -21,9 +25,9 @@ posix_dir = "/tmp/amd-bench/posix"
 gusli_file = "/tmp/amd-bench/gusli.img"
 redis_host = "127.0.0.1"
 redis_port = 6379
-# nixlbench hands this to `aws --endpoint-url`, which wants the scheme. The
-# server must accept nixlbench's default region, eu-central-1, and hold the
-# bucket.
+# Kept so that the OBJ cases resolve. nixlbench hands the endpoint to
+# `aws --endpoint-url`, which wants the scheme. The server must accept
+# nixlbench's default region, eu-central-1, and hold the bucket.
 s3_endpoint = "http://127.0.0.1:9000"
 s3_bucket = "nixlbench-bucket"
 # Throwaway credentials of the in-job server: nixlbench prints them.

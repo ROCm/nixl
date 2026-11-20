@@ -111,6 +111,10 @@ jobs:
       version: ${{ steps.source.outputs.version }}
       run-vm-tests: ${{ steps.inputs.outputs.run-vm-tests }}
       wheels-artifact: ${{ steps.inputs.outputs.wheels-artifact }}
+      # Empty when the step that sets them did not get that far. Every reader
+      # takes empty as false.
+      nixlbench: ${{ steps.nixlbench.outputs.build }}
+      nixlbench-present: ${{ steps.nixlbench.outputs.present }}
     steps:
       - name: Check the inputs
         id: inputs
@@ -263,6 +267,53 @@ jobs:
             echo "version=${version}"
           } >> "$GITHUB_OUTPUT"
 
+      # The nixlbench wheel is not required, and this step cannot fail the job.
+      # A nightly or pull request run builds the wheel only once the repository
+      # variable AMD_NIXLBENCH_WHEEL is "true", because the build is done in
+      # the build job and so delays the NIXL wheels. A run of this workflow
+      # started by hand, which is never published, builds it unless the
+      # variable is "false". The nightly always passes an artifact suffix,
+      # which is what tells the two apart.
+      - name: Decide whether to build the nixlbench wheel
+        id: nixlbench
+        continue-on-error: true
+        timeout-minutes: 1
+        working-directory: source
+        env:
+          SUPPORTED: ${{ steps.source.outputs.supported }}
+          SWITCH: ${{ vars.AMD_NIXLBENCH_WHEEL }}
+          EVENT_NAME: ${{ github.event_name }}
+          ARTIFACT_SUFFIX: ${{ inputs.artifact-suffix }}
+        run: |
+          set +e
+          present=false
+          if [ "$SUPPORTED" = "true" ] \
+              && [ -f contrib/build-nixlbench-wheel.sh ] \
+              && [ -f contrib/wheel_nixlbench.py ] \
+              && [ -f benchmark/nixlbench/wheel/dispatcher.py ] \
+              && grep -q -- '--nixlbench-wheel-output-dir' contrib/build-container.sh 2>/dev/null \
+              && grep -q -- '--nixlbench-nixl-wheel-dir' contrib/build-container.sh 2>/dev/null; then
+            present=true
+          fi
+          build=false
+          if [ "$present" = "true" ]; then
+            if [ "$SWITCH" = "true" ]; then
+              build=true
+            elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -z "$ARTIFACT_SUFFIX" ] && [ "$SWITCH" != "false" ]; then
+              build=true
+            else
+              msg="This source can build the nixlbench wheel, but this run does not build it: a nightly or pull request run builds it only when the repository variable AMD_NIXLBENCH_WHEEL is 'true', and a run of ROCm Wheels started by hand unless it is 'false'."
+              echo "::notice title=nixlbench wheel not built::${msg}"
+              echo "${msg}" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+          echo "nixlbench wheel: present=${present}, build=${build}"
+          {
+            echo "present=${present}"
+            echo "build=${build}"
+          } >> "$GITHUB_OUTPUT"
+          exit 0
+
   build:
     name: Build (ROCm ${{ matrix.rocm-version }})
     needs: plan
@@ -390,6 +441,170 @@ jobs:
           name: rocm-backend-wheels-${{ matrix.rocm-version }}${{ inputs.artifact-suffix }}
           path: dist/*.whl
           if-no-files-found: error
+
+      # The rest of this job is the nixlbench wheel, which is not required: the
+      # NIXL backend wheels are uploaded by now, every step below is
+      # continue-on-error and has a time limit, and none runs unless the plan
+      # job chose to build nixlbench. It is built here because only this job
+      # holds the build cache of the NIXL wheels nixlbench must link against;
+      # the cache's key is the content of the checkout, so dist/ is moved out
+      # of it first, which puts the checkout back as the NIXL build saw it.
+      # The time and disk limits are set here and nowhere else.
+      - name: Build the nixlbench wheel
+        id: nixlbench
+        if: needs.plan.outputs.nixlbench == 'true'
+        continue-on-error: true
+        timeout-minutes: 20
+        env:
+          NIXLBENCH_CAP_S: 1080
+          NIXLBENCH_MIN_FREE_GB: 8
+        run: |
+          set -euo pipefail
+          df -h /
+          free_kb=$(df --output=avail -k / | awk 'NR == 2 { print $1 }') || free_kb=""
+          if [[ ! "$free_kb" =~ ^[0-9]+$ ]] || [ "$free_kb" -lt $((NIXLBENCH_MIN_FREE_GB * 1024 * 1024)) ]; then
+            echo "::warning title=nixlbench wheel not built::ROCm ${ROCM_VERSION}: / has ${free_kb:-an unknown number of} KiB free, less than the ${NIXLBENCH_MIN_FREE_GB} GiB the nixlbench build needs, so it is skipped"
+            echo "built=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mv dist "$RUNNER_TEMP/nixl-dist"
+          stack=""
+          if grep -q -- '--gpu-stack' contrib/build-container.sh; then stack="--gpu-stack rocm"; fi
+          # A kill by timeout is an ordinary failure of this step.
+          # shellcheck disable=SC2086
+          timeout --signal=TERM --kill-after=30s "${NIXLBENCH_CAP_S}s" \
+            ./contrib/build-container.sh \
+              --dockerfile contrib/Dockerfile.manylinux \
+              ${stack} --rocm-version "$ROCM_VERSION" \
+              --python-versions "$PYTHON_VERSIONS" \
+              --nixlbench-wheel-output-dir "$RUNNER_TEMP/nixlbench-dist" \
+              --nixlbench-nixl-wheel-dir "$RUNNER_TEMP/nixl-dist"
+          echo "built=true" >> "$GITHUB_OUTPUT"
+          df -h /
+
+      # build-container.sh exports the nixlbench wheel before it compares the
+      # NIXL wheels nixlbench was built against with the ones uploaded above,
+      # so the comparison is repeated here. Only what passed is staged, and
+      # the staging directory appears only once everything is in it.
+      - name: Check the nixlbench wheel
+        id: nixlbench-check
+        if: steps.nixlbench.outcome == 'success' && steps.nixlbench.outputs.built == 'true'
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          # Set only when the version was stamped.
+          STAMPED_VERSION: ${{ inputs.version-suffix != '' && needs.plan.outputs.version || '' }}
+          SOURCE_SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          reject() {
+            echo "::warning title=nixlbench wheel rejected::ROCm ${ROCM_VERSION}: $1"
+            exit 1
+          }
+          out="$RUNNER_TEMP/nixlbench-dist"
+          nixl="$RUNNER_TEMP/nixl-dist"
+          ls -l "$out" "$nixl"
+          backend="nixlbench_rocm$(echo "$ROCM_VERSION" | cut -d. -f1,2 | tr . _)"
+          wheels=("$out"/*.whl)
+          if [ "${#wheels[@]}" -ne 1 ]; then
+            reject "expected one nixlbench wheel, found ${#wheels[@]}"
+          fi
+          wheel=${wheels[0]}
+          name=${wheel##*/}
+          if [[ "$name" != "${backend}-"*"-py3-none-"*.whl ]]; then
+            reject "${name} is not a ${backend} py3-none wheel"
+          fi
+          if [ -n "$STAMPED_VERSION" ] && [[ "$name" != "${backend}-${STAMPED_VERSION}-py3-none-"*.whl ]]; then
+            reject "${name} does not carry the stamped version ${STAMPED_VERSION}"
+          fi
+          sums="$out/nixl-wheels.sha256"
+          if [ ! -s "$sums" ]; then
+            reject "nixl-wheels.sha256 is missing or empty"
+          fi
+          nixl_wheels=("$nixl"/*.whl)
+          if [ "${#nixl_wheels[@]}" -eq 0 ]; then
+            reject "the NIXL backend wheels are no longer in ${nixl}"
+          fi
+          # One line per NIXL wheel: <sha256>, two separator characters, <name>.
+          listed=$(sed -E 's/^[0-9a-f]{64} [ *]//' "$sums" | LC_ALL=C sort)
+          have=$(printf '%s\n' "${nixl_wheels[@]##*/}" | LC_ALL=C sort)
+          if [ "$listed" != "$have" ]; then
+            reject "nixl-wheels.sha256 does not list exactly the NIXL backend wheels that were uploaded"
+          fi
+          if ! (cd "$nixl" && sha256sum --check --strict --quiet "$sums"); then
+            reject "nixlbench was not built against the NIXL backend wheels that were uploaded"
+          fi
+          stage=$(mktemp -d "$RUNNER_TEMP/nixlbench-stage.XXXXXX")
+          cp "$wheel" "$sums" "$stage/"
+          WHEEL="$stage/$name" MANIFEST="$stage/nixlbench-backend.json" python3 -I - <<'EOF'
+          import hashlib
+          import json
+          import os
+          import pathlib
+
+          wheel = pathlib.Path(os.environ["WHEEL"])
+          manifest = {
+              "schema": 1,
+              "rocm": os.environ["ROCM_VERSION"],
+              "sha": os.environ["SOURCE_SHA"],
+              # <package>-<version>-<python tag>-<abi tag>-<platform tag>.whl
+              "version": wheel.name.split("-")[1],
+              "workflow_run_id": int(os.environ["GITHUB_RUN_ID"]),
+              "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+              "wheel": wheel.name,
+              "sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
+          }
+          pathlib.Path(os.environ["MANIFEST"]).write_text(json.dumps(manifest, indent=1) + "\n")
+          print(json.dumps(manifest))
+          EOF
+          mv "$stage" "$RUNNER_TEMP/nixlbench-upload"
+          ls -l "$RUNNER_TEMP/nixlbench-upload"
+
+      # The directory holds only what the check staged.
+      - name: Upload the nixlbench backend wheel
+        id: nixlbench-upload
+        if: steps.nixlbench.outcome == 'success' && steps.nixlbench.outputs.built == 'true' && steps.nixlbench-check.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rocm-nixlbench-backend-${{ matrix.rocm-version }}${{ inputs.artifact-suffix }}
+          path: ${{ runner.temp }}/nixlbench-upload/
+          if-no-files-found: error
+          overwrite: true
+
+      - name: Report the nixlbench wheel
+        if: ${{ !cancelled() && needs.plan.outputs.nixlbench == 'true' }}
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          BUILD_OUTCOME: ${{ steps.nixlbench.outcome }}
+          BUILT: ${{ steps.nixlbench.outputs.built }}
+          CHECK_OUTCOME: ${{ steps.nixlbench-check.outcome }}
+          UPLOAD_OUTCOME: ${{ steps.nixlbench-upload.outcome }}
+        run: |
+          set +e
+          problem=""
+          if [ "$BUILD_OUTCOME" = "skipped" ] || [ -z "$BUILD_OUTCOME" ]; then
+            problem="the build did not run, because an earlier step of this job failed"
+          elif [ "$BUILD_OUTCOME" != "success" ]; then
+            problem="the step \"Build the nixlbench wheel\" ended as ${BUILD_OUTCOME}"
+          elif [ "$BUILT" != "true" ]; then
+            problem="the build was skipped for lack of free disk space"
+          elif [ "$CHECK_OUTCOME" != "success" ]; then
+            problem="the step \"Check the nixlbench wheel\" ended as ${CHECK_OUTCOME:-not run}"
+          elif [ "$UPLOAD_OUTCOME" != "success" ]; then
+            problem="the step \"Upload the nixlbench backend wheel\" ended as ${UPLOAD_OUTCOME:-not run}"
+          fi
+          if [ -n "$problem" ]; then
+            msg="No nixlbench backend wheel for ROCm ${ROCM_VERSION}: ${problem}. The nixlbench wheel is not required, so this does not fail the job."
+            echo "::warning title=nixlbench wheel not built::${msg}"
+            echo "${msg}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "The nixlbench backend wheel for ROCm ${ROCM_VERSION} was built, checked and uploaded."
+          fi
+          exit 0
 
   merge:
     name: Merge
@@ -671,11 +886,296 @@ jobs:
       allow-failure: true
       artifact-suffix: ${{ inputs.artifact-suffix }}
 
+  # Not required: no job that gates the wheels needs this one, and a failure
+  # here is a warning on the run, not a failed job. It merges the nixlbench
+  # backend wheels the build job uploaded into one rocm-nixlbench wheel, after
+  # checking each of them again against the NIXL backend wheels of this
+  # attempt: a backend left by an earlier attempt of the run, built against
+  # other NIXL wheels, is dropped. Every step after the checkout is
+  # continue-on-error and runs only while the steps it depends on succeeded.
+  nixlbench:
+    name: nixlbench wheel
+    needs: [plan, build, merge]
+    if: ${{ !cancelled() && needs.plan.outputs.nixlbench == 'true' && needs.merge.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # For what no step can report, such as the job timing out.
+    continue-on-error: true
+    permissions:
+      contents: read
+    env:
+      SOURCE_SHA: ${{ needs.plan.outputs.sha }}
+      VERSION: ${{ needs.plan.outputs.version }}
+      ARTIFACT_SUFFIX: ${{ inputs.artifact-suffix }}
+    steps:
+      # The whole source: the merge installs the dispatcher under benchmark/.
+      - name: Checkout repository
+        id: checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+
+      - name: Download the nixlbench backend wheels
+        id: download-nixlbench
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: rocm-nixlbench-backend-*${{ inputs.artifact-suffix }}
+          path: ${{ runner.temp }}/nixlbench-artifacts
+
+      - name: Download the backend wheels
+        id: download-nixl
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: rocm-backend-wheels-*${{ inputs.artifact-suffix }}
+          path: ${{ runner.temp }}/backend-artifacts
+
+      # The patterns also match another ref's artifacts when its suffix ends
+      # with this one, so the artifacts are taken by their exact names.
+      - name: Verify the nixlbench backends
+        id: verify
+        continue-on-error: true
+        env:
+          ROCM_VERSIONS: ${{ needs.plan.outputs.rocm-versions }}
+        run: |
+          set -euo pipefail
+          python3 -I - <<'EOF'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import re
+          import subprocess
+
+          temp = pathlib.Path(os.environ["RUNNER_TEMP"])
+          suffix = os.environ.get("ARTIFACT_SUFFIX", "")
+          sha = os.environ["SOURCE_SHA"]
+          version = os.environ["VERSION"]
+          bench_root = temp / "nixlbench-artifacts"
+          nixl_root = temp / "backend-artifacts"
+          MANIFEST = "nixlbench-backend.json"
+          SUMS = "nixl-wheels.sha256"
+
+
+          class Missing(Exception):
+              """The run has no nixlbench backend for a ROCm version."""
+
+
+          class Dropped(Exception):
+              """A nixlbench backend that must not be merged."""
+
+
+          def verify(rocm):
+              xy = "_".join(rocm.split(".")[:2])
+              artifact = f"rocm-nixlbench-backend-{rocm}{suffix}"
+              directory = bench_root / artifact
+              lone = False
+              if not directory.is_dir():
+                  # A lone matching artifact may be extracted without its directory.
+                  directory, lone = bench_root, True
+                  if not list(directory.glob(f"nixlbench_rocm{xy}-*.whl")):
+                      raise Missing(f"artifact {artifact} was not downloaded")
+              try:
+                  manifest = json.loads((directory / MANIFEST).read_text())
+              except (OSError, ValueError) as exc:
+                  raise Dropped(f"{MANIFEST} cannot be read: {exc}") from None
+              if not isinstance(manifest, dict) or manifest.get("schema") != 1:
+                  raise Dropped(f"{MANIFEST} is not a schema 1 manifest")
+              if lone and manifest.get("rocm") != rocm:
+                  raise Missing(f"artifact {artifact} was not downloaded")
+              for key, expected in (("rocm", rocm), ("sha", sha), ("version", version)):
+                  if manifest.get(key) != expected:
+                      raise Dropped(f"{MANIFEST} has {key} {manifest.get(key)!r}, this build has {expected!r}")
+              attempt = manifest.get("run_attempt")
+              if isinstance(attempt, bool) or not isinstance(attempt, int):
+                  raise Dropped(f"{MANIFEST} has no integer run_attempt")
+              name = manifest.get("wheel")
+              if not isinstance(name, str) or not re.fullmatch(
+                  rf"nixlbench_rocm{xy}-{re.escape(version)}-py3-none-[A-Za-z0-9_.]+\.whl", name
+              ):
+                  raise Dropped(f"{MANIFEST} names the wheel {name!r}, which is not this build's backend")
+              wheel = directory / name
+              found = sorted(p.name for p in directory.glob(f"nixlbench_rocm{xy}-*.whl"))
+              if found != [name]:
+                  raise Dropped(f"the artifact holds {found}, expected {name} only")
+              digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+              if manifest.get("sha256") != digest:
+                  raise Dropped(f"{name} does not have the sha256 its manifest records")
+
+              # The NIXL backend wheels of the same ROCm version, as merged.
+              nixl_artifact = f"rocm-backend-wheels-{rocm}{suffix}"
+              nixl_dir = nixl_root / nixl_artifact
+              nixl_wheels = sorted(p.name for p in nixl_dir.glob("*.whl"))
+              if not nixl_wheels:
+                  nixl_dir = nixl_root
+                  nixl_wheels = sorted(p.name for p in nixl_dir.glob(f"nixl_rocm{xy}-*.whl"))
+              if not nixl_wheels:
+                  raise Dropped(f"artifact {nixl_artifact} was not downloaded or holds no wheel")
+              sums = directory / SUMS
+              try:
+                  lines = sums.read_text().splitlines()
+              except (OSError, ValueError) as exc:
+                  raise Dropped(f"{SUMS} cannot be read: {exc}") from None
+              listed = []
+              for line in lines:
+                  match = re.fullmatch(r"[0-9a-f]{64} [ *]([^/]+)", line)
+                  if not match:
+                      raise Dropped(f"{SUMS} has a line that is not '<sha256>  <wheel>'")
+                  listed.append(match.group(1))
+              if not listed or sorted(listed) != nixl_wheels:
+                  raise Dropped(f"{SUMS} does not list exactly the {len(nixl_wheels)} wheel(s) of {nixl_artifact}")
+              check = subprocess.run(
+                  ["sha256sum", "--check", "--strict", "--quiet", str(sums.resolve())],
+                  cwd=nixl_dir,
+                  check=False,
+              )
+              if check.returncode != 0:
+                  raise Dropped(f"it was not built against the NIXL wheels of {nixl_artifact}")
+              return {
+                  "rocm": rocm,
+                  "path": str(wheel.resolve()),
+                  "file": name,
+                  "sha256": digest,
+                  "run_attempt": attempt,
+              }
+
+
+          verified = []
+          for rocm in json.loads(os.environ["ROCM_VERSIONS"]):
+              try:
+                  verified.append(verify(rocm))
+                  print(f"ROCm {rocm}: {verified[-1]['file']} is verified")
+              except Missing as exc:
+                  print(f"::warning title=nixlbench backend missing::ROCm {rocm}: {exc}")
+              except Dropped as exc:
+                  print(f"::warning title=nixlbench backend dropped::ROCm {rocm}: {exc}")
+
+          (temp / "nixlbench-verified.json").write_text(json.dumps(verified) + "\n")
+          (temp / "nixlbench-verified.txt").write_text("".join(entry["path"] + "\n" for entry in verified))
+          if not verified:
+              print("::warning title=nixlbench wheel not built::no nixlbench backend is left to merge")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
+              stream.write(f"count={len(verified)}\n")
+          EOF
+
+      # One rocm_nixlbench wheel, holding the backend of every ROCm version
+      # that was verified.
+      - name: Merge the nixlbench backends
+        id: merge
+        if: steps.verify.outcome == 'success' && steps.verify.outputs.count != '' && steps.verify.outputs.count != '0'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          mapfile -t backends < "$RUNNER_TEMP/nixlbench-verified.txt"
+          out="$RUNNER_TEMP/dist-nixlbench"
+          python3 contrib/wheel_nixlbench.py merge --output-dir "$out" "${backends[@]}"
+          ls -l "$out"
+          merged=("$out"/*.whl)
+          if [ "${#merged[@]}" -ne 1 ] || [[ "${merged[0]##*/}" != "rocm_nixlbench-${VERSION}-py3-none-"*.whl ]]; then
+            echo "::warning title=nixlbench wheel not built::expected one rocm_nixlbench wheel of version ${VERSION}, found: ${merged[*]##*/}"
+            exit 1
+          fi
+
+      - name: Write nixlbench-build.json
+        id: manifest
+        if: steps.merge.outcome == 'success'
+        continue-on-error: true
+        env:
+          REF: ${{ needs.plan.outputs.ref }}
+          NIXL_WHEELS_ARTIFACT: ${{ needs.plan.outputs.wheels-artifact }}
+        run: |
+          set -euo pipefail
+          python3 -I - <<'EOF'
+          import hashlib
+          import json
+          import os
+          import pathlib
+
+          temp = pathlib.Path(os.environ["RUNNER_TEMP"])
+          verified = json.loads((temp / "nixlbench-verified.json").read_text())
+          (wheel,) = sorted((temp / "dist-nixlbench").glob("*.whl"))
+          manifest = {
+              "schema": 1,
+              "ref": os.environ["REF"],
+              "sha": os.environ["SOURCE_SHA"],
+              "version": os.environ["VERSION"],
+              "workflow_run_id": int(os.environ["GITHUB_RUN_ID"]),
+              "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+              "artifact_suffix": os.environ.get("ARTIFACT_SUFFIX", ""),
+              "nixl_wheels_artifact": os.environ["NIXL_WHEELS_ARTIFACT"],
+              "wheel": wheel.name,
+              "bytes": wheel.stat().st_size,
+              "sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
+              # In the order of the plan's ROCm versions.
+              "rocm": [entry["rocm"] for entry in verified],
+              "backends": [
+                  {
+                      "rocm": entry["rocm"],
+                      "file": entry["file"],
+                      "sha256": entry["sha256"],
+                      "run_attempt": entry["run_attempt"],
+                  }
+                  for entry in verified
+              ],
+          }
+          (wheel.parent / "nixlbench-build.json").write_text(json.dumps(manifest, indent=1) + "\n")
+          print(json.dumps(manifest, indent=1))
+          EOF
+
+      # The wheel and its manifest: the merge wrote nothing else there.
+      - name: Upload the nixlbench wheel
+        id: upload
+        if: steps.manifest.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rocm-nixlbench-wheel${{ inputs.artifact-suffix }}
+          path: ${{ runner.temp }}/dist-nixlbench/
+          if-no-files-found: error
+          overwrite: true
+
+      - name: Report
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          OUTCOMES: >-
+            checkout=${{ steps.checkout.outcome }}
+            download-nixlbench=${{ steps.download-nixlbench.outcome }}
+            download-nixl=${{ steps.download-nixl.outcome }}
+            verify=${{ steps.verify.outcome }}
+            merge=${{ steps.merge.outcome }}
+            manifest=${{ steps.manifest.outcome }}
+            upload=${{ steps.upload.outcome }}
+          COUNT: ${{ steps.verify.outputs.count }}
+          UPLOAD_OUTCOME: ${{ steps.upload.outcome }}
+        run: |
+          set +e
+          failed=""
+          for pair in $OUTCOMES; do
+            if [ "${pair#*=}" = "failure" ]; then failed+=" ${pair%%=*}"; fi
+          done
+          if [ -n "$failed" ]; then
+            msg="The rocm-nixlbench wheel was not built: these steps failed:${failed}. It is not required, so this does not fail the job."
+            echo "::warning title=nixlbench wheel not built::${msg}"
+          elif [ "$UPLOAD_OUTCOME" = "success" ]; then
+            msg="The rocm-nixlbench wheel (not required) was built from ${COUNT} verified backend(s) and uploaded as rocm-nixlbench-wheel${ARTIFACT_SUFFIX}."
+            echo "${msg}"
+          else
+            # The verify step has already warned, with the cause.
+            msg="The rocm-nixlbench wheel (not required) was not built: no nixlbench backend passed verification."
+            echo "${msg}"
+          fi
+          echo "${msg}" >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+
   # Runs whatever happened above, including for a ref that cannot build ROCm
   # wheels, so that a caller always finds one results.json per ref.
   results:
     name: Results
-    needs: [plan, build, merge, test, rocjitsu, rocjitsu-2vm]
+    needs: [plan, build, merge, test, rocjitsu, rocjitsu-2vm, nixlbench]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -855,6 +1355,97 @@ jobs:
               f"{ref}: supported={supported}, {len(wheels)} wheel(s), {len(tests)} test result file(s), "
               + ", ".join(f"{j['name']}={j['result']}" for j in jobs)
           )
+          EOF
+
+      # The nixlbench wheel is not required. The two steps below cannot fail
+      # the job and each has a short time limit, so neither can keep the
+      # results.json written above from being uploaded.
+      - name: Download the nixlbench wheel
+        if: needs.plan.outputs.nixlbench == 'true'
+        continue-on-error: true
+        timeout-minutes: 1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: rocm-nixlbench-wheel${{ inputs.artifact-suffix }}
+          path: nixlbench
+
+      # Adds the top-level key "nixlbench" and nothing else. The file is
+      # replaced in one rename, and only by a copy that still holds every
+      # other key as it was; on any error it is left as it is.
+      - name: Add the nixlbench wheel to results.json
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          NIXLBENCH_PRESENT: ${{ needs.plan.outputs.nixlbench-present }}
+          NIXLBENCH_ENABLED: ${{ needs.plan.outputs.nixlbench }}
+          NIXLBENCH_RESULT: ${{ needs.nixlbench.result }}
+          NIXLBENCH_ARTIFACT: rocm-nixlbench-wheel${{ inputs.artifact-suffix }}
+        run: |
+          set -euo pipefail
+          python3 -I - <<'EOF'
+          import hashlib
+          import json
+          import os
+          import pathlib
+
+          path = pathlib.Path("results/results.json")
+          original = json.loads(path.read_text())
+          if not isinstance(original, dict) or "nixlbench" in original:
+              raise SystemExit(f"{path} is not the object the step above writes")
+
+          # What was built comes from the artifact, not from the job's result.
+          directory = pathlib.Path("nixlbench")
+          wheel = None
+          rocm = []
+          found = sorted(directory.glob("rocm_nixlbench-*.whl"))
+          if len(found) == 1:
+              digest = hashlib.sha256()
+              with open(found[0], "rb") as stream:
+                  for block in iter(lambda: stream.read(1 << 20), b""):
+                      digest.update(block)
+              wheel = {"file": found[0].name, "bytes": found[0].stat().st_size, "sha256": digest.hexdigest()}
+              try:
+                  manifest = json.loads((directory / "nixlbench-build.json").read_text())
+              except (OSError, ValueError) as exc:
+                  print(f"::warning::nixlbench-build.json cannot be read: {exc}")
+                  manifest = None
+              if isinstance(manifest, dict) and manifest.get("sha256") == wheel["sha256"]:
+                  listed = manifest.get("rocm")
+                  if isinstance(listed, list) and all(isinstance(version, str) for version in listed):
+                      rocm = listed
+          elif found:
+              print(f"::warning::the nixlbench artifact holds {len(found)} wheels; none is reported")
+
+          entry = {
+              "required": False,
+              "supported": os.environ.get("NIXLBENCH_PRESENT") == "true",
+              "enabled": os.environ.get("NIXLBENCH_ENABLED") == "true",
+              "result": os.environ.get("NIXLBENCH_RESULT") or None,
+              "artifact": os.environ["NIXLBENCH_ARTIFACT"] if wheel else None,
+              "wheel": wheel,
+              "rocm": rocm,
+          }
+          updated = dict(original)
+          updated["nixlbench"] = entry
+          temporary = path.with_name(path.name + ".tmp")
+          temporary.write_text(json.dumps(updated, indent=1) + "\n")
+          written = json.loads(temporary.read_text())
+          if written != updated or {key: written[key] for key in original} != original:
+              raise SystemExit(f"{temporary} does not hold what {path} held")
+          os.replace(temporary, path)
+
+          if wheel:
+              state = f"{wheel['file']} for ROCm {', '.join(rocm) or 'unknown'}"
+          elif not entry["supported"]:
+              state = "this source has no nixlbench wheel build"
+          elif not entry["enabled"]:
+              state = "not built in this run"
+          else:
+              state = f"no wheel (job result: {entry['result']})"
+          line = f"nixlbench wheel (not required): {state}"
+          print(line)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as stream:
+              stream.write(line + "\n")
           EOF
 
       - name: Upload the results

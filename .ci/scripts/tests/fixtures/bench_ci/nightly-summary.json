@@ -1,0 +1,10 @@
+{
+ "schema": 1,
+ "run_id": 4242,
+ "run_attempt": 1,
+ "repository": "ROCm/nixl",
+ "stamp": "20261119T032301Z",
+ "upstream_main_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+ "sync": "success",
+ "branches": []
+}

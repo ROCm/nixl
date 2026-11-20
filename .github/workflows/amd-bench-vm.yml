@@ -1,0 +1,407 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: AMD Bench - VM Lane
+
+# Runs one nixlbench lane of .ci/bench in rocjitsu guests: vm1-local (one
+# guest, two spare NVMe drives), vm2-net (two guests on the emulated NICs'
+# mesh), vm1-loop (one guest, the NIC's loopback backend) or vm1-fabric (one
+# guest, the NIC's NVMe-over-Fabrics target). The runner,
+# .ci/scripts/amd_bench_run.py, stays in the job container and reaches the
+# guests over ssh. The records and the diagnostics are uploaded as artifacts;
+# nothing is published. See .ci/docs/amd-bench.md.
+#
+# The scripts, the matrix and the fleet overlays are those of the commit this
+# workflow runs at, whatever source the wheels in the artifacts were built
+# from. The steps that boot the stack are .ci/scripts/amd_bench_stack.sh, which
+# does what rocm-wheels-rocjitsu.yml and amd-bench-probe.yml do; change them
+# together.
+#
+# With allow-failure the job carries continue-on-error, so a lane that fails
+# does not fail the run that called it.
+#
+# External dependencies besides the actions pinned below, uv and numpy from
+# PyPI, and the guests' Ubuntu archive when nixlbench lacks a library:
+#   - github.com/sbates130272/qemu-minimal at QEMU_MINIMAL_REF: qemu-tool, the
+#     rocm-golden fleet file and the nonroot-user action.
+#   - The Docker Hub images under docker.io/sbates130272 that the overlays in
+#     .ci/rocjitsu pin by digest (QEMU, the device servers and the guest disk);
+#     the QEMU image is also the job container.
+#   - vm2-net only: docker.io/library/alpine:3.20 and Alpine's package mirror,
+#     from which qemu-tool builds the image that bridges the guests' NICs.
+
+on:
+  workflow_call:
+    inputs:
+      run-id:
+        description: Workflow run to download the two artifacts from.
+        required: true
+        type: string
+      rocm-version:
+        description: ROCm version of the backend to exercise, as X.Y.Z. It must be the guest image's.
+        required: true
+        type: string
+      nixl-artifact:
+        description: Name of the artifact holding the merged rocm-nixl wheels.
+        required: true
+        type: string
+      nixlbench-artifact:
+        description: Name of the artifact holding the merged rocm-nixlbench wheel.
+        required: true
+        type: string
+      run-meta:
+        description: The run-meta of the bench run, as a JSON object; see amd_bench_ci.py meta.
+        required: true
+        type: string
+      lane:
+        description: The lane to run, one of vm1-local, vm2-net, vm1-loop and vm1-fabric.
+        required: true
+        type: string
+      artifact-suffix:
+        description: Appended to the names of the artifacts this workflow uploads, for a run that benches several builds.
+        required: false
+        type: string
+        default: ''
+      tier:
+        description: The tier of cases to run.
+        required: false
+        type: string
+        default: nightly
+      only:
+        description: Case-key globs separated by spaces; only the cases that match one are run. Empty means all.
+        required: false
+        type: string
+        default: ''
+      python-version:
+        description: Python version to install the wheels for, as X.Y.
+        required: false
+        type: string
+        default: '3.12'
+      allow-failure:
+        description: Do not fail the calling run when the lane fails.
+        required: false
+        type: boolean
+        default: false
+
+# actions: read is for the artifacts, which another run uploaded.
+permissions:
+  contents: read
+  actions: read
+
+env:
+  # The ROCm release in the guest image; only its backend can be selected.
+  GUEST_ROCM: '10.1'
+  # Move together with the nonroot-user action pin, the job container image
+  # and the digests in the overlays under .ci/rocjitsu.
+  QEMU_MINIMAL_REF: 45941a379b6afb4306902c1206d8d981565b5a5c # v2.0.0
+  UV_VERSION: 0.13.9
+  PYTHONDONTWRITEBYTECODE: 1
+
+jobs:
+
+  bench:
+    name: ${{ inputs.lane }} (ROCm ${{ inputs.rocm-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    continue-on-error: ${{ inputs.allow-failure }}
+    container:
+      # <qemu-ref> of the overlays under .ci/rocjitsu.
+      image: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20261112.gdca6903-qemu.4cb9698-vfu.3719c3a@sha256:f7e61be3f29c82aeac60b8fa3f88ac3c434ab0f19a79bd144cb87ed9054aca03
+      # QEMU runs in sibling containers started through the host's docker
+      # socket: the images directory must be the same path on both sides and
+      # quick-start must see host pids.
+      options: >-
+        --device /dev/kvm
+        --pid=host
+        -v /var/run/docker.sock:/var/run/docker.sock
+        -v /var/lib/qemu-tool:/var/lib/qemu-tool
+    defaults:
+      run:
+        # A container job defaults to sh, which rejects "set -o pipefail".
+        shell: bash
+    env:
+      LANE: ${{ inputs.lane }}
+      # A caller may pass an empty string.
+      TIER: ${{ inputs.tier || 'nightly' }}
+      ONLY: ${{ inputs.only }}
+      RUN_ID: ${{ inputs.run-id }}
+      ROCM_VERSION: ${{ inputs.rocm-version }}
+      PYTHON_VERSION: ${{ inputs.python-version }}
+      RUN_META: ${{ inputs.run-meta }}
+      # Seconds from the start of the job after which no case is started. The
+      # rest of the 60 minutes is for the last case, the end probes, the
+      # diagnostics, the uploads and the teardown.
+      BUDGET_S: 2760
+    steps:
+    # First, and nothing else: the budget counts from here.
+    - name: Start the lane's clock
+      run: |
+        set -euo pipefail
+        t0=$(date +%s)
+        {
+          echo "BENCH_T0=${t0}"
+          echo "BENCH_DEADLINE=$((t0 + BUDGET_S))"
+        } >> "$GITHUB_ENV"
+
+    - name: Check the inputs
+      env:
+        NIXL_ARTIFACT: ${{ inputs.nixl-artifact }}
+        NIXLBENCH_ARTIFACT: ${{ inputs.nixlbench-artifact }}
+        ARTIFACT_SUFFIX: ${{ inputs.artifact-suffix }}
+      run: |
+        set -euo pipefail
+        fail() {
+          echo "::error::$1"
+          exit 1
+        }
+        # The runner reads TOML with the standard library.
+        python3 -c 'import tomllib' \
+          || fail "the job container's python3 is older than 3.11, which amd_bench_run.py needs"
+        # A rejected value is never echoed.
+        case "$LANE" in
+          vm1-local|vm2-net|vm1-loop|vm1-fabric) ;;
+          *) fail "lane must be vm1-local, vm2-net, vm1-loop or vm1-fabric" ;;
+        esac
+        case "$TIER" in
+          pr|nightly|weekly) ;;
+          *) fail "tier must be pr, nightly or weekly" ;;
+        esac
+        [[ "$RUN_ID" =~ ^[0-9]{1,20}$ ]] || fail "run-id must be a number"
+        [[ "$ROCM_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "rocm-version must be X.Y.Z"
+        [[ "$PYTHON_VERSION" =~ ^3\.[0-9]+$ ]] || fail "python-version must be 3.Y"
+        [[ "$NIXL_ARTIFACT" =~ ^[A-Za-z0-9._-]+$ && "$NIXLBENCH_ARTIFACT" =~ ^[A-Za-z0-9._-]+$ ]] \
+          || fail "an artifact name may hold letters, digits, dots, underscores and dashes only"
+        [[ "$ARTIFACT_SUFFIX" =~ ^(-[A-Za-z0-9._-]+)?$ ]] \
+          || fail "artifact-suffix must be empty or a dash followed by letters, digits, dots, underscores and dashes"
+        # No case key starts with a dash, and the runner would take such a
+        # glob for an option.
+        glob_re='^[]A-Za-z0-9._+/*?[-]+$'
+        read -r -a globs <<< "$ONLY"
+        for glob in "${globs[@]}"; do
+          [[ "$glob" =~ $glob_re && "$glob" != -* ]] \
+            || fail "only takes case-key globs separated by spaces, none starting with a dash"
+        done
+        if [ "${ROCM_VERSION%.*}" != "$GUEST_ROCM" ]; then
+          fail "the only published rocjitsu guest image carries ROCm ${GUEST_ROCM}, so the ROCm ${ROCM_VERSION} backend cannot be selected there"
+        fi
+
+    - name: Check out code
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+        persist-credentials: false
+
+    - name: Check out qemu-minimal
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+        repository: sbates130272/qemu-minimal
+        ref: ${{ env.QEMU_MINIMAL_REF }}
+        path: qemu-minimal
+        persist-credentials: false
+
+    - name: Require KVM
+      run: |
+        set -euo pipefail
+        if [ ! -c /dev/kvm ] || [ ! -w /dev/kvm ]; then
+          echo "::error::/dev/kvm is not usable on this runner; the guests cannot boot without it"
+          exit 1
+        fi
+        df -h / /var/lib/qemu-tool
+
+    # Exports CIUSER_UID and CIUSER_HOME.
+    - name: Run the stack as a non-root user
+      uses: sbates130272/qemu-minimal/.github/actions/nonroot-user@45941a379b6afb4306902c1206d8d981565b5a5c # qemu-minimal v2.0.0
+
+    - name: Install qemu-tool
+      run: |
+        set -euo pipefail
+        # The image ships its own qemu-tool, which would otherwise win on PATH.
+        PIPX_BIN_DIR=/usr/local/bin pipx install --force ./qemu-minimal/qemu
+        resolved=$(readlink -f "$(command -v qemu-tool)")
+        echo "qemu-tool resolves to: ${resolved}"
+        case "$resolved" in
+          /opt/qemu-tool/*)
+            echo "::error::the image's qemu-tool is shadowing the pinned one"
+            exit 1
+            ;;
+        esac
+        qemu-tool quick-start --help >/dev/null
+
+    # After the last checkout: a checkout empties a workspace that holds no
+    # repository yet. github.workspace is the runner's path, not the job
+    # container's.
+    - name: Prepare the results directories
+      run: |
+        set -euo pipefail
+        mkdir -p "$GITHUB_WORKSPACE/bench-out" "$GITHUB_WORKSPACE/bench-diagnostics" \
+          "$RUNNER_TEMP/amd-bench"
+        {
+          echo "BENCH_OUT=$GITHUB_WORKSPACE/bench-out"
+          echo "BENCH_DIAG=$GITHUB_WORKSPACE/bench-diagnostics"
+        } >> "$GITHUB_ENV"
+
+    - name: Check the pins and record the runner before the boot
+      run: bash .ci/scripts/amd_bench_stack.sh pins
+
+    - name: Download the NIXL wheels from run ${{ inputs.run-id }}
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: ${{ inputs.nixl-artifact }}
+        path: wheelhouse
+        run-id: ${{ inputs.run-id }}
+        github-token: ${{ github.token }}
+
+    - name: Download the nixlbench wheel from run ${{ inputs.run-id }}
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: ${{ inputs.nixlbench-artifact }}
+        path: wheelhouse
+        run-id: ${{ inputs.run-id }}
+        github-token: ${{ github.token }}
+
+    # The nixlbench wheel must be the one the plan read the manifest of: a
+    # re-run of the source run may have uploaded another under the same name.
+    - name: Check the artifacts have the wheels this job installs
+      run: |
+        set -euo pipefail
+        shopt -s nullglob
+        ls -l wheelhouse
+        tag="cp${PYTHON_VERSION/./}"
+        backend="rocm${GUEST_ROCM/./_}"
+        has() {
+          python3 -I -c 'import sys, zipfile; sys.exit(0 if sys.argv[2] in zipfile.ZipFile(sys.argv[1]).namelist() else 1)' "$1" "$2"
+        }
+        wheel=(wheelhouse/rocm_nixl-*-"${tag}"-"${tag}"-*.whl)
+        if [ "${#wheel[@]}" -ne 1 ]; then
+          echo "::error::expected exactly one rocm_nixl wheel for ${tag} in the artifact, found ${#wheel[@]}"
+          exit 1
+        fi
+        if ! has "${wheel[0]}" "nixl_${backend}/__init__.py"; then
+          echo "::error::${wheel[0]} does not contain the nixl_${backend} backend"
+          exit 1
+        fi
+        bench=(wheelhouse/rocm_nixlbench-*.whl)
+        if [ "${#bench[@]}" -ne 1 ]; then
+          echo "::error::expected exactly one rocm_nixlbench wheel in the artifact, found ${#bench[@]}"
+          exit 1
+        fi
+        if ! has "${bench[0]}" "nixlbench_${backend}/__init__.py"; then
+          echo "::error::${bench[0]} does not contain the nixlbench_${backend} backend"
+          exit 1
+        fi
+        want=$(python3 -I -c 'import json, os; print(json.loads(os.environ["RUN_META"]).get("nixlbench_sha256") or "")')
+        have=$(sha256sum "${bench[0]}" | cut -d ' ' -f 1)
+        if [ -z "$want" ] || [ "$have" != "$want" ]; then
+          echo "::error::${bench[0]} has the sha256 ${have}, not the ${want:-one missing from} run-meta: it is not the wheel this bench run was planned for"
+          exit 1
+        fi
+        {
+          echo "NIXL_WHEEL=$GITHUB_WORKSPACE/${wheel[0]}"
+          echo "NIXLBENCH_WHEEL=$GITHUB_WORKSPACE/${bench[0]}"
+        } >> "$GITHUB_ENV"
+
+    # qemu-tool always starts the NIC server as a node of its TCP mesh. A
+    # docker-compose.override.yml in the stack directory, which compose merges
+    # by itself, replaces that command and the mesh's health check for the one
+    # NIC server of a one-guest stack with no TAP.
+    - name: Select the NIC backend
+      if: inputs.lane == 'vm1-loop' || inputs.lane == 'vm1-fabric'
+      run: bash .ci/scripts/amd_bench_stack.sh override
+
+    - name: Check the pinned NIC server image takes the backend
+      if: inputs.lane == 'vm1-loop' || inputs.lane == 'vm1-fabric'
+      run: bash .ci/scripts/amd_bench_stack.sh ernic-image
+
+    - name: Boot the lane's guests
+      run: bash .ci/scripts/amd_bench_stack.sh up
+
+    - name: Check how compose merged the override
+      if: inputs.lane == 'vm1-loop' || inputs.lane == 'vm1-fabric'
+      run: bash .ci/scripts/amd_bench_stack.sh compose-merge
+
+    - name: Check the backend took effect
+      if: inputs.lane == 'vm1-loop' || inputs.lane == 'vm1-fabric'
+      run: bash .ci/scripts/amd_bench_stack.sh backend-check
+
+    - name: Join the stack network and wait for the guests to answer SSH
+      run: bash .ci/scripts/amd_bench_stack.sh ssh
+
+    - name: Check the guests' ROCm version
+      run: bash .ci/scripts/amd_bench_stack.sh rocm
+
+    # A guest without a GPU still runs the cases that need none: the env file
+    # then does not provide 'gpu'.
+    - name: Stage the GPU firmware and load amdgpu
+      run: bash .ci/scripts/amd_bench_stack.sh gpu
+
+    - name: Prepare the lane's drives and NICs
+      run: bash .ci/scripts/amd_bench_stack.sh prepare
+
+    - name: Install the wheels in the guests
+      run: bash .ci/scripts/amd_bench_stack.sh install
+
+    - name: Check that nixlbench runs in the guests
+      run: bash .ci/scripts/amd_bench_stack.sh preflight
+
+    - name: Write the env file and the run-meta
+      run: bash .ci/scripts/amd_bench_stack.sh render
+
+    # Exits 0, 1 when a required case failed, 2 or 3 on an error of the runner.
+    - name: Run the lane
+      run: |
+        set -uo pipefail
+        args=(run --lane "$LANE" --tier "$TIER"
+              --env "$RUNNER_TEMP/amd-bench/env.json" --run-meta "$RUNNER_TEMP/amd-bench/run-meta.json"
+              --out "$BENCH_OUT" --deadline-epoch "$BENCH_DEADLINE"
+              --summary-out "$GITHUB_STEP_SUMMARY")
+        read -r -a globs <<< "$ONLY"
+        for g in "${globs[@]}"; do args+=("--only=$g"); done
+        rc=0
+        python3 .ci/scripts/amd_bench_run.py "${args[@]}" 2>&1 | tee "$BENCH_DIAG/runner.log" || rc=${PIPESTATUS[0]}
+        exit "$rc"
+
+    # The run's answer to E1: how long the cases with GPU memory took, and how
+    # many ended on nixlbench's 15 s runtime wait.
+    - name: Report the wall time of the VRAM cases
+      if: always()
+      continue-on-error: true
+      run: |
+        python3 .ci/scripts/amd_bench_ci.py vram-timing \
+          --records "${BENCH_OUT:-bench-out}/records.ndjson" \
+          --out "${BENCH_DIAG:-bench-diagnostics}/e1-vram-timing.txt"
+
+    - name: Collect diagnostics
+      if: always()
+      run: bash .ci/scripts/amd_bench_stack.sh diagnostics || true
+
+    - name: Disconnect from the NVMe-oF target
+      if: always() && inputs.lane == 'vm1-fabric'
+      run: bash .ci/scripts/amd_bench_stack.sh fabric-down || true
+
+    - name: Upload the records
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: bench-records-${{ inputs.lane }}-${{ inputs.rocm-version }}${{ inputs.artifact-suffix }}
+        path: bench-out/
+        if-no-files-found: warn
+        overwrite: true
+
+    - name: Upload diagnostics
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: bench-diagnostics-${{ inputs.lane }}-${{ inputs.rocm-version }}${{ inputs.artifact-suffix }}
+        path: bench-diagnostics/
+        if-no-files-found: warn
+        overwrite: true
+
+    - name: Take the stack down
+      if: always()
+      run: bash .ci/scripts/amd_bench_stack.sh down || true
+
+    - name: Report a lane that is allowed to fail
+      if: ${{ failure() && inputs.allow-failure }}
+      run: |
+        msg="the ${LANE} lane did not pass; see this job's log, its summary and the bench-diagnostics artifact. allow-failure is set, so the run is not failed."
+        echo "::warning title=AMD bench ${LANE} failed::${msg}"
+        echo "**${msg}**" >> "$GITHUB_STEP_SUMMARY"
