@@ -65,6 +65,9 @@ ROCM_VERSION=""
 WHL_BASE_SET="false"
 PROXY_CA_CERT=""
 WHEEL_OUTPUT_DIR=""
+NIXLBENCH_WHEEL_OUTPUT_DIR=""
+NIXLBENCH_BASE_IMAGE=""
+NIXLBENCH_NIXL_WHEEL_DIR=""
 BUILD_INFINIA="false"
 INFINIA_LIBS_IMAGE="il.artifactory.nvidia.com/sw-nbu-swx-nixl-docker-local/static/infinia-libs:v2.5.0-rcx.1"
 APT_MIRROR=""
@@ -199,6 +202,30 @@ get_options() {
         --wheel-output-dir)
             if [ "$2" ]; then
                 WHEEL_OUTPUT_DIR=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --nixlbench-wheel-output-dir)
+            if [ "$2" ]; then
+                NIXLBENCH_WHEEL_OUTPUT_DIR=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --nixlbench-base-image)
+            if [ "$2" ]; then
+                NIXLBENCH_BASE_IMAGE=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --nixlbench-nixl-wheel-dir)
+            if [ "$2" ]; then
+                NIXLBENCH_NIXL_WHEEL_DIR=$2
                 shift
             else
                 missing_requirement "$1"
@@ -353,6 +380,12 @@ show_build_options() {
     if [ -n "$ROCM_VERSION" ]; then
         echo "GPU stack: ROCm ${ROCM_VERSION}"
     fi
+    if [ -n "$NIXLBENCH_WHEEL_OUTPUT_DIR" ]; then
+        echo "nixlbench wheel: ${NIXLBENCH_WHEEL_OUTPUT_DIR} (built in: ${NIXLBENCH_BASE_IMAGE:-the wheel stage})"
+        if [ -n "$NIXLBENCH_NIXL_WHEEL_DIR" ]; then
+            echo "nixlbench wheel must match the NIXL wheels in: ${NIXLBENCH_NIXL_WHEEL_DIR}"
+        fi
+    fi
     echo "UCX Repo: ${UCX_REPO}"
     echo "UCX Ref: ${UCX_REF}"
     if [ -n "$UCX_SONAME_SUFFIX" ]; then
@@ -459,6 +492,9 @@ show_help() {
   [--rocm-version ROCm X.Y.Z, e.g. 10.1.0: build the manylinux wheel for that ROCm release instead of for CUDA; x86_64 only, and defaults --wheel-base to manylinux_2_28]
   [--proxy-ca-cert optional root CA certificate (PEM file) of a TLS-intercepting proxy, passed to the manylinux wheel build as the proxy_ca secret; the build is unchanged without it]
   [--wheel-output-dir directory to write the manylinux wheels to instead of creating an image (BuildKit local output)]
+  [--nixlbench-wheel-output-dir directory outside the build context to write the nixlbench wheel to, built against and requiring the manylinux NIXL wheels, instead of creating an image; requires --rocm-version, cannot be used with --wheel-output-dir]
+  [--nixlbench-base-image pre-built wheel image (this script's default output, from the same sources and options) to build the nixlbench wheel in instead of building the NIXL wheels again; the ROCm base stage is still built, or taken from the build cache, to test the wheel in; requires --nixlbench-wheel-output-dir]
+  [--nixlbench-nixl-wheel-dir directory a --wheel-output-dir build wrote the NIXL wheels to; fail unless they are the wheels the nixlbench wheel was built and tested against; requires --nixlbench-wheel-output-dir]
   [--manylinux-image PyPA manylinux image prefix (default: ${MANYLINUX_IMAGE})]
   [--manylinux-image-tag pinned PyPA manylinux image tag (default: ${MANYLINUX_IMAGE_TAG})]"
     echo "  [--wheel-base-image pre-built wheel base image URL; skips wheel_base stage and builds only the wheel stage]"
@@ -514,6 +550,53 @@ if [ -n "$ROCM_VERSION" ]; then
         WHL_BASE=manylinux_2_28
         WHL_PLATFORM=${WHL_BASE}_${ARCH}
     fi
+fi
+
+if [ -n "$NIXLBENCH_WHEEL_OUTPUT_DIR" ]; then
+    if ! grep -q '^FROM .* AS nixlbench_wheel_dist$' "$DOCKER_FILE"; then
+        error "ERROR:" "--nixlbench-wheel-output-dir requires a dockerfile with a nixlbench_wheel_dist stage (contrib/Dockerfile.manylinux); $DOCKER_FILE has none"
+    fi
+    if [ -z "$ROCM_VERSION" ]; then
+        error "ERROR:" "--nixlbench-wheel-output-dir requires --rocm-version (the nixlbench wheel is only built for ROCm so far)"
+    fi
+    if [ -n "$WHEEL_OUTPUT_DIR" ]; then
+        error "ERROR:" "--nixlbench-wheel-output-dir cannot be used with --wheel-output-dir (a build exports one directory); run this script once for each"
+    fi
+    # The nixlbench build reuses the cached NIXL wheel build, whose cache key
+    # is the content of the build context.
+    case "$(readlink -m "$NIXLBENCH_WHEEL_OUTPUT_DIR")" in
+        "$BUILD_CONTEXT"|"$BUILD_CONTEXT"/*)
+            error "ERROR:" "--nixlbench-wheel-output-dir must be outside the build context ($BUILD_CONTEXT): files written there change the context and the NIXL wheels would be rebuilt"
+            ;;
+    esac
+fi
+
+if [ -n "$NIXLBENCH_NIXL_WHEEL_DIR" ]; then
+    if [ -z "$NIXLBENCH_WHEEL_OUTPUT_DIR" ]; then
+        error "ERROR:" "--nixlbench-nixl-wheel-dir requires --nixlbench-wheel-output-dir"
+    fi
+    if [ ! -d "$NIXLBENCH_NIXL_WHEEL_DIR" ]; then
+        error "ERROR:" "--nixlbench-nixl-wheel-dir: $NIXLBENCH_NIXL_WHEEL_DIR is not a directory"
+    fi
+    # Known before building: the wheels written there changed the context, so
+    # the cached NIXL build they come from is not the one nixlbench would get.
+    if [ -z "$NIXLBENCH_BASE_IMAGE" ]; then
+        case "$(readlink -m "$NIXLBENCH_NIXL_WHEEL_DIR")" in
+            "$BUILD_CONTEXT"|"$BUILD_CONTEXT"/*)
+                error "ERROR:" "--nixlbench-nixl-wheel-dir is inside the build context ($BUILD_CONTEXT): the NIXL wheels written there changed the context, so NIXL would be built again and nixlbench linked against that build instead of theirs; write the NIXL wheels outside the build context or pass --nixlbench-base-image"
+                ;;
+        esac
+    fi
+fi
+
+if [ -n "$NIXLBENCH_BASE_IMAGE" ]; then
+    if [ -z "$NIXLBENCH_WHEEL_OUTPUT_DIR" ]; then
+        error "ERROR:" "--nixlbench-base-image requires --nixlbench-wheel-output-dir"
+    fi
+    if ! grep -q '^ARG nixlbench_base=' "$DOCKER_FILE"; then
+        error "ERROR:" "--nixlbench-base-image requires a dockerfile that consumes it (contrib/Dockerfile.manylinux); $DOCKER_FILE does not"
+    fi
+    BUILD_ARGS+=" --build-arg nixlbench_base=$NIXLBENCH_BASE_IMAGE"
 fi
 
 if [ -n "$PROXY_CA_CERT" ]; then
@@ -643,6 +726,10 @@ if [ -n "$WHEEL_OUTPUT_DIR" ]; then
     DOCKER_BUILD_TARGET="--target wheel_dist --output type=local,dest=$WHEEL_OUTPUT_DIR"
 fi
 
+if [ -n "$NIXLBENCH_WHEEL_OUTPUT_DIR" ]; then
+    DOCKER_BUILD_TARGET="--target nixlbench_wheel_dist --output type=local,dest=$NIXLBENCH_WHEEL_OUTPUT_DIR"
+fi
+
 # Infinia DDN libs: pre-pulled from Artifactory on the host and placed flat into
 # infinia-libs/ in the build context. The Dockerfile's BUILD_INFINIA RUN block
 # copies them to /opt/ddn/red/ — no registry reference in the Dockerfile. The whole
@@ -684,4 +771,12 @@ show_build_options
 # The Dockerfiles use RUN --mount, which the legacy builder rejects. Default to
 # BuildKit for Docker releases that do not already (pre-23); podman ignores this.
 export DOCKER_BUILDKIT=${DOCKER_BUILDKIT:-1}
-docker build --platform linux/$ARCH -f $DOCKER_FILE $BUILD_ARGS ${DOCKER_BUILD_EXTRA_ARGS:-} $TAG $NO_CACHE ${DOCKER_BUILD_TARGET:-} $BUILD_CONTEXT
+docker build --platform linux/$ARCH -f $DOCKER_FILE $BUILD_ARGS ${DOCKER_BUILD_EXTRA_ARGS:-} $TAG $NO_CACHE ${DOCKER_BUILD_TARGET:-} $BUILD_CONTEXT || exit
+
+if [ -n "$NIXLBENCH_NIXL_WHEEL_DIR" ]; then
+    NIXL_WHEEL_SUMS="$(readlink -m "$NIXLBENCH_WHEEL_OUTPUT_DIR")/nixl-wheels.sha256"
+    if ! (cd "$NIXLBENCH_NIXL_WHEEL_DIR" && sha256sum --check --quiet "$NIXL_WHEEL_SUMS"); then
+        error "ERROR:" "the nixlbench wheel in $NIXLBENCH_WHEEL_OUTPUT_DIR was not built against the NIXL wheels in $NIXLBENCH_NIXL_WHEEL_DIR: do not use it with them"
+    fi
+    echo "The nixlbench wheel was built against the NIXL wheels in $NIXLBENCH_NIXL_WHEEL_DIR"
+fi
