@@ -2,6 +2,45 @@
  "schema": 1,
  "runs": [
   {
+   "stamp": "20261120T033018Z",
+   "run_id": 44668086332,
+   "upstream_main_sha": "754b7d49445bce7551da2a46f194db562f96e884",
+   "branches": [
+    {
+     "branch": "main",
+     "slug": "main",
+     "passed": false,
+     "supported": false,
+     "version": "1.6.0",
+     "sha": "341265c3e2970883dd64c1103d2309f3a2981e23"
+    },
+    {
+     "branch": "for-upstream/ci/rocm-image",
+     "slug": "for-upstream-ci-rocm-image",
+     "passed": false,
+     "supported": false,
+     "version": "1.6.0",
+     "sha": "2368dfac7caa8f3390de776c2db918d5c0940508"
+    },
+    {
+     "branch": "for-upstream/feat/nixlbench-wheel",
+     "slug": "for-upstream-feat-nixlbench-wheel",
+     "passed": true,
+     "supported": true,
+     "version": "1.6.0.dev20261120",
+     "sha": "ce53b30fdac6385f4cccf0989a5bbd742b87ea8f"
+    },
+    {
+     "branch": "for-upstream/feat/rocm-wheels",
+     "slug": "for-upstream-feat-rocm-wheels",
+     "passed": true,
+     "supported": true,
+     "version": "1.6.0.dev20261120",
+     "sha": "5100b9842c2080802058c874c944e700d9357621"
+    }
+   ]
+  },
+  {
    "stamp": "20261119T171651Z",
    "run_id": 44575264304,
    "upstream_main_sha": "341265c3e2970883dd64c1103d2309f3a2981e23",
