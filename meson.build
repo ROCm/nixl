@@ -349,16 +349,16 @@ if cuda_dep.found()
     # Set the Python CUDA-specific wheel directory
     cuda_version_major = nvcc.version().split('.')[0]
     if cuda_version_major == '12'
-        cuda_wheel_dir = 'nixl_cu12'
+        wheel_pkg_dir = 'nixl_cu12'
     elif cuda_version_major == '13'
-        cuda_wheel_dir = 'nixl_cu13'
+        wheel_pkg_dir = 'nixl_cu13'
     else
         error('Unsupported CUDA version: ' + cuda_version_major)
     endif
 else
     warning('CUDA not found. UCX backend will be built without CUDA support, and some plugins will be disabled.')
     doca_gpunetio_dep = disabler()
-    cuda_wheel_dir = 'nixl_cu12'
+    wheel_pkg_dir = 'nixl_cu12'
 endif
 
 # Allow callers (e.g. ROCm CI/Dockerfile) to override the wheel variant suffix
@@ -366,7 +366,7 @@ endif
 # autodetected CUDA-major value above: e.g. -Dwheel_variant=rocm -> nixl_rocm.
 wheel_variant = get_option('wheel_variant').strip()
 if wheel_variant != ''
-    cuda_wheel_dir = 'nixl_' + wheel_variant
+    wheel_pkg_dir = 'nixl_' + wheel_variant
 endif
 
 # AMD ROCm/HIP support for NIXL (default off).
@@ -433,8 +433,8 @@ if rocm_path != ''
                   ' Pass -Dwheel_variant=rocm<X>_<Y>, e.g. -Dwheel_variant=rocm10_1.')
         endif
         wheel_variant = 'rocm' + rocm_version_parts[0] + '_' + rocm_version_parts[1]
-        cuda_wheel_dir = 'nixl_' + wheel_variant
-        message('ROCm version ' + rocm_version + '; Python package: ' + cuda_wheel_dir)
+        wheel_pkg_dir = 'nixl_' + wheel_variant
+        message('ROCm version ' + rocm_version + '; Python package: ' + wheel_pkg_dir)
     endif
 
     # hipify-perl is shipped with ROCm and is required for all ROCm builds.
