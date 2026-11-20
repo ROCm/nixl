@@ -1,0 +1,287 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: AMD Nightly Bench
+
+# Runs the nixlbench lanes of .ci/bench on the wheels a finished "AMD Nightly"
+# run left as artifacts, one set of lane jobs for each branch that built a
+# rocm-nixlbench wheel, and collects their records into one artifact per
+# branch. It publishes nothing and writes to no branch or release. Started by
+# hand, it takes the run id of an "AMD Nightly" or a "ROCm Wheels" run. See
+# .ci/docs/amd-bench.md.
+#
+# It follows every nightly unless the repository variable AMD_NIGHTLY_BENCH is
+# 'false'. Its lane jobs share the runners with "AMD Nightly Wheels", which
+# starts from the same event, so at most three container lanes and four VM
+# lanes run at once.
+
+on:
+  workflow_run:
+    workflows:
+      - AMD Nightly
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      run-id:
+        description: Run id of the "AMD Nightly" or "ROCm Wheels" run whose wheels are benched.
+        required: true
+        type: string
+      lanes:
+        description: >-
+          Lanes to run, separated by spaces: all, bench-container, vm1-local,
+          vm2-net, vm1-loop, vm1-fabric.
+        required: false
+        type: string
+        default: all
+      tier:
+        description: The tier of cases to run.
+        required: false
+        type: choice
+        options:
+          - nightly
+          - pr
+        default: nightly
+      only:
+        description: Case-key globs separated by spaces; only the cases that match one are run. Empty means all.
+        required: false
+        type: string
+        default: ''
+
+permissions: {}
+
+concurrency:
+  group: amd-nightly-bench-${{ github.event.workflow_run.id || inputs.run-id }}
+  cancel-in-progress: false
+
+env:
+  PYTHONDONTWRITEBYTECODE: 1
+
+jobs:
+  plan:
+    name: Plan the lanes
+    # A nightly run that is not benched (another branch, a pull request, a
+    # fork) is skipped here; a run id given by hand is checked, and refused
+    # with an error, in the second step.
+    if: >-
+      (vars.AMD_NIGHTLY_ENABLED == 'true' || github.event_name == 'workflow_dispatch') &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.head_repository.full_name == github.repository &&
+        github.event.workflow_run.head_branch == github.event.repository.default_branch &&
+        (github.event.workflow_run.event == 'schedule' ||
+         github.event.workflow_run.event == 'workflow_dispatch'))) &&
+      (github.event_name == 'workflow_dispatch' || vars.AMD_NIGHTLY_BENCH != 'false')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      run-id: ${{ steps.run.outputs.run-id }}
+      tier: ${{ steps.plan.outputs.tier }}
+      only: ${{ steps.plan.outputs.only }}
+      count: ${{ steps.plan.outputs.count }}
+      container: ${{ steps.plan.outputs.container }}
+      vm: ${{ steps.plan.outputs.vm }}
+      collect: ${{ steps.plan.outputs.collect }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_ID: ${{ github.event.workflow_run.id || inputs.run-id }}
+      # A workflow_run event has no inputs, and the defaults above are those
+      # of a dispatch only.
+      LANES: ${{ inputs.lanes || 'all' }}
+      TIER: ${{ inputs.tier || 'nightly' }}
+      ONLY: ${{ inputs.only }}
+      EVENT: ${{ github.event_name }}
+    steps:
+    - name: Check out the CI scripts and the matrix
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+        persist-credentials: false
+        sparse-checkout: |
+          .ci/scripts
+          .ci/bench
+
+    # The wheels of the run are executed, so only a finished run of this
+    # repository's own nightly or wheel workflow is accepted, never one of a
+    # fork.
+    - name: Check the source run
+      id: run
+      run: |
+        set -euo pipefail
+        if ! [[ "$RUN_ID" =~ ^[0-9]{1,20}$ ]]; then
+          echo "::error::the run id must be a number"
+          exit 1
+        fi
+        mkdir -p "$RUNNER_TEMP/amd-bench"
+        gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}" > "$RUNNER_TEMP/amd-bench/run.json"
+        if ! jq -e --arg repo "$GITHUB_REPOSITORY" '
+              (.path | split("@")[0]) as $path
+              | ($path == ".github/workflows/amd-nightly.yml"
+                 or $path == ".github/workflows/rocm-wheels.yml")
+              and .status == "completed"
+              and .head_repository.full_name == $repo' "$RUNNER_TEMP/amd-bench/run.json" >/dev/null; then
+          jq '{path, status, event, head_branch, head_repository: .head_repository.full_name}' \
+            "$RUNNER_TEMP/amd-bench/run.json"
+          echo "::error::run ${RUN_ID} is not a completed \"AMD Nightly\" or \"ROCm Wheels\" run of ${GITHUB_REPOSITORY}"
+          exit 1
+        fi
+        echo "run-id=${RUN_ID}" >> "$GITHUB_OUTPUT"
+
+    # One JSON object per line, which is what amd_bench_ci.py reads.
+    - name: List the run's artifacts
+      run: |
+        set -euo pipefail
+        gh api --paginate \
+          "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts?per_page=100" \
+          --jq '.artifacts[] | {id, name, expired, created_at} | @json' \
+          > "$RUNNER_TEMP/amd-bench/artifacts.jsonl"
+        wc -l "$RUNNER_TEMP/amd-bench/artifacts.jsonl"
+
+    # With the action: of the artifacts of one name it takes the latest, which
+    # is the one the lane jobs will get. A run that built no nixlbench wheel
+    # has none, and is planned as nothing to do.
+    - name: Download the nixlbench manifests
+      continue-on-error: true
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        pattern: rocm-nixlbench-wheel*
+        path: ${{ runner.temp }}/amd-bench/manifests
+        run-id: ${{ steps.run.outputs.run-id }}
+        github-token: ${{ github.token }}
+
+    # Never with -I: the helper imports amd_bench_lib.py from beside it.
+    - name: Plan
+      id: plan
+      run: |
+        set -euo pipefail
+        dir="$RUNNER_TEMP/amd-bench"
+        summary=()
+        if gh run download "$RUN_ID" --name amd-nightly-summary --dir "$dir/summary"; then
+          summary=(--summary "$dir/summary/nightly-summary.json")
+        else
+          echo "run ${RUN_ID} has no amd-nightly-summary artifact; the bench run is stamped with the time the run was created"
+        fi
+        python3 .ci/scripts/amd_bench_ci.py plan --matrix .ci/bench \
+          --run "$dir/run.json" --artifacts "$dir/artifacts.jsonl" \
+          --manifests "$dir/manifests" "${summary[@]}" \
+          --lanes="$LANES" --tier="$TIER" --only="$ONLY" --event "$EVENT" \
+          --guest-rocm 10.1 --max-branches 4 --output "$GITHUB_OUTPUT"
+
+  # The inputs come from the plan's checked outputs, never from this run's own.
+  container:
+    name: bench-container (${{ matrix.slug }}, ROCm ${{ matrix.rocm }})
+    needs: plan
+    if: needs.plan.outputs.count != '0' && fromJSON(needs.plan.outputs.container).include[0] != null
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix: ${{ fromJSON(needs.plan.outputs.container) }}
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/amd-bench-container.yml
+    with:
+      run-id: ${{ needs.plan.outputs.run-id }}
+      tier: ${{ needs.plan.outputs.tier }}
+      only: ${{ needs.plan.outputs.only }}
+      rocm-version: ${{ matrix.rocm }}
+      nixl-artifact: ${{ matrix.nixl-artifact }}
+      nixlbench-artifact: ${{ matrix.nixlbench-artifact }}
+      artifact-suffix: ${{ matrix.suffix }}
+      run-meta: ${{ matrix.meta }}
+
+  # vm1-local must pass. The other lanes are allowed to fail: the comparison
+  # is always a Boolean, which is what the called workflow's input takes.
+  vm:
+    name: ${{ matrix.lane }} (${{ matrix.slug }})
+    needs: plan
+    if: needs.plan.outputs.count != '0' && fromJSON(needs.plan.outputs.vm).include[0] != null
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.plan.outputs.vm) }}
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/amd-bench-vm.yml
+    with:
+      run-id: ${{ needs.plan.outputs.run-id }}
+      tier: ${{ needs.plan.outputs.tier }}
+      only: ${{ needs.plan.outputs.only }}
+      rocm-version: ${{ matrix.rocm }}
+      nixl-artifact: ${{ matrix.nixl-artifact }}
+      nixlbench-artifact: ${{ matrix.nixlbench-artifact }}
+      artifact-suffix: ${{ matrix.suffix }}
+      run-meta: ${{ matrix.meta }}
+      lane: ${{ matrix.lane }}
+      allow-failure: ${{ matrix.allow-failure == true }}
+
+  # One per branch, whatever became of its lanes: a lane that sent nothing is
+  # recorded as missing. The job's result is the collector's exit status.
+  collect:
+    name: Collect (${{ matrix.slug }})
+    needs: [plan, container, vm]
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.count != '0' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.collect) }}
+    permissions:
+      contents: read
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      META: ${{ matrix.meta }}
+      EXPECT: ${{ matrix.expect }}
+      ARTIFACT_SUFFIX: ${{ matrix.suffix }}
+    steps:
+    - name: Check out the CI files
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+        persist-credentials: false
+        sparse-checkout: .ci
+
+    # By their exact names, never by a pattern: a pattern also matches another
+    # branch's artifacts when its suffix ends with this one.
+    - name: Download the lanes' records
+      run: |
+        set -euo pipefail
+        inputs="$RUNNER_TEMP/amd-bench/inputs"
+        mkdir -p "$inputs"
+        for item in $EXPECT; do
+          lane=${item%%=*}
+          IFS=, read -r -a versions <<< "${item#*=}"
+          for rocm in "${versions[@]}"; do
+            name="bench-records-${lane}-${rocm}${ARTIFACT_SUFFIX}"
+            if ! gh run download "$GITHUB_RUN_ID" --name "$name" --dir "${inputs}/${name}"; then
+              echo "::warning title=Bench records missing::this run has no artifact ${name}; the lane is recorded as missing"
+            fi
+          done
+        done
+
+    # Exits 0 when clean, 1 when a required case did not pass, 2 or 3 on an
+    # error of the collector.
+    - name: Collect the records
+      run: |
+        set -euo pipefail
+        dir="$RUNNER_TEMP/amd-bench"
+        python3 .ci/scripts/amd_bench_ci.py meta --base "$META" \
+          --set "bench_run_id=${GITHUB_RUN_ID}" --set-int "run_attempt=${GITHUB_RUN_ATTEMPT}" \
+          --out "$dir/meta.json"
+        lanes=()
+        for item in $EXPECT; do lanes+=(--expect "$item"); done
+        python3 .ci/scripts/amd_bench_collect.py --input "$dir/inputs" --out bench-collected \
+          --run-meta "$dir/meta.json" "${lanes[@]}" --summary-out "$GITHUB_STEP_SUMMARY"
+
+    - name: Upload the collected records
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: bench-collected${{ matrix.suffix }}
+        path: bench-collected/
+        if-no-files-found: warn
+        overwrite: true

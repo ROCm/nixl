@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Test fixture of test_amd_bench_ci.py: a synthetic env template with a host
+# key and a variable for the job to set.
+
+schema = 1
+env_class = "gha-kvm-vm1"
+provides = ["blkdev", "gpu", "io_uring"]
+
+[roles]
+init = "guest"
+tgt = "guest"
+
+[hosts.guest]
+kind = "ssh"
+ssh_config = "@job"
+ssh_host = "guest"
+work_dir = "amd-bench/run"
+nixlbench = "amd-bench/venv/bin/nixlbench"
+
+[vars]
+asio_port_base = 21000
+posix_dir = "/mnt/amd-bench/fs/posix"
+gusli_blkdev = "@job"
+
+[[probe]]
+name = "gpu-kfd"
+when = "between"
+classes = ["gpu"]
+cmd = "test -r /dev/kfd"

@@ -7,29 +7,35 @@ lane_id = "F-LOOP"
 env_class = "gha-kvm-vm1-loopback"
 timing_trust = "emulated"
 topology = "single"
-status = "blocked"
-blocked_by = ["W4"]
-aa_case = ""
+status = "active"
+aa_case = "vm1-loop/ucx/rc/DD/WRITE/N-r"
 description = "One rocjitsu guest and the rocm-ernic loopback backend: UCX over rc and ud between two processes in the guest"
 
-# Waits for its job, which selects the rocm-ernic loopback backend with a
-# compose override and gives the RDMA netdev its address.
+# The job selects the rocm-ernic loopback backend with a compose override,
+# gives the RDMA netdev its address and names the RDMA device ernic0. Nothing
+# here gates: until this lane the backend had carried a ping-pong only.
 
 [defaults]
 tier = "nightly"
 timeout_s = 180
 attach = "net-rdma"
 
+# The runner names UCX's devices only between two hosts, where 127.0.0.1 is
+# not the link. Here the two processes share a guest and the link is the RDMA
+# device, so each case names it in its own environment.
 [[case]]
 key = "vm1-loop/ucx/{transport}/{mem}/{op}/S"
 workload = "ucx/{transport}/{mem}/{op}/S"
 profile = "S"
 backend = "UCX"
+env = { UCX_NET_DEVICES = "{self.ucx_net_devices}" }
 [case.axes]
 transport = ["rc", "ud"]
 mem = ["DD", "VV", "DV", "VD"]
 op = ["WRITE", "READ"]
 
+# N-r, as on the mesh: the largest block the loopback backend carries has not
+# been measured.
 [[case]]
 key = "vm1-loop/ucx/rc/{mem}/WRITE/N-r"
 workload = "ucx/rc/{mem}/WRITE/N-r"
@@ -39,8 +45,12 @@ transport = "rc"
 op = "WRITE"
 role = "track"
 timeout_s = 360
+env = { UCX_NET_DEVICES = "{self.ucx_net_devices}" }
 [case.axes]
 mem = ["DD", "VV"]
+[[case.when]]
+match = { mem = "DD" }
+set = { sentinel = true }
 
 [[pair]]
 key = "vm1-loop/vram-dram/rc/WRITE/N-r"

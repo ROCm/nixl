@@ -11,8 +11,8 @@ the repository settings the workflow needs, and the results site. How to
 install the nightly wheels is in [amd-wheels.md](amd-wheels.md); how the wheels
 are built is in `contrib/README.md` on the wheels branch
 ([here](https://github.com/ROCm/nixl/blob/for-upstream/feat/rocm-wheels/contrib/README.md#build-rocm-wheels)).
-The nixlbench programme and its probe workflow are in
-[amd-bench.md](amd-bench.md).
+The nixlbench programme, with the nixlbench wheel, the bench lanes and the
+probe workflow, is in [amd-bench.md](amd-bench.md).
 
 ## Branches
 
@@ -115,13 +115,23 @@ Neither workflow does anything before its file is on `main-amd`.
    `<version>.dev<YYYYMMDD>` with the UTC date of the run, then the container
    test and the rocjitsu VM tests. The source is the branch's; the test
    scripts and the VM definitions are those of the commit the nightly itself
-   runs at.
+   runs at. For a branch that has the nixlbench wheel scripts the same call
+   can also build the `rocm-nixlbench` wheel, in steps at the end of `build`
+   and in a `nixlbench wheel` job. Neither is required, and the nightly builds
+   it only once the variable `AMD_NIXLBENCH_WHEEL` is `true`; see
+   [amd-bench.md](amd-bench.md#the-nixlbench-wheel).
 4. **Report.** Collects one `results.json` per branch, writes
    `nightly-summary.json` (artifact `amd-nightly-summary`) and adds the run to
    the results site.
 
 The tests run on the branches as they are that night, whether or not the sync
 worked and whether or not the sync pull request has been merged.
+
+Two workflows follow a nightly run that has completed, each from the run's
+artifacts: `AMD Nightly Wheels` publishes the wheels of the wheels branch, and
+`AMD Nightly Bench` runs nixlbench on every branch that built a nixlbench
+wheel. The bench publishes nothing and cannot change the nightly's result or
+the publication; it is in [amd-bench.md](amd-bench.md#the-bench-workflow).
 
 The container test runs for each ROCm version. The rocjitsu VM tests cover the
 ROCm 10.1 backend only: the one published guest image carries ROCm 10.1, so
@@ -141,8 +151,14 @@ wheels branch is the exception: the run fails if it cannot build them.
 
 The run fails when the sync fails, or when a branch that can build ROCm wheels
 does not pass. A branch passes when the `plan`, `build`, `merge`, `test` and
-`rocjitsu` jobs of its wheel workflow all succeed and wheels came out. The
-two-guest job, `rocjitsu-2vm`, is allowed to fail and is only reported.
+`rocjitsu` jobs of its wheel workflow all succeed and wheels came out. Two
+things are allowed to fail and are only reported:
+
+- the two-guest job, `rocjitsu-2vm`;
+- everything about the nixlbench wheel: its steps in `build`, which cannot
+  fail that job, and the `nixlbench wheel` job. A branch whose nixlbench wheel
+  did not build passes as if it had none, and the `rocm-nixl` wheels are
+  published as they would have been.
 
 ### The sync pull request
 
@@ -169,6 +185,8 @@ two-guest job, `rocjitsu-2vm`, is allowed to fail and is only reported.
 | Branch protection on `main-amd` | Pull request required, linear history not required | See [Branches](#branches). |
 | Actions | Enabled, and the `AMD Nightly` schedule enabled | Scheduled workflows are off by default in a fork, and GitHub switches them off again after 60 days without activity in the repository. |
 | Variable `AMD_NIGHTLY_ENABLED` | `true` | Every job checks it, so a copy of the workflow in another fork does nothing on its schedule. A run started by hand does not need it. |
+| Variable `AMD_NIXLBENCH_WHEEL` | Unset, or `true` | Unset, the nightly builds no nixlbench wheel and a `ROCm Wheels` run started by hand does. `true` builds it in the nightly as well, which can hold each `build` leg for up to 25 minutes more, and `Results` for 2, before the wheels are published. `false` builds it nowhere. See [amd-bench.md](amd-bench.md#the-nixlbench-wheel). |
+| Variable `AMD_NIGHTLY_BENCH` | Unset | `false` stops `AMD Nightly Bench` from following the nightly; a run started by hand still works. |
 | Secret `AMD_SYNC_TOKEN` | See below | The sync job's pushes and its pull request. |
 | Pages | Deploy from a branch, `gh-pages`, `/` | Serves the results site. The nightly creates the branch on its first run; Pages itself has to be switched on once by an administrator. |
 
@@ -244,6 +262,19 @@ request holds no wheel code to build, so the workflow builds the wheels
 branch, for Python 3.12 only, and tests it with the pull request's own
 workflow files, scripts and VM definitions. A change to the CI is tried end to
 end this way before it is merged. Nothing is published from a pull request.
+
+A pull request that changes `.ci/scripts`, `.ci/bench` or the workflow itself
+starts `AMD CI Tests`
+([`amd-ci-tests.yml`](../../.github/workflows/amd-ci-tests.yml)). It runs the
+unit tests under `.ci/scripts/tests` and `amd_bench_run.py validate` on the
+bench matrix and on every env template. It builds no wheel and boots no guest,
+and no bench lane runs on a pull request. To try a change to the lanes, push
+the branch and start the bench on it by hand, on a run that has a nixlbench
+wheel. GitHub offers that once the workflow's file is on `main-amd`:
+
+```bash
+gh workflow run amd-nightly-bench.yml --ref <branch> -f run-id=<id of the run>
+```
 
 A change to NIXL itself does not start `ROCm Wheels`. The workflow is on
 `main-amd` only, so neither a push to a `for-upstream/` branch nor a pull
@@ -336,3 +367,18 @@ pass, the `wheels_artifact` name, and under `results` that branch's
 the wheels with their sizes and hashes, and every check of every test script.
 The two-guest job runs one script eight times, so its entries carry a `label`
 such as `stage2-initiator`.
+
+`results.json` also has a `nixlbench` key, which takes no part in `passed`:
+
+| Field | Holds |
+| --- | --- |
+| `required` | Always `false`. |
+| `supported` | Whether the source has the nixlbench wheel scripts. |
+| `enabled` | Whether this run was to build the wheel. |
+| `result` | The result of the `nixlbench wheel` job, or `null`. |
+| `artifact` | The name of the artifact with the merged wheel, or `null`. |
+| `wheel` | `file`, `bytes` and `sha256` of the merged wheel, read from that artifact, or `null` when there is none. |
+| `rocm` | The ROCm versions whose backend is in the merged wheel. |
+
+Go by `wheel`, not by `result`: a job that is allowed to fail can report
+success after a failure.

@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Test fixture of test_amd_bench_ci.py: a synthetic matrix, not the lanes the
+# workflows run. Its one case of the pr tier is blocked, so the lane has
+# nothing to run there.
+
+schema = 1
+lane = "vm1-loop"
+lane_id = "F-LOOP"
+env_class = "gha-kvm-vm1-loopback"
+timing_trust = "emulated"
+topology = "single"
+description = "A blocked case in the pr tier, an active one in the nightly tier"
+
+[defaults]
+attach = "net-rdma"
+
+[[case]]
+key = "vm1-loop/ucx/rc/DD/WRITE/S"
+workload = "ucx/rc/DD/WRITE/S"
+profile = "S"
+backend = "UCX"
+transport = "rc"
+op = "WRITE"
+tier = "pr"
+status = "blocked"
+blocked_by = ["E4"]
+
+[[case]]
+key = "vm1-loop/ucx/rc/DD/READ/S"
+workload = "ucx/rc/DD/READ/S"
+profile = "S"
+backend = "UCX"
+transport = "rc"
+op = "READ"
+tier = "nightly"

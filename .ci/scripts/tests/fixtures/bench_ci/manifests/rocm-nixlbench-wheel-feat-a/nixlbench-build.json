@@ -1,0 +1,19 @@
+{
+ "schema": 1,
+ "ref": "for-upstream/feat/a",
+ "sha": "1111111111111111111111111111111111111111",
+ "version": "1.2.0.dev20261119",
+ "workflow_run_id": 4242,
+ "run_attempt": 1,
+ "artifact_suffix": "-feat-a",
+ "nixl_wheels_artifact": "rocm-nixl-wheels-feat-a",
+ "wheel": "rocm_nixlbench-1.2.0.dev20261119-py3-none-manylinux_2_28_x86_64.whl",
+ "bytes": 1234567,
+ "sha256": "abababababababababababababababababababababababababababababababab",
+ "rocm": ["7.14.1", "10.1.0", "10.2.0"],
+ "backends": [
+  {"rocm": "7.14.1", "file": "nixlbench_rocm7_14-1.2.0.dev20261119-py3-none-manylinux_2_28_x86_64.whl", "sha256": "0101010101010101010101010101010101010101010101010101010101010101", "run_attempt": 1},
+  {"rocm": "10.1.0", "file": "nixlbench_rocm10_1-1.2.0.dev20261119-py3-none-manylinux_2_28_x86_64.whl", "sha256": "0202020202020202020202020202020202020202020202020202020202020202", "run_attempt": 1},
+  {"rocm": "10.2.0", "file": "nixlbench_rocm10_2-1.2.0.dev20261119-py3-none-manylinux_2_28_x86_64.whl", "sha256": "0303030303030303030303030303030303030303030303030303030303030303", "run_attempt": 1}
+ ]
+}

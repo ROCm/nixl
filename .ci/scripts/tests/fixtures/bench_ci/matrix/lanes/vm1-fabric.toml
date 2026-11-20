@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Test fixture of test_amd_bench_ci.py: a synthetic matrix, not the lanes the
+# workflows run.
+
+schema = 1
+lane = "vm1-fabric"
+lane_id = "F-LBA"
+env_class = "gha-kvm-vm1-nvmeof"
+timing_trust = "emulated"
+topology = "single"
+description = "Nightly only"
+
+[defaults]
+tier = "nightly"
+attach = "fabric-rdma"
+tgt_mem = "FILE"
+
+[[case]]
+key = "vm1-fabric/posix/AIO/buffered/WRITE/S"
+workload = "posix/AIO/buffered/WRITE/S"
+profile = "S"
+backend = "POSIX"
+engine = "AIO"
+op = "WRITE"
+flags = { posix_api_type = "AIO", filepath = "{posix_dir}/WRITE" }

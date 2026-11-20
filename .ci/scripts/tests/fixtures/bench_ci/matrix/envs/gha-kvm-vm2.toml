@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Test fixture of test_amd_bench_ci.py: a synthetic env template with host
+# variables for the job to set.
+
+schema = 1
+env_class = "gha-kvm-vm2"
+provides = ["gpu", "rdma", "two_hosts"]
+
+[roles]
+init = "guest1"
+tgt = "guest2"
+
+[hosts.guest1]
+kind = "ssh"
+ssh_config = "@job"
+ssh_host = "guest1"
+work_dir = "amd-bench/run"
+nixlbench = "amd-bench/venv/bin/nixlbench"
+
+[hosts.guest1.vars]
+ip = "192.168.100.11"
+ucx_net_devices = "@job"
+
+[hosts.guest2]
+kind = "ssh"
+ssh_config = "@job"
+ssh_host = "guest2"
+work_dir = "amd-bench/run"
+nixlbench = "amd-bench/venv/bin/nixlbench"
+
+[hosts.guest2.vars]
+ip = "192.168.100.12"
+ucx_net_devices = "@job"
+
+[vars]
+asio_port_base = 21000

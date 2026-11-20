@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Test fixture of test_amd_bench_ci.py: a synthetic env template with nothing
+# for the job to set.
+
+schema = 1
+env_class = "gha-container"
+provides = ["io_uring", "redis"]
+
+[roles]
+init = "local"
+tgt = "local"
+
+[hosts.local]
+kind = "local"
+work_dir = "/tmp/amd-bench/run"
+nixlbench = "/tmp/amd-bench/venv/bin/nixlbench"
+
+[vars]
+asio_port_base = 21000
+posix_dir = "/tmp/amd-bench/posix"

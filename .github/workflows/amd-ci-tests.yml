@@ -1,0 +1,59 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: AMD CI Tests
+
+# The unit tests of the AMD CI scripts, and the bench matrix and its env
+# templates checked by the runner that reads them. No wheel is built and no
+# nixlbench case is run.
+
+on:
+  pull_request:
+    paths:
+      - .ci/scripts/**
+      - .ci/bench/**
+      - .github/workflows/amd-ci-tests.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: amd-ci-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONDONTWRITEBYTECODE: 1
+
+jobs:
+  tests:
+    name: Unit tests and the bench matrix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+    - name: Check out code
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+        persist-credentials: false
+
+    - name: Run the unit tests
+      run: python3 -m unittest discover -s .ci/scripts/tests
+
+    - name: Validate the bench matrix
+      run: python3 .ci/scripts/amd_bench_run.py validate
+
+    # Each template is read as an env file: a value the lane job sets is a
+    # placeholder string here, which is enough to resolve every case.
+    - name: Validate the env templates against their lanes
+      run: |
+        set -euo pipefail
+        shopt -s nullglob
+        templates=(.ci/bench/envs/*.toml)
+        if [ "${#templates[@]}" -eq 0 ]; then
+          echo "::error::.ci/bench/envs holds no env template"
+          exit 1
+        fi
+        for f in "${templates[@]}"; do
+          echo "::group::${f}"
+          python3 .ci/scripts/amd_bench_run.py validate --env "$f"
+          echo "::endgroup::"
+        done

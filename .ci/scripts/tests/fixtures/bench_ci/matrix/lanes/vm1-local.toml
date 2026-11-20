@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Test fixture of test_amd_bench_ci.py: a synthetic matrix, not the lanes the
+# workflows run.
+
+schema = 1
+lane = "vm1-local"
+lane_id = "V-LOCAL"
+env_class = "gha-kvm-vm1"
+timing_trust = "emulated"
+topology = "single"
+description = "Active in both tiers"
+
+[defaults]
+tier = "pr"
+
+[[case]]
+key = "vm1-local/gusli/K/READ/S"
+workload = "gusli/K/READ/S"
+profile = "S"
+backend = "GUSLI"
+engine = "K"
+op = "READ"
+tgt_mem = "BLK"
+direct = true
+needs = ["blkdev"]
+flags = { device_list = "11:K:{gusli_blkdev}", start_batch_size = 1, max_batch_size = 1 }
+
+[[case]]
+key = "vm1-local/ucx/tcp/{mem}/WRITE/S"
+workload = "ucx/tcp/{mem}/WRITE/S"
+profile = "S"
+backend = "UCX"
+transport = "tcp"
+op = "WRITE"
+tier = "nightly"
+[case.axes]
+mem = ["DD", "VV"]

@@ -1,0 +1,341 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: AMD Bench - Container Lane
+
+# Runs the bench-container lane of .ci/bench: nixlbench from the rocm-nixlbench
+# wheel in an ubuntu:24.04 job container with the ROCm runtime and no GPU.
+# The job starts a Redis server and, with seccomp unconfined, offers io_uring.
+# It starts no S3 server and no etcd, so the cases that need one end as
+# skip/env. The records and the diagnostics are uploaded as artifacts; nothing
+# is published. See .ci/docs/amd-bench.md.
+#
+# The scripts and the matrix are those of the commit this workflow runs at,
+# whatever source the wheels in the artifacts were built from.
+#
+# External dependencies besides the actions pinned below: the Ubuntu archive,
+# AMD's ROCm package repository and numpy from PyPI.
+
+on:
+  workflow_call:
+    inputs:
+      run-id:
+        description: Workflow run to download the two artifacts from.
+        required: true
+        type: string
+      rocm-version:
+        description: ROCm version of the backend to exercise, as X.Y.Z.
+        required: true
+        type: string
+      nixl-artifact:
+        description: Name of the artifact holding the merged rocm-nixl wheels.
+        required: true
+        type: string
+      nixlbench-artifact:
+        description: Name of the artifact holding the merged rocm-nixlbench wheel.
+        required: true
+        type: string
+      run-meta:
+        description: The run-meta of the bench run, as a JSON object; see amd_bench_ci.py meta.
+        required: true
+        type: string
+      artifact-suffix:
+        description: Appended to the names of the artifacts this workflow uploads, for a run that benches several builds.
+        required: false
+        type: string
+        default: ''
+      tier:
+        description: The tier of cases to run.
+        required: false
+        type: string
+        default: nightly
+      only:
+        description: Case-key globs separated by spaces; only the cases that match one are run. Empty means all.
+        required: false
+        type: string
+        default: ''
+      python-version:
+        description: Python version the wheels are installed for, as X.Y. It must be the job container's.
+        required: false
+        type: string
+        default: '3.12'
+
+# actions: read is for the artifacts, which another run uploaded.
+permissions:
+  contents: read
+  actions: read
+
+env:
+  PYTHONDONTWRITEBYTECODE: 1
+
+jobs:
+
+  bench:
+    name: bench-container (ROCm ${{ inputs.rocm-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    container:
+      image: ubuntu:24.04
+      # Docker's default seccomp profile refuses io_uring_setup.
+      options: --security-opt seccomp=unconfined
+    defaults:
+      run:
+        shell: bash
+    env:
+      LANE: bench-container
+      # A caller may pass an empty string.
+      TIER: ${{ inputs.tier || 'nightly' }}
+      ONLY: ${{ inputs.only }}
+      RUN_ID: ${{ inputs.run-id }}
+      ROCM_VERSION: ${{ inputs.rocm-version }}
+      PYTHON_VERSION: ${{ inputs.python-version }}
+      RUN_META: ${{ inputs.run-meta }}
+      # The job container's image, for the run-meta; move the two together.
+      RUNNER_IMAGE: ubuntu:24.04
+      VENV: /tmp/amd-bench/venv
+      # Seconds from the start of the job after which no case is started. The
+      # rest of the 45 minutes is for the last case, the end probes and the
+      # uploads.
+      BUDGET_S: 1980
+    steps:
+    # First, and nothing else: the budget counts from here.
+    - name: Start the lane's clock
+      run: |
+        set -euo pipefail
+        t0=$(date +%s)
+        {
+          echo "BENCH_T0=${t0}"
+          echo "BENCH_DEADLINE=$((t0 + BUDGET_S))"
+        } >> "$GITHUB_ENV"
+
+    - name: Check the inputs
+      env:
+        NIXL_ARTIFACT: ${{ inputs.nixl-artifact }}
+        NIXLBENCH_ARTIFACT: ${{ inputs.nixlbench-artifact }}
+        ARTIFACT_SUFFIX: ${{ inputs.artifact-suffix }}
+      run: |
+        set -euo pipefail
+        fail() {
+          echo "::error::$1"
+          exit 1
+        }
+        # A rejected value is never echoed.
+        case "$TIER" in
+          pr|nightly|weekly) ;;
+          *) fail "tier must be pr, nightly or weekly" ;;
+        esac
+        [[ "$RUN_ID" =~ ^[0-9]{1,20}$ ]] || fail "run-id must be a number"
+        [[ "$ROCM_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "rocm-version must be X.Y.Z"
+        [[ "$PYTHON_VERSION" =~ ^3\.[0-9]+$ ]] || fail "python-version must be 3.Y"
+        [[ "$NIXL_ARTIFACT" =~ ^[A-Za-z0-9._-]+$ && "$NIXLBENCH_ARTIFACT" =~ ^[A-Za-z0-9._-]+$ ]] \
+          || fail "an artifact name may hold letters, digits, dots, underscores and dashes only"
+        [[ "$ARTIFACT_SUFFIX" =~ ^(-[A-Za-z0-9._-]+)?$ ]] \
+          || fail "artifact-suffix must be empty or a dash followed by letters, digits, dots, underscores and dashes"
+        # No case key starts with a dash, and the runner would take such a
+        # glob for an option.
+        glob_re='^[]A-Za-z0-9._+/*?[-]+$'
+        read -r -a globs <<< "$ONLY"
+        for glob in "${globs[@]}"; do
+          [[ "$glob" =~ $glob_re && "$glob" != -* ]] \
+            || fail "only takes case-key globs separated by spaces, none starting with a dash"
+        done
+
+    # As the test job of rocm-wheels.yml does; change them together.
+    - name: Install Python and the ROCm runtime
+      run: |
+        set -euo pipefail
+        rocm_xy=${ROCM_VERSION%.*}
+        if [ "${ROCM_VERSION%%.*}" = "7" ]; then
+          repo=https://repo.amd.com/rocm/packages-multi-arch/ubuntu2404
+          key=https://repo.amd.com/rocm/packages-multi-arch/gpg/rocm.gpg
+        else
+          repo=https://stable.repo.amd.com/rocm/core/packages/ubuntu2404
+          key=https://stable.repo.amd.com/rocm/gpg/packages.gpg
+        fi
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update
+        apt-get install -y --no-install-recommends ca-certificates curl python3 python3-venv
+        install -d /etc/apt/keyrings
+        curl -fsSL "$key" -o /etc/apt/keyrings/amdrocm.asc
+        echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/amdrocm.asc] ${repo} stable main" \
+          > /etc/apt/sources.list.d/amdrocm.list
+        apt-get update
+        packages=()
+        for package in base sysdeps llvm runtime hipfile; do
+          packages+=("amdrocm-${package}${rocm_xy}=${ROCM_VERSION}-*")
+        done
+        apt-get install -y --no-install-recommends "${packages[@]}"
+        # The component packages only populate /opt/rocm/core-<X.Y>.
+        rocm_path=/opt/rocm/core-${rocm_xy}
+        cat "${rocm_path}/.info/version"
+        {
+          echo "ROCM_XY=${rocm_xy}"
+          echo "ROCM_PATH=${rocm_path}"
+          echo "LD_LIBRARY_PATH=${rocm_path}/lib"
+        } >> "$GITHUB_ENV"
+
+    # Without it the env file does not provide 'redis'.
+    - name: Install the Redis server
+      continue-on-error: true
+      run: |
+        set -euo pipefail
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get install -y --no-install-recommends redis-server
+
+    - name: Check out code
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+        persist-credentials: false
+
+    # After the checkout, which empties a workspace that holds no repository
+    # yet. github.workspace is the runner's path, not the job container's.
+    - name: Prepare the results directories
+      run: |
+        set -euo pipefail
+        mkdir -p "$GITHUB_WORKSPACE/bench-out" "$GITHUB_WORKSPACE/bench-diagnostics" \
+          "$RUNNER_TEMP/amd-bench"
+        {
+          echo "BENCH_OUT=$GITHUB_WORKSPACE/bench-out"
+          echo "BENCH_DIAG=$GITHUB_WORKSPACE/bench-diagnostics"
+        } >> "$GITHUB_ENV"
+
+    - name: Download the NIXL wheels from run ${{ inputs.run-id }}
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: ${{ inputs.nixl-artifact }}
+        path: wheelhouse
+        run-id: ${{ inputs.run-id }}
+        github-token: ${{ github.token }}
+
+    - name: Download the nixlbench wheel from run ${{ inputs.run-id }}
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: ${{ inputs.nixlbench-artifact }}
+        path: wheelhouse
+        run-id: ${{ inputs.run-id }}
+        github-token: ${{ github.token }}
+
+    # The nixlbench wheel must be the one the plan read the manifest of: a
+    # re-run of the source run may have uploaded another under the same name.
+    - name: Check the artifact has the nixlbench wheel this job installs
+      run: |
+        set -euo pipefail
+        shopt -s nullglob
+        ls -l wheelhouse
+        bench=(wheelhouse/rocm_nixlbench-*.whl)
+        if [ "${#bench[@]}" -ne 1 ]; then
+          echo "::error::expected exactly one rocm_nixlbench wheel in the artifact, found ${#bench[@]}"
+          exit 1
+        fi
+        want=$(python3 -I -c 'import json, os; print(json.loads(os.environ["RUN_META"]).get("nixlbench_sha256") or "")')
+        have=$(sha256sum "${bench[0]}" | cut -d ' ' -f 1)
+        if [ -z "$want" ] || [ "$have" != "$want" ]; then
+          echo "::error::${bench[0]} has the sha256 ${have}, not the ${want:-one missing from} run-meta: it is not the wheel this bench run was planned for"
+          exit 1
+        fi
+
+    # numpy is the only package taken from an index. The wheels are resolved
+    # with no index, so any other requirement they declared would fail here.
+    - name: Install the wheels
+      run: |
+        set -euo pipefail
+        have=$(python3 -I -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')
+        if [ "$have" != "$PYTHON_VERSION" ]; then
+          echo "::error::the job container has Python ${have}, not the ${PYTHON_VERSION} the wheels are to be installed for"
+          exit 1
+        fi
+        python3 -m venv "$VENV"
+        "$VENV/bin/python" -m pip install numpy
+        "$VENV/bin/python" -m pip install --no-index --find-links wheelhouse rocm-nixl rocm-nixlbench
+        "$VENV/bin/python" -m pip list | tee "$BENCH_DIAG/pip-list.txt"
+
+    # 'nixlbench --version' must run: nothing else can if it does not. Where
+    # it lacks a library the script knows a package for, the package is
+    # installed and it is tried once more.
+    - name: Check that nixlbench runs
+      run: |
+        set -euo pipefail
+        bash .ci/scripts/amd_bench_guest.sh preflight "$VENV" "$ROCM_XY" "$BENCH_DIAG" 2>&1 \
+          | tee "$BENCH_DIAG/preflight.txt"
+
+    # Neither can fail the job: what did not come up is withheld from the
+    # env file, and the cases that need it end as skip/env.
+    - name: Start the services
+      run: |
+        set -euo pipefail
+        work="$RUNNER_TEMP/amd-bench"
+        echo "runner_image=${RUNNER_IMAGE}" >> "$work/meta-set"
+
+        uring=false
+        if python3 -I .ci/scripts/amd_bench_probe_guest.py --only system,io_uring \
+            --json-out "$BENCH_DIAG/io-uring.json"; then
+          cat "$BENCH_DIAG/io-uring.json"
+          uring=$(python3 -I -c 'import json, sys; print("true" if (json.load(open(sys.argv[1]))["facts"].get("io_uring") or {}).get("works") else "false")' \
+            "$BENCH_DIAG/io-uring.json" || echo false)
+        fi
+        if [ "$uring" != true ]; then
+          echo "::warning title=AMD bench ${LANE}::io_uring_setup does not work in this job container; the cases that need 'io_uring' end as skip/env"
+          echo io_uring >> "$work/withhold"
+        fi
+
+        redis=false
+        if command -v redis-server >/dev/null \
+            && redis-server --daemonize yes --bind 127.0.0.1 --port 6379 \
+                 --save '' --appendonly no --logfile "$BENCH_DIAG/redis.log"; then
+          for _ in $(seq 20); do
+            if [ "$(redis-cli -h 127.0.0.1 -p 6379 ping 2>/dev/null || true)" = PONG ]; then
+              redis=true
+              break
+            fi
+            sleep 0.5
+          done
+        fi
+        if [ "$redis" != true ]; then
+          echo "::warning title=AMD bench ${LANE}::no Redis server answers on 127.0.0.1:6379; the cases that need 'redis' end as skip/env"
+          echo redis >> "$work/withhold"
+        fi
+
+    - name: Write the env file and the run-meta
+      run: bash .ci/scripts/amd_bench_stack.sh render
+
+    # Exits 0, 1 when a required case failed, 2 or 3 on an error of the runner.
+    - name: Run the lane
+      run: |
+        set -uo pipefail
+        args=(run --lane "$LANE" --tier "$TIER"
+              --env "$RUNNER_TEMP/amd-bench/env.json" --run-meta "$RUNNER_TEMP/amd-bench/run-meta.json"
+              --out "$BENCH_OUT" --deadline-epoch "$BENCH_DEADLINE"
+              --summary-out "$GITHUB_STEP_SUMMARY")
+        read -r -a globs <<< "$ONLY"
+        for g in "${globs[@]}"; do args+=("--only=$g"); done
+        rc=0
+        python3 .ci/scripts/amd_bench_run.py "${args[@]}" 2>&1 | tee "$BENCH_DIAG/runner.log" || rc=${PIPESTATUS[0]}
+        exit "$rc"
+
+    # The lane has no GPU, so the report says so; it is written for every
+    # lane so that the diagnostics of all of them have the same files.
+    - name: Report the wall time of the VRAM cases
+      if: always()
+      continue-on-error: true
+      run: |
+        python3 .ci/scripts/amd_bench_ci.py vram-timing \
+          --records "${BENCH_OUT:-bench-out}/records.ndjson" \
+          --out "${BENCH_DIAG:-bench-diagnostics}/e1-vram-timing.txt"
+
+    - name: Upload the records
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: bench-records-bench-container-${{ inputs.rocm-version }}${{ inputs.artifact-suffix }}
+        path: bench-out/
+        if-no-files-found: warn
+        overwrite: true
+
+    - name: Upload diagnostics
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: bench-diagnostics-bench-container-${{ inputs.rocm-version }}${{ inputs.artifact-suffix }}
+        path: bench-diagnostics/
+        if-no-files-found: warn
+        overwrite: true

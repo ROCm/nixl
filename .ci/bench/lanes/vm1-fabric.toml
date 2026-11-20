@@ -7,13 +7,17 @@ lane_id = "F-LBA"
 env_class = "gha-kvm-vm1-nvmeof"
 timing_trust = "emulated"
 topology = "single"
-status = "blocked"
-blocked_by = ["W4", "W8b"]
-aa_case = ""
+status = "active"
+aa_case = "vm1-fabric/posix/AIO/buffered/WRITE/N"
 description = "One rocjitsu guest and the rocm-ernic NVMe-over-Fabrics target: storage and Key Value over nvme-rdma"
 
-# Waits for its job, which selects the rocm-ernic nvmeof backend with a compose
-# override, and for nvme-rdma in the guest image. F-KV runs in the same boot.
+# The job selects the rocm-ernic nvmeof backend with a compose override and
+# connects to it with nvme-rdma. The target has three namespaces: nsid 1
+# (1 GiB, 4096-byte blocks) holds the ext4 file system of the POSIX and AIS
+# cases, nsid 2 (64 MiB, 512-byte blocks) is the raw device of the GUSLI
+# cases, and nsid 3 is the Key Value one. The Key Value cases wait for their
+# plugin; until then the environment only checks, once, that the namespace
+# has its generic node.
 
 [defaults]
 tier = "nightly"
@@ -67,6 +71,7 @@ tgt_mem = "FILE"
 op = "WRITE"
 role = "track"
 timeout_s = 360
+sentinel = true
 flags = { posix_api_type = "AIO", filepath = "{posix_dir}/WRITE" }
 
 [[case]]
@@ -147,6 +152,43 @@ needs = ["blkdev"]
 flags = { device_list = "11:K:{gusli_blkdev}", start_batch_size = 1, max_batch_size = 1 }
 [case.axes]
 op = ["READ", "WRITE"]
+
+# The direct and buffered pairs of vm1-local.toml, on this attachment.
+[[pair]]
+key = "vm1-fabric/direct-buffered/AIO/WRITE/S"
+kind = "direct-buffered"
+num = "vm1-fabric/posix/AIO/direct/WRITE/S"
+den = "vm1-fabric/posix/AIO/buffered/WRITE/S"
+
+[[pair]]
+key = "vm1-fabric/direct-buffered/AIO/READ/S"
+kind = "direct-buffered"
+num = "vm1-fabric/posix/AIO/direct/READ/S"
+den = "vm1-fabric/posix/AIO/buffered/READ/S"
+
+[[pair]]
+key = "vm1-fabric/direct-buffered/URING/WRITE/S"
+kind = "direct-buffered"
+num = "vm1-fabric/posix/URING/direct/WRITE/S"
+den = "vm1-fabric/posix/URING/buffered/WRITE/S"
+
+[[pair]]
+key = "vm1-fabric/direct-buffered/URING/READ/S"
+kind = "direct-buffered"
+num = "vm1-fabric/posix/URING/direct/READ/S"
+den = "vm1-fabric/posix/URING/buffered/READ/S"
+
+[[pair]]
+key = "vm1-fabric/direct-buffered/POSIXAIO/WRITE/S"
+kind = "direct-buffered"
+num = "vm1-fabric/posix/POSIXAIO/direct/WRITE/S"
+den = "vm1-fabric/posix/POSIXAIO/buffered/WRITE/S"
+
+[[pair]]
+key = "vm1-fabric/direct-buffered/POSIXAIO/READ/S"
+kind = "direct-buffered"
+num = "vm1-fabric/posix/POSIXAIO/direct/READ/S"
+den = "vm1-fabric/posix/POSIXAIO/buffered/READ/S"
 
 # KV-STD. The NVME_KV backend, the flag that names its device and the data
 # check these profiles ask for all come with the plugin, so the flags here

@@ -1,0 +1,13 @@
+{
+ "id": 4242,
+ "name": "AMD Nightly",
+ "path": ".github/workflows/amd-nightly.yml",
+ "status": "completed",
+ "conclusion": "success",
+ "event": "schedule",
+ "head_branch": "main-amd",
+ "run_attempt": 1,
+ "created_at": "2026-11-19T03:23:45Z",
+ "repository": {"full_name": "ROCm/nixl"},
+ "head_repository": {"full_name": "ROCm/nixl"}
+}

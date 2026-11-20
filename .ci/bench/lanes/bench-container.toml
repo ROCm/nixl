@@ -9,7 +9,7 @@ timing_trust = "container"
 topology = "single"
 status = "active"
 aa_case = "bench-container/ucx/tcp/DD/WRITE/N"
-description = "A job container with the ROCm runtime and the nixlbench wheel, no GPU; redis, etcd and an S3 server run in the job"
+description = "A job container with the ROCm runtime and the nixlbench wheel, no GPU; redis runs in the job, and the S3 cases wait for a server"
 
 [defaults]
 tier = "pr"

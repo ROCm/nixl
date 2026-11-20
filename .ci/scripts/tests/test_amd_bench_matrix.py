@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """The committed bench matrix under .ci/bench: it loads, every case passes
-the runner's rules, and it holds the cases the programme plan counts."""
+the runner's rules, it holds the cases the programme plan counts, and each
+active lane has an env template that resolves its cases."""
 
 from __future__ import annotations
 
@@ -11,7 +12,9 @@ import io
 import pathlib
 import re
 import sys
+import tomllib
 import unittest
+from typing import Any, Iterator
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
@@ -19,17 +22,51 @@ import amd_bench_lib as lib  # noqa: E402
 import amd_bench_run as run  # noqa: E402
 
 BENCH = pathlib.Path(__file__).resolve().parents[2] / "bench"
-CONTAINER_ENV = BENCH / "envs" / "gha-container.toml"
+ENVS = BENCH / "envs"
 
-# Plan section 2.6: cases per lane and profile, N-r counted with N.
+# Plan section 2.6: cases per lane and profile, N-r counted with N and the
+# Key Value profiles together.
 PLAN_COUNTS = {
     "bench-container": {"S": 26, "N": 12},
     "vm1-local": {"S": 29, "N": 6},
     "vm2-net": {"S": 26, "N": 4, "B": 1},
     "vm1-loop": {"S": 16, "N": 2},
+    "vm1-fabric": {"S": 21, "N": 4, "KV": 11},
 }
-ACTIVE_LANES = ("bench-container", "vm1-local", "vm2-net")
+ACTIVE_LANES = ("bench-container", "vm1-local", "vm2-net", "vm1-loop", "vm1-fabric")
 PR_LANES = ("bench-container", "vm1-local")
+# What a lane job sets in its env template, and never a value of its own.
+JOB = "@job"
+# Per env class: the most its template may claim to provide, and the keys
+# whose value only the lane job knows.
+TEMPLATES: dict[str, tuple[frozenset[str], frozenset[str]]] = {
+    "gha-container": (frozenset(("io_uring", "redis")), frozenset()),
+    "gha-kvm-vm1": (
+        frozenset(("blkdev", "gpu", "io_uring")),
+        frozenset(("hosts.guest.ssh_config", "vars.gusli_blkdev")),
+    ),
+    "gha-kvm-vm2": (
+        frozenset(("gpu", "rdma", "two_hosts")),
+        frozenset(
+            (
+                "hosts.guest1.ssh_config",
+                "hosts.guest1.vars.ucx_net_devices",
+                "hosts.guest2.ssh_config",
+                "hosts.guest2.vars.ucx_net_devices",
+            )
+        ),
+    ),
+    "gha-kvm-vm1-loopback": (
+        frozenset(("gpu", "rdma")),
+        frozenset(("hosts.guest.ssh_config",)),
+    ),
+    "gha-kvm-vm1-nvmeof": (
+        frozenset(("blkdev", "gpu", "io_uring")),
+        frozenset(("hosts.guest.ssh_config", "vars.gusli_blkdev")),
+    ),
+}
+# Needs of active cases that no job sets up yet: those cases end as skip/env.
+NEVER_PROVIDED = {"bench-container": {"s3"}}
 # The LBA-STD and KV-STD sets of plan section 2.5.
 LBA_STD = {"S": 21, "N": 4}
 KV_STD = 11
@@ -56,7 +93,21 @@ HOST_VAR_RE = re.compile(r"(self|init|tgt)\.[A-Za-z0-9_]+")
 
 
 def profile_family(name: str) -> str:
+    if name.startswith("KV-"):
+        return "KV"
     return "N" if name == "N-r" else name
+
+
+def strings(value: Any, path: str = "") -> Iterator[tuple[str, str]]:
+    """(dotted path, text) of every string in a parsed TOML document."""
+    if isinstance(value, str):
+        yield path, value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield from strings(item, f"{path}.{key}" if path else key)
+    elif isinstance(value, list):
+        for number, item in enumerate(value):
+            yield from strings(item, f"{path}[{number}]")
 
 
 def run_cli(*argv: str) -> tuple[int, str]:
@@ -160,6 +211,22 @@ class MatrixTest(unittest.TestCase):
             kv = [c for c in self.matrix.lanes[name].cases if c.backend == "NVME_KV"]
             self.assertEqual(len(kv), KV_STD, name)
 
+    def test_the_active_storage_lanes_declare_the_same_storage_pairs(self) -> None:
+        # A ratio exists only where the matrix declares the pair, so a lane
+        # that runs the direct and buffered cases must also pair them.
+        def storage_pairs(name: str) -> set[tuple[str, str, str]]:
+            lane = self.matrix.lanes[name]
+            workload = {case.case_key: case.workload_key for case in lane.cases}
+            return {
+                (pair.kind, workload[pair.num], workload[pair.den])
+                for pair in lane.pairs
+                if pair.kind == "direct-buffered"
+            }
+
+        local = storage_pairs("vm1-local")
+        self.assertEqual(len(local), 6)
+        self.assertEqual(storage_pairs("vm1-fabric"), local)
+
     def test_blocked_if_and_only_if_blocked_by(self) -> None:
         for lane in self.matrix.lanes.values():
             self.assertEqual(lane.status == "blocked", bool(lane.blocked_by), lane.name)
@@ -169,7 +236,7 @@ class MatrixTest(unittest.TestCase):
                     if lane.status == "blocked":
                         self.assertEqual(case.status, "blocked")
 
-    def test_only_the_three_lanes_are_active(self) -> None:
+    def test_only_the_five_lanes_are_active(self) -> None:
         active = [
             lane.name for lane in self.matrix.lanes.values() if lane.status == "active"
         ]
@@ -330,35 +397,175 @@ class MatrixTest(unittest.TestCase):
                 if value is not None:
                     self.assertRegex(str(value), r"^\{[a-z0-9_]+\}$", case.case_key)
 
-    def test_container_env_resolves_every_active_case(self) -> None:
-        code, text = run_cli(
-            "validate",
-            "--matrix",
-            str(BENCH),
-            "--lane",
-            "bench-container",
-            "--env",
-            str(CONTAINER_ENV),
-        )
-        self.assertEqual(code, 0, text)
-        code, text = run_cli(
-            "list",
-            "--matrix",
-            str(BENCH),
-            "--lane",
-            "bench-container",
-            "--tier",
-            "nightly",
-            "--env",
-            str(CONTAINER_ENV),
-            "--commands",
-        )
-        self.assertEqual(code, 0, text)
-        self.assertNotRegex(text, r"\{[a-z_.]+\}")
-        lane = self.matrix.lanes["bench-container"]
+    def test_rdma_in_one_guest_names_its_device_itself(self) -> None:
+        # The runner sets UCX_NET_DEVICES only between two hosts.
+        for lane in self.matrix.lanes.values():
+            for case in lane.cases:
+                own = case.env.get("UCX_NET_DEVICES")
+                rdma = case.backend == "UCX" and case.transport in ("rc", "ud")
+                with self.subTest(case=case.case_key):
+                    if rdma and lane.topology == "single":
+                        self.assertEqual(own, "{self.ucx_net_devices}")
+                    else:
+                        self.assertIsNone(own)
+
+
+class EnvTemplateTest(unittest.TestCase):
+    """The env templates under .ci/bench/envs, one per env class of an active
+    lane, as the lane jobs render them."""
+
+    matrix: lib.Matrix
+    envs: dict[str, run.Env]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.matrix = lib.load_matrix(BENCH)
+        try:
+            cls.envs = {
+                path.stem: run.load_env(path) for path in sorted(ENVS.glob("*.toml"))
+            }
+        except run.EnvError as exc:
+            raise AssertionError("\n".join(exc.problems)) from exc
+
+    def active_lanes(self) -> list[lib.Lane]:
+        return [lane for lane in self.matrix.lanes.values() if lane.status == "active"]
+
+    def plans(self, lane: lib.Lane) -> Iterator[tuple[lib.Case, run.Plan]]:
+        env = self.envs[lane.env_class]
+        homes = run.display_homes(env)
         for case in lane.cases:
             if case.status == "active":
-                self.assertIn(case.case_key, text)
+                profile = self.matrix.profiles[case.profile]
+                yield case, run.plan_case(case, profile, env, homes, "0" * 20, 0)
+
+    def test_there_is_one_template_per_active_env_class(self) -> None:
+        wanted = {lane.env_class for lane in self.active_lanes()}
+        self.assertEqual(set(self.envs), wanted)
+        self.assertEqual(set(TEMPLATES), wanted)
+        for name, env in self.envs.items():
+            self.assertEqual(env.env_class, name)
+
+    def test_template_resolves_every_active_case_of_its_lanes(self) -> None:
+        for name in self.envs:
+            code, text = run_cli(
+                "validate", "--matrix", str(BENCH), "--env", str(ENVS / f"{name}.toml")
+            )
+            self.assertEqual(code, 0, text)
+        for lane in self.active_lanes():
+            with self.subTest(lane=lane.name):
+                where = ["--matrix", str(BENCH), "--lane", lane.name]
+                where += ["--env", str(ENVS / f"{lane.env_class}.toml")]
+                code, text = run_cli("validate", *where)
+                self.assertEqual(code, 0, text)
+                code, text = run_cli("list", *where, "--tier", "nightly", "--commands")
+                self.assertEqual(code, 0, text)
+                self.assertNotRegex(text, r"\{[a-z_.]+\}")
+                self.assertNotIn("     # ", text)
+                for case in lane.cases:
+                    if case.status == "active":
+                        self.assertIn(case.case_key, text)
+
+    def test_job_values_are_the_ones_only_the_job_knows(self) -> None:
+        for name, (_, job_keys) in TEMPLATES.items():
+            data = tomllib.loads((ENVS / f"{name}.toml").read_text(encoding="utf-8"))
+            found = {path for path, text in strings(data) if text == JOB}
+            self.assertEqual(found, set(job_keys), name)
+            for path, text in strings(data):
+                self.assertTrue(text == JOB or JOB not in text, f"{name}: {path}")
+
+    def test_provides_is_the_most_the_job_can_set_up(self) -> None:
+        for name, (provides, _) in TEMPLATES.items():
+            self.assertEqual(list(self.envs[name].provides), sorted(provides), name)
+
+    def test_only_the_s3_cases_lack_what_they_need(self) -> None:
+        for lane in self.active_lanes():
+            needed = {
+                need
+                for case in lane.cases
+                if case.status == "active"
+                for need in case.needs
+            }
+            lacking = needed - set(self.envs[lane.env_class].provides)
+            self.assertEqual(lacking, NEVER_PROVIDED.get(lane.name, set()), lane.name)
+
+    def test_roles_and_hosts(self) -> None:
+        for name, env in self.envs.items():
+            with self.subTest(env=name):
+                self.assertEqual(set(env.roles), {"init", "tgt"})
+                self.assertEqual(set(env.roles.values()), set(env.hosts))
+                two = env.roles["init"] != env.roles["tgt"]
+                self.assertEqual(two, "two_hosts" in env.provides)
+                self.assertEqual(env.asio_port_base, 21000)
+                self.assertEqual(env.tuning, run.Tuning())
+                for host, spec in env.hosts.items():
+                    if spec.kind == "local":
+                        self.assertTrue(spec.work_dir.startswith("/"))
+                        self.assertTrue(spec.nixlbench.startswith("/"))
+                        continue
+                    self.assertEqual(spec.ssh_host, host)
+                    self.assertEqual(spec.ssh_config, JOB)
+                    # Under the guest's home directory, where the job
+                    # installs the wheels.
+                    self.assertEqual(spec.work_dir, "amd-bench/run")
+                    self.assertEqual(spec.nixlbench, "amd-bench/venv/bin/nixlbench")
+                    self.assertEqual(spec.setup, ())
+                    if two:
+                        # The initiator's address is where the target connects.
+                        self.assertIn("ip", spec.vars)
+
+    def test_probes(self) -> None:
+        for name, env in self.envs.items():
+            with self.subTest(env=name):
+                names = [probe.name for probe in env.probes]
+                self.assertEqual(len(names), len(set(names)))
+                hosts = set(env.roles.values())
+                for probe in env.probes:
+                    self.assertLessEqual(set(probe.classes), set(env.provides))
+                    if not probe.classes:
+                        self.assertEqual(probe.when, "start", probe.name)
+                # A device that can wedge is looked at after each case that
+                # used it, in every guest that has one.
+                for device in ("gpu", "rdma"):
+                    probed = {
+                        env.roles.get(probe.host, probe.host)
+                        for probe in env.probes
+                        if probe.when == "between" and device in probe.classes
+                    }
+                    want = hosts if device in env.provides else set()
+                    self.assertEqual(probed, want, device)
+        both = {"guest1", "guest2"}
+        self.assertEqual(set(self.envs["gha-kvm-vm2"].roles.values()), both)
+        kv = [p for p in self.envs["gha-kvm-vm1-nvmeof"].probes if not p.classes]
+        self.assertEqual([p.cmd for p in kv], ["test -c /run/amd-bench/kv"])
+
+    def test_ucx_device_lists(self) -> None:
+        seen: dict[str, set[str | None]] = collections.defaultdict(set)
+        for lane in self.active_lanes():
+            for case, plan in self.plans(lane):
+                if case.backend == "UCX":
+                    for proc in plan.procs:
+                        seen[lane.name].add(proc.env.get("UCX_NET_DEVICES"))
+        self.assertEqual(
+            dict(seen),
+            {
+                "bench-container": {None},
+                "vm1-local": {None},
+                # Each guest's own list, which only the job knows.
+                "vm2-net": {JOB},
+                "vm1-loop": {"ernic0:1"},
+            },
+        )
+
+    def test_storage_paths(self) -> None:
+        for name in ("vm1-local", "vm1-fabric"):
+            paths = set()
+            for case, plan in self.plans(self.matrix.lanes[name]):
+                if case.backend in ("POSIX", "AIS"):
+                    paths.add(str(plan.flags["filepath"]).rsplit("/", 1)[0])
+                elif case.backend == "GUSLI":
+                    self.assertEqual(plan.flags["device_list"], f"11:K:{JOB}")
+            fs = "/mnt/amd-bench/fs"
+            self.assertEqual(paths, {f"{fs}/posix", f"{fs}/ais"}, name)
 
 
 if __name__ == "__main__":
