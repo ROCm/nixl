@@ -11,6 +11,8 @@ the repository settings the workflow needs, and the results site. How to
 install the nightly wheels is in [amd-wheels.md](amd-wheels.md); how the wheels
 are built is in `contrib/README.md` on the wheels branch
 ([here](https://github.com/ROCm/nixl/blob/for-upstream/feat/rocm-wheels/contrib/README.md#build-rocm-wheels)).
+The nixlbench programme and its probe workflow are in
+[amd-bench.md](amd-bench.md).
 
 ## Branches
 
@@ -265,14 +267,14 @@ and publishes nothing.
 Add its name on a line of `.github/amd-nightly-branches.txt` on `main-amd`.
 Names may hold letters, digits, `.`, `_`, `-` and `/`. A `/` becomes `-` in
 artifact names, in the release tag `nightly-<slug>` and in the site's paths.
-At most six branches are built in one run. A listed branch that does not exist
-is skipped with a warning.
+At most twelve branches are built in one run. A listed branch that does not
+exist is skipped with a warning.
 
 A line ending in `/*` stands for every branch under that prefix. The list has
 `for-upstream/*`, so a branch pushed as `for-upstream/<name>` is built and
 tested the same night with no change to the list. Anyone who can push a branch
 under a listed prefix can therefore have it built; see the note on trust above.
-The limit of six counts the branches a prefix matches, and the run fails when
+The limit of twelve counts the branches a prefix matches, and the run fails when
 it is exceeded.
 
 A new branch is tested and shown on the results site. Its wheels are not
@@ -315,6 +317,13 @@ The site is `https://<owner>.github.io/<repo>/`, written by
 - `index.html` shows, per branch, a grid of every check by night (pass, fail,
   skip, not run) and the trends: build and test durations, wheel sizes, and
   transfer rates with the transport or storage path each one used.
+
+The nightly and the wheel publisher both push to `gh-pages`, never forced.
+A writer whose push is refused because the other got there first starts again
+from a fresh shallow clone after a random pause of 5 to 24 seconds. After five
+attempts it gives up, failing its job and leaving `gh-pages` as it was. The
+wheel publisher has by then uploaded the new wheels to the pre-releases; the
+pip index still lists the previous night's, which are kept.
 
 The transfer rates come from emulated devices on shared runners. Each is the
 bytes a check moved divided by the time the whole check took, set-up included.

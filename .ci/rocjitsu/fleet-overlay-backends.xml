@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+
+qemu-tool fleet overlay for the ernic-backend job of
+.github/workflows/amd-bench-probe.yml, layered over qemu/stacks/rocm-golden.xml
+of the qemu-minimal commit that workflow pins. It is fleet-overlay.xml with P4
+off; the job replaces the NIC server's command with a compose override, which
+qemu-tool cannot be asked to do.
+-->
+<fleet xmlns="http://qemu-tool/fleet/1.0">
+  <!-- Both are what the compose override depends on, and the workflow greps
+       for them: with a second guest the other NIC server would wait for a
+       mesh manager that no longer exists, and with the TAP the server is
+       started through an entrypoint that ignores the replaced command. -->
+  <vm-count>1</vm-count>
+  <ernic-tap>false</ernic-tap>
+  <vm-name-prefix>nixl-rocjitsu-backend</vm-name-prefix>
+  <!-- The same digests as fleet-overlay.xml; move the two files together.
+       <qemu-ref> is also the workflow's job container. -->
+  <qemu-ref>docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20261112.gdca6903-qemu.4cb9698-vfu.3719c3a@sha256:f7e61be3f29c82aeac60b8fa3f88ac3c434ab0f19a79bd144cb87ed9054aca03</qemu-ref>
+  <ernic-ref>docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-ernic-sbates-fork:20261112.gdca6903-ernic.90434a2-vfu.3719c3a@sha256:7473e631b3237707cc0d0ce635b5dff5e601dc175591f2ceafa84a3c5a85df16</ernic-ref>
+  <rocjitsu-ref>docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20261112.gdca6903-rocjitsu.50be05a@sha256:1e005700d1a3d030581969489fe42adbffedb461b7f2a4e44cc2b973c3bad3d6</rocjitsu-ref>
+  <backing-ref>docker.io/sbates130272/qemu-tool-rocm-golden:20261117.g481c892@sha256:72a0aa0c1ad44bf121fe797f56b8f4199628695974c8f6449834269aeb46e45e</backing-ref>
+  <!-- The probe uses no SDXI device, so its server image is not pulled. -->
+  <sdxi-per-vm>0</sdxi-per-vm>
+  <!-- The override replaces the server's whole command, P4 flags included, so
+       these lanes run without P4 whatever this says. Off here so that the
+       generated compose file does not claim otherwise. -->
+  <p4-enable>false</p4-enable>
+  <!-- Kept so the guest has a local (pcie) NVMe controller beside the fabric
+       one: the nvmeof lane must tell the two apart and never write to this
+       one. -->
+  <vm-nvme>1</vm-nvme>
+</fleet>
