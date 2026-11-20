@@ -26,25 +26,20 @@ sequential build and for configuring NIXL/nixlbench
 
 ### Python package naming
 
-`build-rocm.sh` does not pass `-Dwheel_variant`. With `-Drocm_path` set and no
-CUDA present, meson derives the variant from the ROCm install as
-`rocm<major>_<minor>`, so the Python bindings are installed as
-`nixl_rocm7_14` on a ROCm 7.14 image and `nixl_rocm10_1` on a ROCm 10.1 image.
-To force a name, pass `-Dwheel_variant=<variant>` in the script's third
-argument (`EXTRA_BUILD_ARGS`).
+The Python bindings in this image are named after its ROCm version:
+`nixl_rocm<X>_<Y>`, for example `nixl_rocm10_1` on a ROCm 10.1 image. Meson
+derives the name from the ROCm install, because `build-rocm.sh` sets
+`-Drocm_path` and the image has no CUDA. To force another name, pass
+`-Dwheel_variant=<variant>` in the script's third argument
+(`EXTRA_BUILD_ARGS`).
 
-The build also produces the pure-Python `nixl` meta wheel (the `nixl`
-dispatcher), exactly as a CUDA build does, and the script copies it to
-`dist/nixl-<version>-py3-none-any.whl`. It depends on the backend of the ROCm
-version it was built against (`nixl-rocm7.14` or `nixl-rocm10.1`) and is for
-local use only; it is not the `rocm-nixl` distribution.
+The build also produces the `nixl` meta wheel, which provides `import nixl`,
+as a CUDA build does. The script copies it to
+`dist/nixl-<version>-py3-none-any.whl`. It requires the `nixl-rocm<X>.<Y>`
+package of this image and is for local use only.
 
-This image is a CI and development environment. The `rocm-nixl` release wheel
-is built by a separate flow: `contrib/Dockerfile.manylinux` with
-`GPU_STACK=rocm` builds one intermediate backend wheel per ROCm version
-(`nixl_rocm<X>_<Y>-*.whl`, no meta wheel), and `contrib/wheel_merge_rocm.py`
-merges them into a single `rocm_nixl-*.whl`; see
-[`contrib/README.md`](../contrib/README.md).
+This image is for CI and development. The `rocm-nixl` release wheel is built
+separately: see [Build ROCm wheels](../contrib/README.md#build-rocm-wheels).
 
 ## AIS on AMD GPU (docker + nixlbench)
 

@@ -104,22 +104,14 @@ On AMD ROCm (x86_64 only), install `rocm-nixl` instead:
 pip install rocm-nixl
 ```
 
-`import nixl` selects the backend matching the installed ROCm version. If it fails because no backend matches the detected version, or selects the wrong one, see the [README](https://github.com/ai-dynamo/nixl/blob/main/README.md#pypi-wheel) for the supported versions and how the version is detected (`ROCM_PATH`).
+If `import nixl` then fails, or warns that it could not tell which ROCm install to use, the usual causes are:
 
-The wheel does not bundle the ROCm runtime. If a ROCm library (e.g. `libamdhip64.so`) cannot be opened, install ROCm on the host and add its library directory to the loader path before starting Python (use `/opt/rocm/core-<X.Y>/lib` if `/opt/rocm/lib` does not exist):
+- No ROCm install was found, or several versions are installed side by side: set `ROCM_PATH` to your ROCm install.
+- The ROCm version found is not supported. The error says where the version was read from. If that is PyTorch, install AMD's PyTorch for a supported ROCm version; `ROCM_PATH` does not change it.
+- A CUDA build of PyTorch was found: `torch` was installed from PyPI. Replace it with AMD's ROCm build; the error lists the command for each ROCm version.
+- `nixl` and `rocm-nixl` are both installed: they cannot share an environment.
 
-```bash
-export LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH
-```
-
-If `import nixl` fails with a message saying that a CUDA build of PyTorch was found, the default `torch` from PyPI is installed; it is the CUDA build. Replace it with AMD's ROCm build through the `rocm<X>.<Y>` extra and AMD's package index for that ROCm version (pip 23.3 or newer):
-
-```bash
-pip uninstall torch
-pip install "rocm-nixl[rocm10.1]" --extra-index-url https://stable.repo.amd.com/rocm/whl-next/
-```
-
-`rocm-nixl` and `nixl` must not be installed in the same environment. If both were installed, run `pip uninstall nixl nixl-cu12 nixl-cu13 torch` and then `pip install --force-reinstall rocm-nixl`.
+The [rocm-nixl README](https://github.com/ai-dynamo/nixl/blob/main/src/bindings/python/nixl-meta/README.rocm.md) has the commands for each case, the supported ROCm versions and the order in which `import nixl` looks for ROCm.
 
 ### Plug-in Shared Library Not Found at Runtime
 

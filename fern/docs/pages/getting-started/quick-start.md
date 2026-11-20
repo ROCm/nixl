@@ -28,7 +28,7 @@ pip install rocm-nixl
 ```
 
 <Note>
-`rocm-nixl` and `nixl` must not be installed in the same environment. See the [README](https://github.com/ai-dynamo/nixl/blob/main/README.md#pypi-wheel) for the supported ROCm versions, the host requirements and the extras that install AMD's ROCm build of PyTorch.
+Do not install `rocm-nixl` and `nixl` in the same environment. See the [README](https://github.com/ai-dynamo/nixl/blob/main/README.md#pypi-wheel) for the requirements and for installing AMD's ROCm build of PyTorch with it.
 </Note>
 
 <Note>
