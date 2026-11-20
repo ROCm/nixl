@@ -421,6 +421,7 @@ build directories.
 - `cudapath_stub`: Extra stub path for CUDA
 - `etcd_inc_path`: Path to ETCD C++ client includes
 - `etcd_lib_path`: Path to ETCD C++ client library
+- `etcd`: Build the ETCD runtime: `auto`, `enabled` or `disabled` (default: auto, built when the ETCD C++ client is found)
 - `nvshmem_inc_path`: Path to NVSHMEM include directory
 - `nvshmem_lib_path`: Path to NVSHMEM library directory
 - `rocm_path`: Path to ROCm installation; required for any ROCm build (default: empty, ROCm not used)

@@ -21,6 +21,7 @@ option('ucx_device_cuda_arch_list', type: 'string', value: 'auto',
        description: 'Comma-separated CUDA SM targets (e.g. 90,100 or sm_90,sm_100) for UCX device kernels. Use auto for defaults. Only used when UCX GPU Device API is available.')
 option('etcd_inc_path', type: 'string', value: '', description: 'Path to ETCD C++ Client includes')
 option('etcd_lib_path', type: 'string', value: '', description: 'Path to ETCD C++ Client library')
+option('etcd', type: 'feature', value: 'auto', description: 'Build the ETCD runtime: auto builds it when the ETCD C++ client is found, disabled leaves it out, enabled fails without the client')
 option('nixl_path', type: 'string', value: '/usr/local', description: 'Path to NiXL')
 option('nvshmem_inc_path', type: 'string', value: '', description: 'Path to NVSHMEM include directory')
 option('nvshmem_lib_path', type: 'string', value: '', description: 'Path to NVSHMEM library directory')

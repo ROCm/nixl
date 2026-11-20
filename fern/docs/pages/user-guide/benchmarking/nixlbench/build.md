@@ -98,6 +98,7 @@ cd build && ninja && sudo ninja install
 | `prefix` | Installation prefix | `/usr/local` |
 | `etcd_inc_path` | Path to etcd C++ client headers | `""` |
 | `etcd_lib_path` | Path to etcd C++ client library | `""` |
+| `etcd` | Build the ETCD runtime: `auto`, `enabled` or `disabled` | `auto` |
 
 ### Post-Install Setup
 
