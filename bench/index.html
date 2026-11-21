@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NIXL on ROCm: nixlbench runs</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff; --fg: #1f2328; --muted: #59636e; --rule: #d1d9e0;
+  --card: #f6f8fa; --series: #2a78d6;
+  --pass: #1baf7a; --fail: #d03b3b; --skip: #fab219; --blocked: #8c959f;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117; --fg: #e6edf3; --muted: #9198a1; --rule: #3d444d;
+    --card: #151b23; --series: #5b9dea;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0 auto; padding: 1.5rem 1rem 3rem; max-width: 84rem;
+  background: var(--bg); color: var(--fg);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
+h2 { font-size: 1.25rem; margin: 2.5rem 0 .25rem; padding-top: 1rem;
+     border-top: 1px solid var(--rule); }
+h3 { font-size: 1rem; margin: 1.5rem 0 .5rem; }
+p { margin: .4rem 0; }
+ul { margin: .4rem 0; padding-left: 1.3rem; }
+a { color: var(--series); }
+code, pre { font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+code { overflow-wrap: anywhere; }
+pre { margin: .2rem 0 .5rem; padding: .4rem .6rem; max-height: 16rem;
+  overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  background: var(--card); border: 1px solid var(--rule); border-radius: 6px; }
+.muted { color: var(--muted); }
+.note { border-left: 3px solid var(--skip); padding: .4rem .8rem;
+        background: var(--card); margin: .8rem 0; }
+.verdict { margin: .8rem 0; padding: .6rem .9rem; border-radius: 8px;
+  font-size: 1.15rem; font-weight: 600; background: var(--card);
+  border: 1px solid var(--rule); border-left: .5rem solid var(--pass); }
+.verdict.fail { background: var(--fail); border-color: var(--fail);
+  color: #ffffff; }
+.verdict a { color: inherit; }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; vertical-align: top;
+  padding: .3rem .9rem .3rem 0; border-bottom: 1px solid var(--rule); }
+thead th { font-weight: 600; vertical-align: bottom; }
+td.num, th.num { text-align: right; }
+td.num { white-space: nowrap; }
+td.key { min-width: 13rem; }
+td.nowrap { white-space: nowrap; }
+td.wrap { overflow-wrap: anywhere; }
+table.grid { font-size: 12px; }
+table.grid th, table.grid td { padding-right: .45rem; }
+tr.main > td { border-bottom: 0; padding-bottom: .1rem; }
+tr.more > td { padding-top: 0; }
+.label { font-size: 12px; color: var(--muted); margin: .3rem 0 0; }
+.st { display: inline-block; padding: 0 .4rem; border-radius: 4px;
+  font-weight: 600; white-space: nowrap; border: 1px solid transparent; }
+.st.pass { background: var(--pass); color: #04281b; }
+.st.fail { background: var(--fail); color: #ffffff; }
+.st.skip { background: var(--skip); color: #3a2800; }
+.st.blocked { background: var(--blocked); color: #0d1117; }
+.st.none, .st.muted { border-color: var(--rule); color: var(--muted); }
+.badge { display: inline-block; padding: 0 .35rem; border-radius: 4px;
+  border: 1px solid var(--fail); font-size: 11px; font-weight: 600; }
+details { margin: .3rem 0; }
+summary { cursor: pointer; }
+summary > h2 { display: inline; border: 0; margin: 0; padding: 0; }
+details.section { margin-top: 2.5rem; padding-top: 1rem;
+  border-top: 1px solid var(--rule); }
+.legend { font-size: 12px; color: var(--muted); list-style: none;
+  padding: 0; display: flex; flex-wrap: wrap; gap: .3rem 1.4rem; }
+footer { margin-top: 2.5rem; padding-top: 1rem; font-size: 13px;
+  border-top: 1px solid var(--rule); }
+</style>
+</head>
+<body>
+<h1>NIXL on ROCm: nixlbench runs</h1>
+<p><a href="../index.html">Nightly results</a> · <a href="../wheels/index.html">Wheels</a> · <a href="https://github.com/ROCm/nixl/blob/main-amd/.ci/docs/amd-bench.md">How the bench programme works</a></p>
+<p class="note">Everything here runs on emulated devices on shared GitHub runners. A failure is a real failure. A rate only shows change from one run to the next and says nothing about real hardware.</p>
+<h2 id="branch-for-upstream-feat-rocm-wheels">for-upstream/feat/rocm-wheels</h2>
+<p class="muted">latest run, started by hand; no nightly bench published yet · 2026-11-20 20:46 UTC · commit <code>5a84605a50</code> · tier nightly</p>
+<p class="verdict fail"><a href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#failures">20 of 307 cases failed or timed out · 24 skipped · 82 blocked · 181 passed</a></p>
+<div class="scroll">
+<table class="grid">
+<thead><tr><th>bench-container<br>10.1.0</th><th>bench-container<br>10.2.0</th><th>bench-container<br>7.14.1</th><th>vm1-fabric<br>10.1.0</th><th>vm1-local<br>10.1.0</th><th>vm1-loop<br>10.1.0</th><th>vm1-pcie<br>none</th><th>vm1-s3<br>none</th><th>vm2-lfverbs<br>none</th><th>vm2-net<br>10.1.0</th></tr></thead>
+<tbody>
+<tr><td><a class="st pass" title="pass 26, fail 0, timeout 0, crash 0, skip 8, blocked 7, not-run 0" href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#lane-bench-container-10-1-0">ok 26</a></td><td><a class="st pass" title="pass 26, fail 0, timeout 0, crash 0, skip 8, blocked 7, not-run 0" href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#lane-bench-container-10-2-0">ok 26</a></td><td><a class="st pass" title="pass 26, fail 0, timeout 0, crash 0, skip 8, blocked 7, not-run 0" href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#lane-bench-container-7-14-1">ok 26</a></td><td><a class="st fail" title="pass 24, fail 4, timeout 0, crash 0, skip 0, blocked 11, not-run 0" href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#lane-vm1-fabric-10-1-0">4 failed</a></td><td><a class="st fail" title="pass 38, fail 2, timeout 0, crash 0, skip 0, blocked 0, not-run 0" href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#lane-vm1-local-10-1-0">2 failed</a></td><td><a class="st fail" title="pass 16, fail 4, timeout 1, crash 0, skip 0, blocked 0, not-run 0" href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#lane-vm1-loop-10-1-0">5 failed</a></td><td><a class="st blocked" title="pass 0, fail 0, timeout 0, crash 0, skip 0, blocked 36, not-run 0" href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#lane-vm1-pcie-none">blocked</a></td><td><a class="st blocked" title="pass 0, fail 0, timeout 0, crash 0, skip 0, blocked 8, not-run 0" href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#lane-vm1-s3-none">blocked</a></td><td><a class="st blocked" title="pass 0, fail 0, timeout 0, crash 0, skip 0, blocked 4, not-run 0" href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#lane-vm2-lfverbs-none">blocked</a></td><td><a class="st fail" title="pass 25, fail 6, timeout 3, crash 0, skip 0, blocked 2, not-run 0" href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#lane-vm2-net-10-1-0">9 failed</a></td></tr>
+</tbody>
+</table>
+</div>
+<h3>Failed, timed out, crashed or not run (20)</h3>
+<div class="scroll">
+<table>
+<thead><tr><th>Status</th><th>Case</th><th>Lane</th><th>ROCm</th><th>Reason</th><th>Excerpt</th></tr></thead>
+<tbody>
+<tr><td><span class="st fail">fail</span></td><td class="key"><a href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#case-10-1-0-vm1-fabric-ais-compat-allowed-WRITE-S-head-0"><code>vm1-fabric/ais/compat-allowed/WRITE/S</code></a></td><td>vm1-fabric</td><td>10.1.0</td><td>consistency</td><td class="key">Consistency check failed for iov 0:0 | Consistency check failed for iov 0:1 | Consistency check failed for iov 0:2 | Consistency check failed for iov 0:3 | Consistency check failed</td></tr>
+<tr><td><span class="st fail">fail</span></td><td class="key"><a href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#case-10-1-0-vm1-fabric-ais-compat-allowed-READ-S-head-0"><code>vm1-fabric/ais/compat-allowed/READ/S</code></a></td><td>vm1-fabric</td><td>10.1.0</td><td>consistency</td><td class="key">Consistency check failed for iov 0:0 | Consistency check failed for iov 0:1 | Consistency check failed for iov 0:2 | Consistency check failed for iov 0:3 | Consistency check failed</td></tr>
+<tr><td><span class="st fail">fail</span></td><td class="key"><a href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#case-10-1-0-vm1-fabric-ais-fast-required-WRITE-S-head-0"><code>vm1-fabric/ais/fast-required/WRITE/S</code></a></td><td>vm1-fabric</td><td>10.1.0</td><td>consistency</td><td class="key">Consistency check failed for iov 0:0 | Consistency check failed for iov 0:1 | Consistency check failed for iov 0:2 | Consistency check failed for iov 0:3 | Consistency check failed</td></tr>
+<tr><td><span class="st fail">fail</span></td><td class="key"><a href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#case-10-1-0-vm1-fabric-ais-fast-required-READ-S-head-0"><code>vm1-fabric/ais/fast-required/READ/S</code></a></td><td>vm1-fabric</td><td>10.1.0</td><td>consistency</td><td class="key">Consistency check failed for iov 0:0 | Consistency check failed for iov 0:1 | Consistency check failed for iov 0:2 | Consistency check failed for iov 0:3 | Consistency check failed</td></tr>
+<tr><td><span class="st fail">fail</span></td><td class="key"><a href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#case-10-1-0-vm1-local-ais-fast-required-WRITE-S-head-0"><code>vm1-local/ais/fast-required/WRITE/S</code></a></td><td>vm1-local</td><td>10.1.0</td><td>exit-nonzero</td><td class="key">E1120 15:29:39.621153 9349 ais_mt_engine.cpp:103] AIS: hipFileWrite failed after 0 out of 65536 bytes: system error: No such device | E1120 15:29:39.621748 9348 ais_mt_engine.cpp:103] AIS: hipFileWrit</td></tr>
+<tr><td><span class="st fail">fail</span></td><td class="key"><a href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#case-10-1-0-vm1-local-ais-fast-required-READ-S-head-0"><code>vm1-local/ais/fast-required/READ/S</code></a></td><td>vm1-local</td><td>10.1.0</td><td>exit-nonzero</td><td class="key">E1120 15:29:42.509433 9646 ais_mt_engine.cpp:103] AIS: hipFileRead failed after 0 out of 65536 bytes: system error: No such device | E1120 15:29:42.511310 9647 ais_mt_engine.cpp:103] AIS: hipFileRead </td></tr>
+<tr><td><span class="st fail">fail</span></td><td class="key"><a href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#case-10-1-0-vm1-loop-ucx-rc-DV-WRITE-S-head-0"><code>vm1-loop/ucx/rc/DV/WRITE/S</code></a></td><td>vm1-loop</td><td>10.1.0</td><td>consistency</td><td class="key">Consistency check failed for iov 0:0 | Consistency check failed for iov 0:1 | Consistency check failed for iov 0:2 | Consistency check failed for iov 0:3 | Consistency check failed</td></tr>
+<tr><td><span class="st fail">fail</span></td><td class="key"><a href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#case-10-1-0-vm1-loop-ucx-rc-DV-READ-S-head-0"><code>vm1-loop/ucx/rc/DV/READ/S</code></a></td><td>vm1-loop</td><td>10.1.0</td><td>consistency</td><td class="key">Consistency check failed for iov 0:0 | Consistency check failed for iov 0:1 | Consistency check failed for iov 0:2 | Consistency check failed for iov 0:3 | Consistency check failed</td></tr>
+<tr><td><span class="st fail">fail</span></td><td class="key"><a href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#case-10-1-0-vm1-loop-ucx-rc-VD-WRITE-S-head-0"><code>vm1-loop/ucx/rc/VD/WRITE/S</code></a></td><td>vm1-loop</td><td>10.1.0</td><td>consistency</td><td class="key">Consistency check failed for iov 0:0 | Consistency check failed for iov 0:1 | Consistency check failed for iov 0:2 | Consistency check failed for iov 0:3 | Consistency check failed</td></tr>
+<tr><td><span class="st fail">fail</span></td><td class="key"><a href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#case-10-1-0-vm1-loop-ucx-rc-VD-READ-S-head-0"><code>vm1-loop/ucx/rc/VD/READ/S</code></a></td><td>vm1-loop</td><td>10.1.0</td><td>consistency</td><td class="key">Consistency check failed for iov 0:0 | Consistency check failed for iov 0:1 | Consistency check failed for iov 0:2 | Consistency check failed for iov 0:3 | Consistency check failed</td></tr>
+<tr><td><span class="st fail">fail</span></td><td class="key"><a href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#case-10-1-0-vm2-net-ucx-rc-VV-WRITE-S-head-0"><code>vm2-net/ucx/rc/VV/WRITE/S</code></a></td><td>vm2-net</td><td>10.1.0</td><td>consistency</td><td class="key">Consistency check failed for iov 0:0 | Consistency check failed for iov 0:1 | Consistency check failed for iov 0:2 | Consistency check failed for iov 0:3 | Consistency check failed</td></tr>
+<tr><td><span class="st fail">fail</span></td><td class="key"><a href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#case-10-1-0-vm2-net-ucx-rc-VV-READ-S-head-0"><code>vm2-net/ucx/rc/VV/READ/S</code></a></td><td>vm2-net</td><td>10.1.0</td><td>consistency</td><td class="key">Consistency check failed for iov 0:0 | Consistency check failed for iov 0:1 | Consistency check failed for iov 0:2 | Consistency check failed for iov 0:3 | Consistency check failed</td></tr>
+<tr><td><span class="st fail">fail</span></td><td class="key"><a href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#case-10-1-0-vm2-net-ucx-rc-DV-WRITE-S-head-0"><code>vm2-net/ucx/rc/DV/WRITE/S</code></a></td><td>vm2-net</td><td>10.1.0</td><td>consistency</td><td class="key">Consistency check failed for iov 0:0 | Consistency check failed for iov 0:1 | Consistency check failed for iov 0:2 | Consistency check failed for iov 0:3 | Consistency check failed</td></tr>
+<tr><td><span class="st fail">fail</span></td><td class="key"><a href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#case-10-1-0-vm2-net-ucx-rc-DV-READ-S-head-0"><code>vm2-net/ucx/rc/DV/READ/S</code></a></td><td>vm2-net</td><td>10.1.0</td><td>consistency</td><td class="key">Consistency check failed for iov 0:0 | Consistency check failed for iov 0:1 | Consistency check failed for iov 0:2 | Consistency check failed for iov 0:3 | Consistency check failed</td></tr>
+<tr><td><span class="st fail">fail</span></td><td class="key"><a href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#case-10-1-0-vm2-net-ucx-rc-VD-WRITE-S-head-0"><code>vm2-net/ucx/rc/VD/WRITE/S</code></a></td><td>vm2-net</td><td>10.1.0</td><td>consistency</td><td class="key">Consistency check failed for iov 0:0 | Consistency check failed for iov 0:1 | Consistency check failed for iov 0:2 | Consistency check failed for iov 0:3 | Consistency check failed</td></tr>
+<tr><td><span class="st fail">fail</span></td><td class="key"><a href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#case-10-1-0-vm2-net-ucx-rc-VD-READ-S-head-0"><code>vm2-net/ucx/rc/VD/READ/S</code></a></td><td>vm2-net</td><td>10.1.0</td><td>consistency</td><td class="key">Consistency check failed for iov 0:0 | Consistency check failed for iov 0:1 | Consistency check failed for iov 0:2 | Consistency check failed for iov 0:3 | Consistency check failed</td></tr>
+<tr><td><span class="st fail">timeout</span></td><td class="key"><a href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#case-10-1-0-vm1-loop-ucx-ud-VD-WRITE-S-head-0"><code>vm1-loop/ucx/ud/VD/WRITE/S</code></a></td><td>vm1-loop</td><td>10.1.0</td><td>timeout</td><td class="key"><span class="muted">last stderr line, not the cause:</span> nixlbench: SG mode — set NEURON_RT_NUM_CORES=1</td></tr>
+<tr><td><span class="st fail">timeout</span></td><td class="key"><a href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#case-10-1-0-vm2-net-ucx-tcp-VV-WRITE-N-head-0"><code>vm2-net/ucx/tcp/VV/WRITE/N</code></a></td><td>vm2-net</td><td>10.1.0</td><td>timeout</td><td class="key"><span class="muted">last stderr line, not the cause:</span> nixlbench: SG mode — set NEURON_RT_NUM_CORES=1</td></tr>
+<tr><td><span class="st fail">timeout</span></td><td class="key"><a href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#case-10-1-0-vm2-net-ucx-ud-VV-WRITE-S-head-0"><code>vm2-net/ucx/ud/VV/WRITE/S</code></a></td><td>vm2-net</td><td>10.1.0</td><td>timeout</td><td class="key"><span class="muted">last stderr line, not the cause:</span> nixlbench: SG mode — set NEURON_RT_NUM_CORES=1</td></tr>
+<tr><td><span class="st fail">timeout</span></td><td class="key"><a href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#case-10-1-0-vm2-net-ucx-ud-VD-WRITE-S-head-0"><code>vm2-net/ucx/ud/VD/WRITE/S</code></a></td><td>vm2-net</td><td>10.1.0</td><td>timeout</td><td class="key"><span class="muted">last stderr line, not the cause:</span> nixlbench: SG mode — set NEURON_RT_NUM_CORES=1</td></tr>
+</tbody>
+</table>
+</div>
+<p>Showing 20 of 20: <a href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#failures">all 20 on the run page</a>, with command lines, exit codes and log paths.</p>
+<h2 id="runs">All runs</h2>
+<div class="scroll">
+<table class="grid">
+<thead><tr><th>Run</th><th>Branch</th><th>Commit</th><th>Tier</th><th>Reason</th><th>bench-container<br>10.1.0</th><th>bench-container<br>10.2.0</th><th>bench-container<br>7.14.1</th><th>vm1-fabric<br>10.1.0</th><th>vm1-local<br>10.1.0</th><th>vm1-loop<br>10.1.0</th><th>vm1-pcie<br>none</th><th>vm1-s3<br>none</th><th>vm2-lfverbs<br>none</th><th>vm2-net<br>10.1.0</th><th>Cases</th></tr></thead>
+<tbody>
+<tr><td><a href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html">2026-11-20 20:46 UTC</a></td><td class="wrap">for-upstream/feat/rocm-wheels</td><td><code>5a84605a50</code></td><td>nightly</td><td>dispatch</td><td><a class="st pass" title="pass 26, fail 0, timeout 0, crash 0, skip 8, blocked 7, not-run 0" href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#lane-bench-container-10-1-0">ok 26</a></td><td><a class="st pass" title="pass 26, fail 0, timeout 0, crash 0, skip 8, blocked 7, not-run 0" href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#lane-bench-container-10-2-0">ok 26</a></td><td><a class="st pass" title="pass 26, fail 0, timeout 0, crash 0, skip 8, blocked 7, not-run 0" href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#lane-bench-container-7-14-1">ok 26</a></td><td><a class="st fail" title="pass 24, fail 4, timeout 0, crash 0, skip 0, blocked 11, not-run 0" href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#lane-vm1-fabric-10-1-0">4 failed</a></td><td><a class="st fail" title="pass 38, fail 2, timeout 0, crash 0, skip 0, blocked 0, not-run 0" href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#lane-vm1-local-10-1-0">2 failed</a></td><td><a class="st fail" title="pass 16, fail 4, timeout 1, crash 0, skip 0, blocked 0, not-run 0" href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#lane-vm1-loop-10-1-0">5 failed</a></td><td><a class="st blocked" title="pass 0, fail 0, timeout 0, crash 0, skip 0, blocked 36, not-run 0" href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#lane-vm1-pcie-none">blocked</a></td><td><a class="st blocked" title="pass 0, fail 0, timeout 0, crash 0, skip 0, blocked 8, not-run 0" href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#lane-vm1-s3-none">blocked</a></td><td><a class="st blocked" title="pass 0, fail 0, timeout 0, crash 0, skip 0, blocked 4, not-run 0" href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#lane-vm2-lfverbs-none">blocked</a></td><td><a class="st fail" title="pass 25, fail 6, timeout 3, crash 0, skip 0, blocked 2, not-run 0" href="runs/20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.html#lane-vm2-net-10-1-0">9 failed</a></td><td class="nowrap"><span title="pass 181, fail 16, timeout 4, crash 0, skip 24, blocked 82, not-run 0"><span class="st fail">20 failed</span> of 307</span></td></tr>
+</tbody>
+</table>
+</div>
+<ul class="legend">
+<li><span class="st pass">ok N</span> every case that ran passed, N of them</li>
+<li><span class="st fail">N failed</span> failed, timed out, crashed or did not run</li>
+<li><span class="st skip">partial N</span> the lane stopped early</li>
+<li><span class="st skip">filtered N</span> the run was asked for a part of the lane</li>
+<li><span class="st blocked">blocked</span> the lane waits for work named on the run page</li>
+<li><span class="st fail">missing</span> the lane did not report</li>
+<li><span class="st muted">superseded</span> a later run of the same night replaced this lane</li>
+<li>- the run did not include the lane</li>
+<li>hover over a cell for all seven counts, skipped included</li>
+</ul>
+<h2 id="data">Data</h2>
+<p><a href="../data/bench/v1/manifest.json">manifest.json</a> lists every published run and its files; <a href="../data/bench/v1/latest.json">latest.json</a> is the latest run of each branch as shown above.</p>
+</body>
+</html>

@@ -1,0 +1,14 @@
+{
+"generation":1,
+"links":{"docs":"https://github.com/ROCm/nixl/blob/main-amd/.ci/docs/amd-bench.md","repo":"https://github.com/ROCm/nixl"},
+"quarantine":[],
+"repo":"ROCm/nixl",
+"schema":1,
+"schema_minor":0,
+"statuses":["pass","fail","timeout","crash","skip","blocked","not-run"],
+"test_statuses":["pass","fail","skip","timeout"],
+"updated_at":"2026-11-21T18:40:00Z",
+"shards":[
+{"authoritative":true,"bench_run_id":"44820022442","branch":"for-upstream/feat/rocm-wheels","bytes":132447,"files":[{"bytes":2187,"format":"ndjson.gz","kind":"run","name":"runs.ndjson.gz","rows":10,"sha256":"19e644ef364b8a5f880ccd890767636452db33cf6b84abcbfae8c00a3c681ea3"},{"bytes":34065,"format":"ndjson.gz","kind":"case","name":"cases.ndjson.gz","rows":307,"sha256":"e5e061f0ca9eb69f480205a9623da1408df7418c194530efda9f243f53edb575"},{"bytes":22475,"format":"ndjson.gz","kind":"sample","name":"samples.ndjson.gz","rows":739,"sha256":"a1a8a55798190913c0772c85420a67f702f3f15cb88629c20821972bf3cea67e"},{"bytes":5094,"format":"ndjson.gz","kind":"counter","name":"counters.ndjson.gz","rows":465,"sha256":"53422c3eacf9032e2a2ed141209eaa035508e974654718ac5f108dd477cbe55f"},{"bytes":1086,"format":"ndjson.gz","kind":"test","name":"tests.ndjson.gz","rows":134,"sha256":"21bbd5cc23ccfbfb81576c90bcc31b3d8ce57cda12eddd47d0a205f07bc16107"},{"bytes":67540,"format":"json","kind":"index","name":"index.json","rows":null,"sha256":"c86eb2807b3564dc103347cf1c8f14a56dea7e62ac628a51cdad3f98a760703a"}],"generation":1,"id":"20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1","lanes":{"bench-container/10.1.0":{"n":[26,0,0,0,8,7,0],"status":"complete"},"bench-container/10.2.0":{"n":[26,0,0,0,8,7,0],"status":"complete"},"bench-container/7.14.1":{"n":[26,0,0,0,8,7,0],"status":"complete"},"vm1-fabric/10.1.0":{"n":[24,4,0,0,0,11,0],"status":"complete"},"vm1-local/10.1.0":{"n":[38,2,0,0,0,0,0],"status":"complete"},"vm1-loop/10.1.0":{"n":[16,4,1,0,0,0,0],"status":"complete"},"vm1-pcie/none":{"n":[0,0,0,0,0,36,0],"status":"blocked"},"vm1-s3/none":{"n":[0,0,0,0,0,8,0],"status":"blocked"},"vm2-lfverbs/none":{"n":[0,0,0,0,0,4,0],"status":"blocked"},"vm2-net/10.1.0":{"n":[25,6,3,0,0,2,0],"status":"complete"}},"matrix_sha256":"58abeffc0085909e468f9f13ec86fd8460d8d6229627dff1034031523e00f1ae","n":[181,16,4,0,24,82,0],"nightly_run_id":"44814378049","path":"night/20261120T204631Z/for-upstream-feat-rocm-wheels/44820022442.a1","published_at":"2026-11-21T18:40:00Z","raw":{"bytes":72379,"collect":true,"logs":true,"records":"bench-20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.ndjson.gz","sha256":"0bc4feb58289c5120c1c46cfef3edb3a40a6010167ae0da2c13bcc4168ad30e6","tag":"bench-raw-2026-11"},"reason":"dispatch","rows":1655,"run_attempt":1,"sha":"5a84605a50fe69a86689f98b526989785f28d718","slug":"for-upstream-feat-rocm-wheels","stamp":"20261120T204631Z","superseded_by":{},"supersedes":[],"tests":[134,0,0,0],"tier":"nightly"}
+]
+}
