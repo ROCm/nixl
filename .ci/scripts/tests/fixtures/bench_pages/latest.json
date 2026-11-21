@@ -1,0 +1,664 @@
+{
+ "branches": {
+  "for-upstream-feat-rocm-wheels": {
+   "attention": [
+    {
+     "case_key": "vm1-fabric/ais/compat-allowed/WRITE/S",
+     "error_excerpt": "Consistency check failed for iov 0:0 | Consistency check failed for iov 0:1 | Consistency check failed for iov 0:2 | Consistency check failed for iov 0:3 | Consistency check failed",
+     "lane": "vm1-fabric",
+     "reason": "consistency",
+     "required": false,
+     "rocm_version": "10.1.0",
+     "round": 0,
+     "shard": "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1",
+     "status": "fail",
+     "variant": "head"
+    },
+    {
+     "case_key": "vm1-fabric/ais/compat-allowed/READ/S",
+     "error_excerpt": "Consistency check failed for iov 0:0 | Consistency check failed for iov 0:1 | Consistency check failed for iov 0:2 | Consistency check failed for iov 0:3 | Consistency check failed",
+     "lane": "vm1-fabric",
+     "reason": "consistency",
+     "required": false,
+     "rocm_version": "10.1.0",
+     "round": 0,
+     "shard": "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1",
+     "status": "fail",
+     "variant": "head"
+    },
+    {
+     "case_key": "vm1-fabric/ais/fast-required/WRITE/S",
+     "error_excerpt": "Consistency check failed for iov 0:0 | Consistency check failed for iov 0:1 | Consistency check failed for iov 0:2 | Consistency check failed for iov 0:3 | Consistency check failed",
+     "lane": "vm1-fabric",
+     "reason": "consistency",
+     "required": false,
+     "rocm_version": "10.1.0",
+     "round": 0,
+     "shard": "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1",
+     "status": "fail",
+     "variant": "head"
+    },
+    {
+     "case_key": "vm1-fabric/ais/fast-required/READ/S",
+     "error_excerpt": "Consistency check failed for iov 0:0 | Consistency check failed for iov 0:1 | Consistency check failed for iov 0:2 | Consistency check failed for iov 0:3 | Consistency check failed",
+     "lane": "vm1-fabric",
+     "reason": "consistency",
+     "required": false,
+     "rocm_version": "10.1.0",
+     "round": 0,
+     "shard": "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1",
+     "status": "fail",
+     "variant": "head"
+    },
+    {
+     "case_key": "vm1-local/ais/fast-required/WRITE/S",
+     "error_excerpt": "E1120 15:29:39.621153 9349 ais_mt_engine.cpp:103] AIS: hipFileWrite failed after 0 out of 65536 bytes: system error: No such device | E1120 15:29:39.621748 9348 ais_mt_engine.cpp:103] AIS: hipFileW...",
+     "lane": "vm1-local",
+     "reason": "exit-nonzero",
+     "required": false,
+     "rocm_version": "10.1.0",
+     "round": 0,
+     "shard": "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1",
+     "status": "fail",
+     "variant": "head"
+    },
+    {
+     "case_key": "vm1-local/ais/fast-required/READ/S",
+     "error_excerpt": "E1120 15:29:42.509433 9646 ais_mt_engine.cpp:103] AIS: hipFileRead failed after 0 out of 65536 bytes: system error: No such device | E1120 15:29:42.511310 9647 ais_mt_engine.cpp:103] AIS: hipFileRe...",
+     "lane": "vm1-local",
+     "reason": "exit-nonzero",
+     "required": false,
+     "rocm_version": "10.1.0",
+     "round": 0,
+     "shard": "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1",
+     "status": "fail",
+     "variant": "head"
+    },
+    {
+     "case_key": "vm1-loop/ucx/rc/DV/WRITE/S",
+     "error_excerpt": "Consistency check failed for iov 0:0 | Consistency check failed for iov 0:1 | Consistency check failed for iov 0:2 | Consistency check failed for iov 0:3 | Consistency check failed",
+     "lane": "vm1-loop",
+     "reason": "consistency",
+     "required": false,
+     "rocm_version": "10.1.0",
+     "round": 0,
+     "shard": "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1",
+     "status": "fail",
+     "variant": "head"
+    },
+    {
+     "case_key": "vm1-loop/ucx/rc/DV/READ/S",
+     "error_excerpt": "Consistency check failed for iov 0:0 | Consistency check failed for iov 0:1 | Consistency check failed for iov 0:2 | Consistency check failed for iov 0:3 | Consistency check failed",
+     "lane": "vm1-loop",
+     "reason": "consistency",
+     "required": false,
+     "rocm_version": "10.1.0",
+     "round": 0,
+     "shard": "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1",
+     "status": "fail",
+     "variant": "head"
+    },
+    {
+     "case_key": "vm1-loop/ucx/rc/VD/WRITE/S",
+     "error_excerpt": "Consistency check failed for iov 0:0 | Consistency check failed for iov 0:1 | Consistency check failed for iov 0:2 | Consistency check failed for iov 0:3 | Consistency check failed",
+     "lane": "vm1-loop",
+     "reason": "consistency",
+     "required": false,
+     "rocm_version": "10.1.0",
+     "round": 0,
+     "shard": "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1",
+     "status": "fail",
+     "variant": "head"
+    },
+    {
+     "case_key": "vm1-loop/ucx/rc/VD/READ/S",
+     "error_excerpt": "Consistency check failed for iov 0:0 | Consistency check failed for iov 0:1 | Consistency check failed for iov 0:2 | Consistency check failed for iov 0:3 | Consistency check failed",
+     "lane": "vm1-loop",
+     "reason": "consistency",
+     "required": false,
+     "rocm_version": "10.1.0",
+     "round": 0,
+     "shard": "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1",
+     "status": "fail",
+     "variant": "head"
+    },
+    {
+     "case_key": "vm2-net/ucx/rc/VV/WRITE/S",
+     "error_excerpt": "Consistency check failed for iov 0:0 | Consistency check failed for iov 0:1 | Consistency check failed for iov 0:2 | Consistency check failed for iov 0:3 | Consistency check failed",
+     "lane": "vm2-net",
+     "reason": "consistency",
+     "required": false,
+     "rocm_version": "10.1.0",
+     "round": 0,
+     "shard": "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1",
+     "status": "fail",
+     "variant": "head"
+    },
+    {
+     "case_key": "vm2-net/ucx/rc/VV/READ/S",
+     "error_excerpt": "Consistency check failed for iov 0:0 | Consistency check failed for iov 0:1 | Consistency check failed for iov 0:2 | Consistency check failed for iov 0:3 | Consistency check failed",
+     "lane": "vm2-net",
+     "reason": "consistency",
+     "required": false,
+     "rocm_version": "10.1.0",
+     "round": 0,
+     "shard": "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1",
+     "status": "fail",
+     "variant": "head"
+    },
+    {
+     "case_key": "vm2-net/ucx/rc/DV/WRITE/S",
+     "error_excerpt": "Consistency check failed for iov 0:0 | Consistency check failed for iov 0:1 | Consistency check failed for iov 0:2 | Consistency check failed for iov 0:3 | Consistency check failed",
+     "lane": "vm2-net",
+     "reason": "consistency",
+     "required": false,
+     "rocm_version": "10.1.0",
+     "round": 0,
+     "shard": "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1",
+     "status": "fail",
+     "variant": "head"
+    },
+    {
+     "case_key": "vm2-net/ucx/rc/DV/READ/S",
+     "error_excerpt": "Consistency check failed for iov 0:0 | Consistency check failed for iov 0:1 | Consistency check failed for iov 0:2 | Consistency check failed for iov 0:3 | Consistency check failed",
+     "lane": "vm2-net",
+     "reason": "consistency",
+     "required": false,
+     "rocm_version": "10.1.0",
+     "round": 0,
+     "shard": "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1",
+     "status": "fail",
+     "variant": "head"
+    },
+    {
+     "case_key": "vm2-net/ucx/rc/VD/WRITE/S",
+     "error_excerpt": "Consistency check failed for iov 0:0 | Consistency check failed for iov 0:1 | Consistency check failed for iov 0:2 | Consistency check failed for iov 0:3 | Consistency check failed",
+     "lane": "vm2-net",
+     "reason": "consistency",
+     "required": false,
+     "rocm_version": "10.1.0",
+     "round": 0,
+     "shard": "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1",
+     "status": "fail",
+     "variant": "head"
+    },
+    {
+     "case_key": "vm2-net/ucx/rc/VD/READ/S",
+     "error_excerpt": "Consistency check failed for iov 0:0 | Consistency check failed for iov 0:1 | Consistency check failed for iov 0:2 | Consistency check failed for iov 0:3 | Consistency check failed",
+     "lane": "vm2-net",
+     "reason": "consistency",
+     "required": false,
+     "rocm_version": "10.1.0",
+     "round": 0,
+     "shard": "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1",
+     "status": "fail",
+     "variant": "head"
+    },
+    {
+     "case_key": "vm1-loop/ucx/ud/VD/WRITE/S",
+     "error_excerpt": "nixlbench: SG mode \u2014 set NEURON_RT_NUM_CORES=1",
+     "lane": "vm1-loop",
+     "reason": "timeout",
+     "required": false,
+     "rocm_version": "10.1.0",
+     "round": 0,
+     "shard": "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1",
+     "status": "timeout",
+     "variant": "head"
+    },
+    {
+     "case_key": "vm2-net/ucx/tcp/VV/WRITE/N",
+     "error_excerpt": "nixlbench: SG mode \u2014 set NEURON_RT_NUM_CORES=1",
+     "lane": "vm2-net",
+     "reason": "timeout",
+     "required": false,
+     "rocm_version": "10.1.0",
+     "round": 0,
+     "shard": "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1",
+     "status": "timeout",
+     "variant": "head"
+    },
+    {
+     "case_key": "vm2-net/ucx/ud/VV/WRITE/S",
+     "error_excerpt": "nixlbench: SG mode \u2014 set NEURON_RT_NUM_CORES=1",
+     "lane": "vm2-net",
+     "reason": "timeout",
+     "required": false,
+     "rocm_version": "10.1.0",
+     "round": 0,
+     "shard": "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1",
+     "status": "timeout",
+     "variant": "head"
+    },
+    {
+     "case_key": "vm2-net/ucx/ud/VD/WRITE/S",
+     "error_excerpt": "nixlbench: SG mode \u2014 set NEURON_RT_NUM_CORES=1",
+     "lane": "vm2-net",
+     "reason": "timeout",
+     "required": false,
+     "rocm_version": "10.1.0",
+     "round": 0,
+     "shard": "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1",
+     "status": "timeout",
+     "variant": "head"
+    }
+   ],
+   "attention_total": 20,
+   "branch": "for-upstream/feat/rocm-wheels",
+   "headline": "manual",
+   "lanes": [
+    {
+     "calib_gbps": 13.6888,
+     "degraded": null,
+     "env_class": "gha-container",
+     "filtered": false,
+     "finished_at": "2026-11-20T21:26:41Z",
+     "guest_kernel": null,
+     "lane": "bench-container",
+     "lane_blocked_by": [],
+     "n": [
+      26,
+      0,
+      0,
+      0,
+      8,
+      7,
+      0
+     ],
+     "rocm_version": "10.1.0",
+     "run_uid": "128d58aa606e1ba1321b",
+     "runner_image": "ubuntu:24.04",
+     "shard": "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1",
+     "started_at": "2026-11-20T21:25:51Z",
+     "status": "complete",
+     "tests": [
+      0,
+      0,
+      0,
+      0
+     ],
+     "timing_trust": "container"
+    },
+    {
+     "calib_gbps": 19.5885,
+     "degraded": null,
+     "env_class": "gha-container",
+     "filtered": false,
+     "finished_at": "2026-11-20T21:26:27Z",
+     "guest_kernel": null,
+     "lane": "bench-container",
+     "lane_blocked_by": [],
+     "n": [
+      26,
+      0,
+      0,
+      0,
+      8,
+      7,
+      0
+     ],
+     "rocm_version": "10.2.0",
+     "run_uid": "e37c41bff46511ac8b3d",
+     "runner_image": "ubuntu:24.04",
+     "shard": "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1",
+     "started_at": "2026-11-20T21:25:45Z",
+     "status": "complete",
+     "tests": [
+      0,
+      0,
+      0,
+      0
+     ],
+     "timing_trust": "container"
+    },
+    {
+     "calib_gbps": 20.6532,
+     "degraded": null,
+     "env_class": "gha-container",
+     "filtered": false,
+     "finished_at": "2026-11-20T21:26:26Z",
+     "guest_kernel": null,
+     "lane": "bench-container",
+     "lane_blocked_by": [],
+     "n": [
+      26,
+      0,
+      0,
+      0,
+      8,
+      7,
+      0
+     ],
+     "rocm_version": "7.14.1",
+     "run_uid": "465238fe0994dc8aabf7",
+     "runner_image": "ubuntu:24.04",
+     "shard": "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1",
+     "started_at": "2026-11-20T21:25:44Z",
+     "status": "complete",
+     "tests": [
+      0,
+      0,
+      0,
+      0
+     ],
+     "timing_trust": "container"
+    },
+    {
+     "calib_gbps": 18.2503,
+     "degraded": null,
+     "env_class": "gha-kvm-vm1-nvmeof",
+     "filtered": false,
+     "finished_at": "2026-11-20T21:28:37Z",
+     "guest_kernel": "7.2.6-070206-generic",
+     "lane": "vm1-fabric",
+     "lane_blocked_by": [],
+     "n": [
+      24,
+      4,
+      0,
+      0,
+      0,
+      11,
+      0
+     ],
+     "rocm_version": "10.1.0",
+     "run_uid": "4813b7befaaaf3add23c",
+     "runner_image": "docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20261112.gdca6903-qemu.4cb9698-vfu.3719c3a@sha256:f7e61be3f29c82aeac60b8fa3f88ac3c434ab0f19a79bd144cb87ed9054aca03",
+     "shard": "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1",
+     "started_at": "2026-11-20T21:27:42Z",
+     "status": "complete",
+     "tests": [
+      6,
+      0,
+      0,
+      0
+     ],
+     "timing_trust": "emulated"
+    },
+    {
+     "calib_gbps": 9.5487,
+     "degraded": null,
+     "env_class": "gha-kvm-vm1",
+     "filtered": false,
+     "finished_at": "2026-11-20T21:33:41Z",
+     "guest_kernel": "7.2.6-070206-generic",
+     "lane": "vm1-local",
+     "lane_blocked_by": [],
+     "n": [
+      38,
+      2,
+      0,
+      0,
+      0,
+      0,
+      0
+     ],
+     "rocm_version": "10.1.0",
+     "run_uid": "4b994c389cdf6cc61683",
+     "runner_image": "docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20261112.gdca6903-qemu.4cb9698-vfu.3719c3a@sha256:f7e61be3f29c82aeac60b8fa3f88ac3c434ab0f19a79bd144cb87ed9054aca03",
+     "shard": "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1",
+     "started_at": "2026-11-20T21:28:16Z",
+     "status": "complete",
+     "tests": [
+      12,
+      0,
+      0,
+      0
+     ],
+     "timing_trust": "emulated"
+    },
+    {
+     "calib_gbps": 20.9556,
+     "degraded": null,
+     "env_class": "gha-kvm-vm1-loopback",
+     "filtered": false,
+     "finished_at": "2026-11-20T21:34:55Z",
+     "guest_kernel": "7.2.6-070206-generic",
+     "lane": "vm1-loop",
+     "lane_blocked_by": [],
+     "n": [
+      16,
+      4,
+      1,
+      0,
+      0,
+      0,
+      0
+     ],
+     "rocm_version": "10.1.0",
+     "run_uid": "aa2f04b85080e16937f3",
+     "runner_image": "docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20261112.gdca6903-qemu.4cb9698-vfu.3719c3a@sha256:f7e61be3f29c82aeac60b8fa3f88ac3c434ab0f19a79bd144cb87ed9054aca03",
+     "shard": "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1",
+     "started_at": "2026-11-20T21:28:05Z",
+     "status": "complete",
+     "tests": [
+      34,
+      0,
+      0,
+      0
+     ],
+     "timing_trust": "emulated"
+    },
+    {
+     "calib_gbps": null,
+     "degraded": null,
+     "env_class": "gha-kvm-vm1-spdk",
+     "filtered": false,
+     "finished_at": null,
+     "guest_kernel": null,
+     "lane": "vm1-pcie",
+     "lane_blocked_by": [
+      "W10",
+      "W11",
+      "W13"
+     ],
+     "n": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      36,
+      0
+     ],
+     "rocm_version": "none",
+     "run_uid": "20a43d42024b75b7242e",
+     "runner_image": null,
+     "shard": "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1",
+     "started_at": null,
+     "status": "blocked",
+     "tests": [
+      0,
+      0,
+      0,
+      0
+     ],
+     "timing_trust": "emulated"
+    },
+    {
+     "calib_gbps": null,
+     "degraded": null,
+     "env_class": "gha-kvm-vm1-s3",
+     "filtered": false,
+     "finished_at": null,
+     "guest_kernel": null,
+     "lane": "vm1-s3",
+     "lane_blocked_by": [
+      "W11",
+      "W14",
+      "W4"
+     ],
+     "n": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      8,
+      0
+     ],
+     "rocm_version": "none",
+     "run_uid": "0f82534a67d4b8cf36fa",
+     "runner_image": null,
+     "shard": "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1",
+     "started_at": null,
+     "status": "blocked",
+     "tests": [
+      0,
+      0,
+      0,
+      0
+     ],
+     "timing_trust": "emulated"
+    },
+    {
+     "calib_gbps": null,
+     "degraded": null,
+     "env_class": "gha-kvm-vm2",
+     "filtered": false,
+     "finished_at": null,
+     "guest_kernel": null,
+     "lane": "vm2-lfverbs",
+     "lane_blocked_by": [
+      "W11",
+      "W15"
+     ],
+     "n": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      4,
+      0
+     ],
+     "rocm_version": "none",
+     "run_uid": "6df9489ead8acdff8494",
+     "runner_image": null,
+     "shard": "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1",
+     "started_at": null,
+     "status": "blocked",
+     "tests": [
+      0,
+      0,
+      0,
+      0
+     ],
+     "timing_trust": "emulated"
+    },
+    {
+     "calib_gbps": 20.3075,
+     "degraded": null,
+     "env_class": "gha-kvm-vm2",
+     "filtered": false,
+     "finished_at": "2026-11-20T21:45:43Z",
+     "guest_kernel": "7.2.6-070206-generic",
+     "lane": "vm2-net",
+     "lane_blocked_by": [],
+     "n": [
+      25,
+      6,
+      3,
+      0,
+      0,
+      2,
+      0
+     ],
+     "rocm_version": "10.1.0",
+     "run_uid": "f0671ab182f823861917",
+     "runner_image": "docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20261112.gdca6903-qemu.4cb9698-vfu.3719c3a@sha256:f7e61be3f29c82aeac60b8fa3f88ac3c434ab0f19a79bd144cb87ed9054aca03",
+     "shard": "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1",
+     "started_at": "2026-11-20T21:28:29Z",
+     "status": "complete",
+     "tests": [
+      82,
+      0,
+      0,
+      0
+     ],
+     "timing_trust": "emulated"
+    }
+   ],
+   "newer": null,
+   "ratios": [
+    {
+     "den": "vm1-local/ucx/tcp/DD/WRITE/N",
+     "key": "vm1-local/vram-dram/tcp/WRITE/N",
+     "kind": "vram-dram",
+     "lane": "vm1-local",
+     "num": "vm1-local/ucx/tcp/VV/WRITE/N",
+     "points": [
+      [
+       4096,
+       4,
+       0.000461,
+       0.298655,
+       0.0015
+      ],
+      [
+       8192,
+       4,
+       0.000971,
+       0.518391,
+       0.0019
+      ]
+     ],
+     "rocm_version": "10.1.0",
+     "shard": "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1",
+     "status": "ok"
+    },
+    {
+     "den": "vm2-net/ucx/tcp/DD/WRITE/N",
+     "key": "vm2-net/vram-dram/tcp/WRITE/N",
+     "kind": "vram-dram",
+     "lane": "vm2-net",
+     "num": "vm2-net/ucx/tcp/VV/WRITE/N",
+     "points": [],
+     "rocm_version": "10.1.0",
+     "shard": "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1",
+     "status": "unavailable",
+     "why": "num timeout"
+    },
+    {
+     "den": "vm1-s3/obj/hipobj/DRAM/WRITE/N",
+     "key": "vm1-s3/vram-dram/hipobj/WRITE/N",
+     "kind": "vram-dram",
+     "lane": "vm1-s3",
+     "num": "vm1-s3/obj/hipobj/VRAM/WRITE/N",
+     "points": [],
+     "rocm_version": "none",
+     "shard": "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1",
+     "status": "unavailable",
+     "why": "num blocked"
+    }
+   ],
+   "sha": "5a84605a50fe69a86689f98b526989785f28d718",
+   "shards": [
+    "20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1"
+   ],
+   "stale": false,
+   "stamp": "20261120T204631Z",
+   "tests": {
+    "fail": 0,
+    "pass": 134,
+    "skip": 0,
+    "timeout": 0
+   },
+   "tests_attention": [],
+   "tests_attention_total": 0,
+   "tier": "nightly",
+   "totals": {
+    "blocked": 82,
+    "crash": 0,
+    "fail": 16,
+    "not-run": 0,
+    "pass": 181,
+    "skip": 24,
+    "timeout": 4
+   }
+  }
+ },
+ "generation": 1,
+ "schema": 1,
+ "schema_minor": 0
+}
