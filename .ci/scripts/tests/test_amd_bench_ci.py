@@ -274,6 +274,17 @@ class PlanTest(Scratch):
         meta = json.loads(outputs["vm"][0]["meta"])
         self.assertEqual((meta["tier"], meta["reason"]), ("pr", "dispatch"))
 
+    def test_the_weekly_tier_is_planned_like_the_nightly(self) -> None:
+        code, outputs, _, _ = self.plan(
+            tier="weekly", lanes="vm2-net vm1-loop", event="workflow_dispatch"
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(outputs["tier"], "weekly")
+        self.assertEqual({e["lane"] for e in outputs["vm"]}, {"vm2-net", "vm1-loop"})
+        self.assertEqual(outputs["container"], [])
+        meta = json.loads(outputs["vm"][0]["meta"])
+        self.assertEqual((meta["tier"], meta["reason"]), ("weekly", "dispatch"))
+
     def test_a_lane_that_is_blocked_or_absent_is_dropped(self) -> None:
         text = (MATRIX / "lanes" / "vm1-fabric.toml").read_text()
         blocked = text.replace(
@@ -315,7 +326,7 @@ class PlanTest(Scratch):
         self.assertIn("bench-container vm1-local vm2-net vm1-loop vm1-fabric", err)
 
     def test_a_tier_or_glob_that_is_not_one_is_refused(self) -> None:
-        self.assertEqual(self.plan(tier="weekly")[0], 2)
+        self.assertEqual(self.plan(tier="monthly")[0], 2)
         self.assertEqual(self.plan(only="vm1-local/* $(id)")[0], 2)
         # The runner would take a glob that starts with a dash for an option.
         for bad in ("-x*", "vm1-local/* --tier", "-"):
@@ -805,6 +816,8 @@ class RealMatrixTest(Scratch):
             [item.split("=")[0] for item in pr["expect"].split()],
             ["bench-container", "vm1-local"],
         )
+        weekly = json.loads(self.plan("weekly")["collect"])["include"][0]
+        self.assertEqual(weekly["expect"], nightly["expect"])
 
     def test_every_lane_has_a_job_and_every_job_a_lane(self) -> None:
         matrix = lib.load_matrix(REAL_MATRIX)
@@ -978,6 +991,120 @@ class StackRenderTest(Scratch):
         done = self.render("vm3-none", {})
         self.assertEqual(done.returncode, 2)
         self.assertNotIn("vm3", done.stdout + done.stderr)
+
+
+class GuestCpuTest(Scratch):
+    """'guest-cpu' on what 'amd_bench_guest.sh facts' printed in a guest."""
+
+    CPUINFO = (
+        "processor\t: 0\nvendor_id\t: GenuineIntel\ncpu family\t: 6\n"
+        "model\t\t: 207\nmodel name\t: INTEL(R) XEON(R) PLATINUM 8573C\n\n"
+        "processor\t: 1\nvendor_id\t: Other\nmodel name\t: second\n\n"
+    )
+
+    def guest_cpu(self, guest: str, *lines: str, lane: str = "vm2-net") -> list[str]:
+        facts = self.tmp / f"{guest}-facts.txt"
+        if lines:
+            facts.write_text("".join(line + "\n" for line in lines))
+        cpuinfo = self.tmp / "cpuinfo"
+        cpuinfo.write_text(self.CPUINFO)
+        code, out, err = call(
+            "guest-cpu",
+            "--lane",
+            lane,
+            "--guest",
+            guest,
+            "--facts",
+            str(facts),
+            "--cpuinfo",
+            str(cpuinfo),
+            "--notes",
+            str(self.tmp / "notes.txt"),
+        )
+        self.assertEqual((code, err), (0, ""))
+        return out.splitlines()
+
+    @staticmethod
+    def printed(
+        vendor: str, family: str, name: str = "AMD_EPYC_Processor"
+    ) -> list[str]:
+        return [
+            "--- CPU",
+            f"vendor_id: {vendor}; cpu family: {family}",
+            f"CPU_VENDOR={vendor}",
+            f"CPU_FAMILY={family}",
+            "CPU_MODEL=1",
+            f"CPU_MODEL_NAME={name}",
+        ]
+
+    def test_an_amd_zen_guest_is_stated_and_not_warned_about(self) -> None:
+        for family in ("23", "26"):
+            lines = self.guest_cpu("guest1", *self.printed("AuthenticAMD", family))
+            self.assertEqual(
+                lines,
+                [
+                    "::notice title=AMD bench vm2-net guest CPU::guest1 reports the "
+                    f"CPU vendor AuthenticAMD, family {family}, model 1 "
+                    "(AMD_EPYC_Processor); the runner's CPU is GenuineIntel, "
+                    "INTEL(R) XEON(R) PLATINUM 8573C"
+                ],
+            )
+
+    def test_a_guest_that_is_not_amd_zen_is_warned_about(self) -> None:
+        lines = self.guest_cpu("guest2", *self.printed("GenuineIntel", "6", "x"))
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[0].startswith("::notice title=AMD bench vm2-net guest"))
+        self.assertIn("guest2 reports the CPU vendor GenuineIntel, family 6", lines[0])
+        self.assertTrue(lines[1].startswith("::warning title=AMD bench vm2-net guest"))
+        self.assertIn("guest2 is GenuineIntel, not AuthenticAMD", lines[1])
+        self.assertIn("expected to refuse peer-to-peer DMA", lines[1])
+        self.assertTrue(lines[1].endswith("No case is skipped for it."))
+        old = self.guest_cpu("guest", *self.printed("AuthenticAMD", "21"))
+        self.assertIn("guest is 21, not 23 (Zen) or later", old[1])
+        notes = (self.tmp / "notes.txt").read_text().splitlines()
+        self.assertEqual(len(notes), 4)
+        self.assertIn("not AuthenticAMD", notes[1])
+
+    def test_the_last_value_a_guest_printed_counts(self) -> None:
+        lines = self.guest_cpu(
+            "guest",
+            *self.printed("GenuineIntel", "6"),
+            *self.printed("AuthenticAMD", "23"),
+            "CPU_VENDOR=not plain::warning::x",
+        )
+        self.assertEqual(len(lines), 1)
+        self.assertIn("vendor AuthenticAMD, family 23", lines[0])
+
+    def test_a_guest_that_printed_nothing_usable_fails_nothing(self) -> None:
+        for lines in (
+            [],
+            ["ssh: connect to host guest port 2222: Connection refused"],
+            self.printed("unknown", "unknown", "unknown"),
+            self.printed("AuthenticAMD", "0x17"),
+            ["CPU_VENDOR=a::warning::b", "CPU_FAMILY=23"],
+        ):
+            with self.subTest(lines=lines):
+                out = self.guest_cpu("guest", *lines, lane="vm1-fabric")
+                self.assertEqual(len(out), 2, out)
+                self.assertIn("CPU of guest could not be read", out[1])
+                self.assertNotIn("expected to refuse", out[1])
+                self.assertNotIn("a::warning::b", " ".join(out))
+
+    def test_names_that_are_not_plain_are_not_echoed(self) -> None:
+        code, out, _ = call(
+            "guest-cpu",
+            "--lane",
+            "vm9::error::x",
+            "--guest",
+            "g::error::y",
+            "--facts",
+            str(self.tmp / "absent"),
+            "--cpuinfo",
+            str(self.tmp / "absent"),
+        )
+        self.assertEqual(code, 0)
+        self.assertNotIn("error", out)
+        self.assertIn("the runner's CPU is unknown", out)
 
 
 if __name__ == "__main__":

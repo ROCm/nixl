@@ -162,6 +162,8 @@ META_KEYS = (
     "spdk_digest ib_mtu"
 ).split()
 EXCERPT_MAX = 500
+TIMEOUT_MAX = 480
+TIMEOUT_MAX_WEEKLY = 900
 SECRET_FLAGS = (
     "obj_access_key",
     "obj_secret_key",
@@ -796,8 +798,10 @@ def _build_case(
     threads, timeout_s = raw.get("threads", 1), raw.get("timeout_s", 300)
     if threads < 1:
         report.add(where, "'threads' must be at least 1")
-    if not 1 <= timeout_s <= 480:
-        report.add(where, "'timeout_s' must be between 1 and 480")
+    # Only a case no nightly runs may take longer than a nightly case.
+    longest = TIMEOUT_MAX_WEEKLY if raw.get("tier") == "weekly" else TIMEOUT_MAX
+    if not 1 <= timeout_s <= longest:
+        report.add(where, f"'timeout_s' must be between 1 and {longest}")
     needs = set(raw.get("needs", []))
     for name in sorted(needs - set(NEEDS)):
         report.add(where, f"unknown need '{name}'")

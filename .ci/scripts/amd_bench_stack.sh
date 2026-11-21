@@ -22,6 +22,8 @@
 #   rocm           check the guests' ROCm version
 #   gpu            stage the GPU firmware and load amdgpu; a failure withholds
 #                  'gpu' and does not fail
+#   facts          record the runner's and the guests' CPU and what
+#                  peer-to-peer DMA in the guests rests on; never fails
 #   prepare        the lane's own preparation of drives and NICs
 #   install        install the wheels in every guest
 #   preflight      require 'nixlbench --version' to run in every guest
@@ -475,6 +477,34 @@ cmd_gpu() {
   if [[ "$limit" =~ ^[0-9]+$ ]]; then meta_set_int gpu_vram_limit "$limit"; fi
 }
 
+# The guest's kernel allows peer-to-peer DMA across a host bridge only on an
+# AMD CPU of family 23 (Zen) or later, and a transfer between GPU memory and
+# the NIC or an NVMe drive is one. This records what each guest shows, and
+# 'amd_bench_ci.py guest-cpu' states it and warns. No case is skipped and
+# nothing is withheld for it.
+cmd_facts() {
+  set +e
+  local guest
+  mkdir -p "$BENCH_DIAG"
+  {
+    # The first processor: in the job container that is the runner's.
+    sed '/^$/q' /proc/cpuinfo
+    echo "processors: $(grep -c '^processor' /proc/cpuinfo)"
+    lscpu 2>&1
+  } > "${BENCH_DIAG}/runner-cpu.txt"
+  for guest in "${GUESTS[@]}"; do
+    echo "::group::${guest}"
+    # Before any case: a guest that logs every refused request has lost its
+    # boot messages by the end of the lane.
+    ssh -F "$SSH_CONFIG" "$guest" 'sudo -n dmesg' > "${BENCH_DIAG}/${guest}-dmesg-start.txt" 2>&1
+    guest_run "$guest" "${guest}-facts.txt" facts
+    echo "::endgroup::"
+    python3 "${scripts}/amd_bench_ci.py" guest-cpu --lane "$LANE" --guest "$guest" \
+      --facts "${BENCH_DIAG}/${guest}-facts.txt" --notes "${BENCH_DIAG}/notes.txt"
+  done
+  return 0
+}
+
 # The device is the guest's only once a second ssh session has opened it for
 # writing, closed it, and still owns it. Anything less withholds 'blkdev'.
 raw_device() {
@@ -642,12 +672,23 @@ cmd_render() {
 
 cmd_diagnostics() {
   set +e
-  local out=$BENCH_DIAG guest n c raw=""
+  local out=$BENCH_DIAG guest n c p2p raw=""
   mkdir -p "$out"
   if [ -s "${work}/raw-dev" ]; then raw=$(cat "${work}/raw-dev"); fi
   if [ -s "$SSH_CONFIG" ]; then
     for guest in "${GUESTS[@]}"; do
       ssh -F "$SSH_CONFIG" "$guest" 'sudo -n dmesg' > "${out}/${guest}-dmesg.txt" 2>&1
+      # Counted, without the timestamps: a refusal may be logged for every
+      # request, and by then the log holds nothing else.
+      p2p=$(grep -ci p2p "${out}/${guest}-dmesg.txt")
+      {
+        echo "${p2p:-0} line(s) of ${guest}-dmesg.txt mention p2p; the most frequent:"
+        grep -i p2p "${out}/${guest}-dmesg.txt" | sed 's/^\[[^]]*\] *//' \
+          | sort | uniq -c | sort -rn | head -n 40
+      } > "${out}/${guest}-dmesg-p2p.txt"
+      if [ "${p2p:-0}" -gt 0 ]; then
+        echo "::notice title=AMD bench ${LANE}::the kernel log of ${guest} has ${p2p} line(s) about peer-to-peer DMA at the end of the lane; see ${guest}-dmesg-p2p.txt in the diagnostics"
+      fi
       if [[ "$raw" =~ ^/dev/nvme[0-9]+n[0-9]+$ ]]; then
         ssh -F "$SSH_CONFIG" "$guest" bash -s -- state "$raw" \
           < "${scripts}/amd_bench_guest.sh" > "${out}/${guest}-state.txt" 2>&1
@@ -723,6 +764,7 @@ case "${1:-}" in
   ssh) cmd_ssh ;;
   rocm) cmd_rocm ;;
   gpu) cmd_gpu ;;
+  facts) cmd_facts ;;
   prepare) cmd_prepare ;;
   install) cmd_install ;;
   preflight) cmd_preflight ;;

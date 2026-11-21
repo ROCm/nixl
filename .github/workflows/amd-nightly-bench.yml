@@ -35,12 +35,15 @@ on:
         type: string
         default: all
       tier:
-        description: The tier of cases to run.
+        description: >-
+          The tier of cases to run. weekly adds the experiment cases, and is
+          meant to be used with "only".
         required: false
         type: choice
         options:
           - nightly
           - pr
+          - weekly
         default: nightly
       only:
         description: Case-key globs separated by spaces; only the cases that match one are run. Empty means all.

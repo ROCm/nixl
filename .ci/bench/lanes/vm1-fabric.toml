@@ -227,3 +227,77 @@ tgt_mem = "KV"
 op = "QUERY"
 status = "blocked"
 blocked_by = ["W13", "W11"]
+
+# Experiments, see "Experiments you can dispatch" in .ci/docs/amd-bench.md.
+# The cases under x-vram are in the weekly tier, which no schedule runs. Each
+# is a nightly case with one thing changed: take "x-vram/<change>/" out of
+# its key for the case it is compared with. They use the directories of the
+# cases they are compared with, so they need no more of the file system.
+#
+# AIS failed the data check at S and passed at N. buf64 is S with the 64 MiB
+# buffer N has on VRAM, and buf32 is N with the 32 MiB one of S, so that the
+# buffer's size is told from the rest of a profile.
+[[case]]
+key = "vm1-fabric/x-vram/buf64/ais/{path}/{op}/S"
+workload = "x-vram/buf64/ais/{path}/{op}/S"
+profile = "S"
+backend = "AIS"
+engine = "{path}"
+init_mem = "VRAM"
+tgt_mem = "FILE"
+tier = "weekly"
+flags = { gds_mt_num_threads = 4, filepath = "{ais_dir}/{op}", total_buffer_size = 67108864 }
+[case.axes]
+path = ["compat-allowed", "fast-required"]
+op = ["WRITE", "READ"]
+[[case.when]]
+match = { path = "compat-allowed" }
+[case.when.set]
+env = { HIPFILE_ALLOW_COMPAT_MODE = "true", HIPFILE_UNSUPPORTED_FILE_SYSTEMS = "true" }
+[[case.when]]
+match = { path = "fast-required" }
+[case.when.set]
+direct = true
+env = { HIPFILE_ALLOW_COMPAT_MODE = "false", HIPFILE_FORCE_COMPAT_MODE = "false" }
+
+[[case]]
+key = "vm1-fabric/x-vram/buf32/ais/compat-allowed/WRITE/N"
+workload = "x-vram/buf32/ais/compat-allowed/WRITE/N"
+profile = "N"
+backend = "AIS"
+engine = "compat-allowed"
+init_mem = "VRAM"
+tgt_mem = "FILE"
+op = "WRITE"
+tier = "weekly"
+timeout_s = 360
+flags = { gds_mt_num_threads = 4, filepath = "{ais_dir}/WRITE", total_buffer_size = 33554432 }
+env = { HIPFILE_ALLOW_COMPAT_MODE = "true", HIPFILE_UNSUPPORTED_FILE_SYSTEMS = "true" }
+
+# S failed before its first row, in a process that lives 2 s. At the 1.6 ms
+# an iteration of N at the same block size (one is a batch of 4 blocks) the
+# 80 iterations of S take about 125 ms and this warm-up lasts about 13 s, so
+# a result that depends on how old the buffer is changes.
+[[case]]
+key = "vm1-fabric/x-vram/warm/ais/{path}/{op}/S"
+workload = "x-vram/warm/ais/{path}/{op}/S"
+profile = "S"
+backend = "AIS"
+engine = "{path}"
+init_mem = "VRAM"
+tgt_mem = "FILE"
+tier = "weekly"
+timeout_s = 360
+flags = { gds_mt_num_threads = 4, filepath = "{ais_dir}/{op}", warmup_iter = 8192 }
+[case.axes]
+path = ["compat-allowed", "fast-required"]
+op = ["WRITE", "READ"]
+[[case.when]]
+match = { path = "compat-allowed" }
+[case.when.set]
+env = { HIPFILE_ALLOW_COMPAT_MODE = "true", HIPFILE_UNSUPPORTED_FILE_SYSTEMS = "true" }
+[[case.when]]
+match = { path = "fast-required" }
+[case.when.set]
+direct = true
+env = { HIPFILE_ALLOW_COMPAT_MODE = "false", HIPFILE_FORCE_COMPAT_MODE = "false" }

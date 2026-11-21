@@ -12,16 +12,22 @@
     amd_bench_ci.py meta --base JSON --out FILE [--set KEY=VALUE]...
         [--set-int KEY=N]...
     amd_bench_ci.py vram-timing --records FILE --out FILE
+    amd_bench_ci.py guest-cpu --lane LANE --guest NAME --facts FILE
+        [--cpuinfo FILE] [--notes FILE]
 
 'plan' reads what a finished "AMD Nightly" or "ROCm Wheels" run left behind
 and appends the job matrices of amd-nightly-bench.yml to --output, in the
 form of $GITHUB_OUTPUT. 'env' renders the template of a lane's env class to
 the JSON env file of amd_bench_run.py. 'meta' writes a --run-meta file.
 'vram-timing' lists the wall time of every case that used GPU memory.
+'guest-cpu' states the CPU a guest printed with 'amd_bench_guest.sh facts'
+as a notice, and warns when the guest's kernel would refuse peer-to-peer DMA
+on it.
 
 'plan', 'env' and 'meta' exit 0, or 2 when what they were given cannot be
-used; 'vram-timing' always exits 0. Run it as 'python3 amd_bench_ci.py',
-never with -I: it needs amd_bench_lib.py beside it and the standard library.
+used; 'vram-timing' and 'guest-cpu' always exit 0. Run it as 'python3
+amd_bench_ci.py', never with -I: it needs amd_bench_lib.py beside it and the
+standard library.
 """
 
 from __future__ import annotations
@@ -46,7 +52,8 @@ LANES = ("bench-container", "vm1-local", "vm2-net", "vm1-loop", "vm1-fabric")
 CONTAINER_LANE = "bench-container"
 # A failure of any other lane is reported and does not fail its job.
 HARD_LANES = ("bench-container", "vm1-local")
-PLAN_TIERS = ("pr", "nightly")
+# The nightly runs 'nightly'; the others are started by hand.
+PLAN_TIERS = lib.TIERS
 JOB_VALUE = "@job"
 NIXL_ARTIFACT = "rocm-nixl-wheels"
 NIXLBENCH_ARTIFACT = "rocm-nixlbench-wheel"
@@ -116,6 +123,10 @@ def say(text: str) -> None:
 
 def notice(title: str, text: str) -> None:
     say(f"::notice title={clean(title)}::{clean(text)}")
+
+
+def warning(title: str, text: str) -> None:
+    say(f"::warning title={clean(title)}::{clean(text)}")
 
 
 def read_json(path: pathlib.Path, what: str) -> Any:
@@ -744,6 +755,98 @@ def cmd_vram_timing(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- guest-cpu ------------------------------------------------------------
+
+CPU_KEYS = ("CPU_VENDOR", "CPU_FAMILY", "CPU_MODEL", "CPU_MODEL_NAME")
+PLAIN_RE = re.compile(r"[A-Za-z0-9_.-]+")
+# cpu_supports_p2pdma() in the kernel's drivers/pci/p2pdma.c: across a host
+# bridge, peer-to-peer DMA is allowed on an AMD CPU of family Zen or later.
+P2PDMA_VENDOR = "AuthenticAMD"
+P2PDMA_FAMILY = 23
+P2PDMA_REFUSED = (
+    "its kernel is expected to refuse peer-to-peer DMA between the GPU and "
+    "another device, so the cases that move data between VRAM and the NIC or "
+    "an NVMe drive are expected to fail on this runner. No case is skipped "
+    "for it."
+)
+
+
+def guest_cpu(text: str) -> dict[str, str]:
+    """The last plain value a guest printed for each CPU_ key."""
+    found: dict[str, str] = {}
+    for line in text.splitlines():
+        key, equals, value = line.partition("=")
+        if equals and key in CPU_KEYS and PLAIN_RE.fullmatch(value):
+            found[key] = value
+    return {key: value for key, value in found.items() if value != "unknown"}
+
+
+def runner_cpu(text: str) -> str:
+    """Vendor and model name of the first processor of a cpuinfo file."""
+    first: dict[str, str] = {}
+    for line in text.splitlines():
+        if not line.strip():
+            break
+        key, _, value = line.partition(":")
+        first.setdefault(key.strip(), value.strip())
+    parts = [first.get("vendor_id", ""), first.get("model name", "")]
+    return ", ".join(part for part in parts if part) or "unknown"
+
+
+def cpu_messages(guest: str, cpu: Mapping[str, str], runner: str) -> tuple[str, str]:
+    """(what the guest's CPU is, why peer-to-peer DMA is in doubt or nothing)."""
+    vendor, family = cpu.get("CPU_VENDOR"), cpu.get("CPU_FAMILY")
+    stated = (
+        f"{guest} reports the CPU vendor {vendor or 'unknown'}, family "
+        f"{family or 'unknown'}, model {cpu.get('CPU_MODEL', 'unknown')} "
+        f"({cpu.get('CPU_MODEL_NAME', 'unknown')}); the runner's CPU is {runner}"
+    )
+    if vendor is None or family is None or not family.isascii() or not family.isdigit():
+        doubt = (
+            f"the CPU of {guest} could not be read, so whether its kernel allows "
+            "peer-to-peer DMA between the GPU and another device is not known"
+        )
+    elif vendor != P2PDMA_VENDOR:
+        doubt = (
+            f"the CPU vendor of {guest} is {vendor}, not {P2PDMA_VENDOR}: "
+            f"{P2PDMA_REFUSED}"
+        )
+    elif int(family) < P2PDMA_FAMILY:
+        doubt = (
+            f"the CPU family of {guest} is {family}, not {P2PDMA_FAMILY} (Zen) "
+            f"or later: {P2PDMA_REFUSED}"
+        )
+    else:
+        doubt = ""
+    return stated, doubt
+
+
+def cmd_guest_cpu(args: argparse.Namespace) -> int:
+    """Never fails its step: it records and warns, and gates nothing."""
+    lane = args.lane if LANE_RE.fullmatch(args.lane) else "lane"
+    guest = args.guest if HOST_RE.fullmatch(args.guest) else "the guest"
+    texts = []
+    for path in (args.facts, args.cpuinfo):
+        try:
+            texts.append(path.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            texts.append("")
+    stated, doubt = cpu_messages(guest, guest_cpu(texts[0]), runner_cpu(texts[1]))
+    title = f"AMD bench {lane} guest CPU"
+    notice(title, stated)
+    if doubt:
+        warning(title, doubt)
+    if args.notes is not None:
+        try:
+            with open(args.notes, "a", encoding="utf-8") as stream:
+                stream.write(
+                    "".join(f"{clean(text)}\n" for text in (stated, doubt) if text)
+                )
+        except OSError as exc:
+            sys.stderr.write(f"amd_bench_ci.py: cannot write {args.notes}: {exc}\n")
+    return 0
+
+
 # --- command line ---------------------------------------------------------
 
 
@@ -787,6 +890,14 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     timing.set_defaults(handler=cmd_vram_timing)
     timing.add_argument("--records", type=path, required=True, metavar="FILE")
     timing.add_argument("--out", type=path, required=True, metavar="FILE")
+
+    cpu = commands.add_parser("guest-cpu")
+    cpu.set_defaults(handler=cmd_guest_cpu)
+    cpu.add_argument("--lane", required=True)
+    cpu.add_argument("--guest", required=True, metavar="NAME")
+    cpu.add_argument("--facts", type=path, required=True, metavar="FILE")
+    cpu.add_argument("--cpuinfo", type=path, default=path("/proc/cpuinfo"))
+    cpu.add_argument("--notes", type=path, metavar="FILE")
     return parser.parse_args(argv)
 
 
