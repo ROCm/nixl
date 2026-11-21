@@ -1,0 +1,977 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: AMD Bench Publish
+
+# Publishes the records a finished "AMD Nightly Bench" run collected: the raw
+# files go to the monthly pre-release bench-raw-YYYY-MM, the shards to
+# data/bench/v1/ on gh-pages and the pages to bench/. It follows only a bench
+# run that itself followed a nightly; any other bench run is published by
+# hand, on its run id. See .ci/docs/amd-bench.md.
+#
+# It is the third writer of gh-pages. It stages nothing outside data/bench/v1
+# and bench, never forces a push and has a job group of its own, so it cannot
+# hold up the results page or the wheel index.
+
+on:
+  workflow_run:
+    workflows:
+      - AMD Nightly Bench
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      run-id:
+        description: Run ids of the "AMD Nightly Bench" runs to publish, separated by spaces, at most 10.
+        required: true
+        type: string
+      target-branch:
+        description: Branch to push to. gh-pages-staging is not served.
+        required: false
+        type: choice
+        options:
+          - gh-pages
+          - gh-pages-staging
+        default: gh-pages
+      dry-run:
+        description: Build the pages and the data and keep them as an artifact. Nothing is pushed or archived.
+        required: false
+        type: boolean
+        default: false
+      rerender:
+        description: Also rebuild the derived files (index.json, the pages) of every published run.
+        required: false
+        type: boolean
+        default: false
+      max-shard-mib:
+        description: Size limit in MiB of the data one branch of one run may add.
+        required: false
+        type: string
+        default: '4'
+
+permissions: {}
+
+concurrency:
+  group: amd-bench-publish-${{ github.event.workflow_run.id || inputs.run-id }}
+  cancel-in-progress: false
+
+env:
+  PYTHONDONTWRITEBYTECODE: 1
+
+jobs:
+  plan:
+    name: Select the artifacts to publish
+    # Only the bench run that followed a nightly publishes itself: such a run
+    # was started by workflow_run, on the default branch, with every lane and
+    # no filter. A run in which the bench's own plan was skipped is skipped
+    # here too. A run id given by hand is checked, and refused with an error,
+    # in the first step.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (vars.AMD_NIGHTLY_ENABLED == 'true' &&
+       vars.AMD_BENCH_PUBLISH != 'false' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
+       github.event.workflow_run.head_branch == github.event.repository.default_branch &&
+       github.event.workflow_run.event == 'workflow_run' &&
+       github.event.workflow_run.conclusion != 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+    outputs:
+      sources: ${{ steps.select.outputs.sources }}
+      count: ${{ steps.select.outputs.count }}
+      target: ${{ steps.select.outputs.target }}
+      dry-run: ${{ steps.select.outputs.dry-run }}
+      rerender: ${{ steps.select.outputs.rerender }}
+      max-bytes: ${{ steps.select.outputs.max-bytes }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      EVENT: ${{ github.event_name }}
+      RUN_IDS: ${{ github.event.workflow_run.id || inputs.run-id }}
+      # A workflow_run event has no inputs.
+      TARGET_IN: ${{ inputs.target-branch }}
+      DRY_RUN_IN: ${{ inputs.dry-run }}
+      RERENDER_IN: ${{ inputs.rerender }}
+      MAX_MIB_IN: ${{ inputs.max-shard-mib }}
+      BENCH_WORKFLOW: .github/workflows/amd-nightly-bench.yml
+      ARTIFACT_RE: '^bench-collected(-[A-Za-z0-9][A-Za-z0-9._+-]{0,99})?$'
+      MAX_RUNS: 10
+    steps:
+    # The records are data and are never executed, so any conclusion of the
+    # bench run is accepted: its failures are what is published. A value that
+    # was refused is never echoed.
+    - name: Check the bench runs and list their artifacts
+      id: select
+      run: |
+        set -euo pipefail
+        export LC_ALL=C
+        work="$RUNNER_TEMP/amd-bench-publish"
+        mkdir -p "$work"
+        fail() {
+          echo "::error::$1"
+          exit 1
+        }
+
+        target=gh-pages
+        dry_run=false
+        rerender=false
+        mib=4
+        if [ "$EVENT" = workflow_dispatch ]; then
+          target=$TARGET_IN
+          if [ "$DRY_RUN_IN" = true ]; then dry_run=true; fi
+          if [ "$RERENDER_IN" = true ]; then rerender=true; fi
+          mib=$MAX_MIB_IN
+        fi
+        case "$target" in
+          gh-pages | gh-pages-staging) ;;
+          *) fail "the target branch must be gh-pages or gh-pages-staging" ;;
+        esac
+        if ! [[ "$mib" =~ ^[0-9]{1,3}$ ]] || [ "$((10#$mib))" -lt 1 ]; then
+          fail "max-shard-mib must be a whole number of MiB from 1 to 999"
+        fi
+        max_bytes=$((10#$mib * 1048576))
+
+        read -r -a runs <<< "$(tr -s '[:space:]' ' ' <<< "$RUN_IDS")"
+        if [ "${#runs[@]}" -lt 1 ] || [ "${#runs[@]}" -gt "$MAX_RUNS" ]; then
+          fail "run-id takes one to ${MAX_RUNS} run ids separated by spaces"
+        fi
+        declare -A seen=()
+        for run in "${runs[@]}"; do
+          if ! [[ "$run" =~ ^[1-9][0-9]{0,19}$ ]]; then
+            fail "each run id must be a number"
+          fi
+          if [ -n "${seen[$run]:-}" ]; then
+            fail "run ${run} is given twice"
+          fi
+          seen[$run]=1
+        done
+
+        sources='[]'
+        for run in "${runs[@]}"; do
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run}" > "$work/run.json" \
+            || fail "run ${run} could not be read"
+          if ! jq -e --arg repo "$GITHUB_REPOSITORY" --arg path "$BENCH_WORKFLOW" '
+                (.path | split("@")[0]) == $path
+                and .status == "completed"
+                and .head_repository.full_name == $repo' "$work/run.json" >/dev/null; then
+            jq '{path, status, event, head_branch, head_repository: .head_repository.full_name}' \
+              "$work/run.json"
+            fail "run ${run} is not a completed \"AMD Nightly Bench\" run of ${GITHUB_REPOSITORY}"
+          fi
+
+          # One artifact per branch the run benched. An artifact of an earlier
+          # attempt has the same name and is listed once.
+          names=$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${run}/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.expired | not) | .name' \
+            | { grep -E "$ARTIFACT_RE" || true; } | sort -u) \
+            || fail "the artifacts of run ${run} could not be listed"
+          # A Collect job that ran to its end, whatever its result, uploads.
+          collected=$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${run}/jobs?filter=latest&per_page=100" \
+            --jq '.jobs[] | select(.name | startswith("Collect (")) | select(.conclusion == "success" or .conclusion == "failure") | .name' \
+            | wc -l) \
+            || fail "the jobs of run ${run} could not be listed"
+          found=$(grep -c . <<< "$names" || true)
+
+          if [ "$found" -eq 0 ]; then
+            if [ "$EVENT" = workflow_dispatch ]; then
+              fail "run ${run} has no bench-collected artifact, or it has expired"
+            fi
+            if [ "$collected" -gt 0 ]; then
+              fail "run ${run} collected records in ${collected} job(s) and has no bench-collected artifact"
+            fi
+            echo "::notice title=Nothing to publish::run ${run} collected no records: the bench is switched off, no branch built a nixlbench wheel, or the run was cancelled"
+            continue
+          fi
+          if [ "$found" -lt "$collected" ]; then
+            echo "::warning title=Bench artifacts missing::run ${run} collected records in ${collected} job(s) and has ${found} bench-collected artifact(s); the other branches are not published"
+          fi
+          while IFS= read -r name; do
+            sources=$(jq -c --arg run "$run" --arg name "$name" \
+              '. + [{run: $run, name: $name}]' <<< "$sources")
+          done <<< "$names"
+        done
+
+        count=$(jq length <<< "$sources")
+        {
+          echo "sources=${sources}"
+          echo "count=${count}"
+          echo "target=${target}"
+          echo "dry-run=${dry_run}"
+          echo "rerender=${rerender}"
+          echo "max-bytes=${max_bytes}"
+        } >> "$GITHUB_OUTPUT"
+        {
+          echo "### Bench publish: plan"
+          echo
+          echo "- Target: \`${target}\`, dry run: ${dry_run}, re-render: ${rerender}, limit per shard: ${mib} MiB"
+          if [ "$count" = 0 ]; then
+            echo "- Nothing to publish."
+          else
+            jq -r '.[] | "- run \(.run): artifact `\(.name)`"' <<< "$sources"
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: Publish the bench records
+    needs: plan
+    if: needs.plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      actions: read
+    # A group of its own: "gh-pages" holds one running and one waiting job,
+    # and a third would cancel the one waiting, which may be the wheel
+    # publisher. This group holds the same two, so a backfill names several
+    # run ids in one run instead of starting several. It is not what keeps
+    # gh-pages consistent: the push below is never forced, so a writer that
+    # lost the race is refused and starts again. A dry run writes nowhere, so
+    # it takes a group of its own and can neither wait for a publication nor
+    # push a waiting one out.
+    concurrency:
+      group: ${{ needs.plan.outputs.dry-run == 'true' && format('gh-pages-bench-dry-{0}', github.run_id) || 'gh-pages-bench' }}
+      cancel-in-progress: false
+    outputs:
+      pushed: ${{ steps.push.outputs.pushed }}
+      generation: ${{ steps.push.outputs.generation }}
+      verify: ${{ steps.push.outputs.verify }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      SOURCES: ${{ needs.plan.outputs.sources }}
+      TARGET: ${{ needs.plan.outputs.target }}
+      DRY_RUN: ${{ needs.plan.outputs.dry-run }}
+      RERENDER: ${{ needs.plan.outputs.rerender }}
+      MAX_BYTES: ${{ needs.plan.outputs.max-bytes }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      # The names the publisher gives a shard, a release and its assets. They
+      # become paths, tags and API calls, so each is checked before it is used.
+      SHARD_RE: '[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9][A-Za-z0-9._+-]{0,99}-[0-9]{1,20}\.a[0-9]{1,4}'
+      TAG_RE: '^bench-raw-[0-9]{4}-[0-9]{2}$'
+    steps:
+    # The publisher reads the record schema under .ci/bench.
+    - name: Check out the CI files
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+        persist-credentials: false
+        sparse-checkout: .ci
+
+    # By their exact names, never by a pattern. An artifact that cannot be
+    # downloaded fails the job at its end and does not stop the others.
+    - name: Download the collected records
+      run: |
+        set -euo pipefail
+        export LC_ALL=C
+        work="$RUNNER_TEMP/amd-bench-publish"
+        mkdir -p "$work/in"
+        : > "$work/inputs.txt"
+        name_re='^bench-collected(-[A-Za-z0-9][A-Za-z0-9._+-]{0,99})?$'
+        while IFS=$'\t' read -r run name; do
+          if ! [[ "$run" =~ ^[1-9][0-9]{0,19}$ && "$name" =~ $name_re ]]; then
+            echo "::error::the plan names a run or an artifact this job does not accept"
+            exit 1
+          fi
+          dir="$work/in/$run/$name"
+          if gh run download "$run" --name "$name" --dir "$dir"; then
+            printf '%s\n' "$dir" >> "$work/inputs.txt"
+          else
+            echo "::error title=Bench artifact not published::artifact ${name} of run ${run} could not be downloaded"
+            touch "$work/input-invalid"
+          fi
+        done < <(jq -r '.[] | [.run, .name] | @tsv' <<< "$SOURCES")
+        if [ ! -s "$work/inputs.txt" ]; then
+          echo "::error::no artifact could be downloaded; nothing was written anywhere"
+          exit 1
+        fi
+
+    # Each artifact is checked on its own. One that is not valid is reported,
+    # fails the job at its end and is left out; the others go on. With none
+    # valid the job stops here, before anything is written anywhere. Never
+    # with -I: the publisher imports amd_bench_lib.py from beside it. Records
+    # that name another repository are not this site's.
+    - name: Inspect the artifacts
+      run: |
+        set -euo pipefail
+        export LC_ALL=C
+        work="$RUNNER_TEMP/amd-bench-publish"
+        plain() {
+          sed 's|[^A-Za-z0-9._+/ :=,()-]|_|g' | cut -c1-300
+        }
+        args=()
+        while IFS= read -r dir; do
+          args+=(--input "$dir")
+        done < "$work/inputs.txt"
+        status=0
+        python3 .ci/scripts/amd_bench_publish.py inspect "${args[@]}" \
+          --out "$work/plan.json" --stage "$work/stage" --max-bytes "$MAX_BYTES" \
+          --repo "$GITHUB_REPOSITORY" --summary-out "$GITHUB_STEP_SUMMARY" || status=$?
+        if [ "$status" -ne 0 ] && [ "$status" -ne 3 ]; then
+          echo "::error::amd_bench_publish.py inspect exited ${status}; nothing was written anywhere"
+          exit 1
+        fi
+        if [ ! -s "$work/plan.json" ]; then
+          echo "::error::amd_bench_publish.py inspect wrote no plan; nothing was written anywhere"
+          exit 1
+        fi
+
+        # The reason is text about data this job does not trust, so it is
+        # reduced to plain characters before it is printed.
+        while IFS=$'\t' read -r dir why; do
+          what=$(plain <<< "${dir#"$work/in/"}")
+          why=$(plain <<< "$why")
+          echo "::error title=Bench artifact not published::${what}: ${why}"
+          touch "$work/input-invalid"
+        done < <(jq -r '.invalid[]? | [.input, .why] | @tsv' "$work/plan.json")
+
+        jq -r '.valid[]?.input' "$work/plan.json" \
+          | { grep -Fxf "$work/inputs.txt" || true; } > "$work/valid.txt"
+        if [ "$status" -eq 3 ] || [ ! -s "$work/valid.txt" ]; then
+          echo "::error::no artifact is valid; nothing was written anywhere"
+          exit 1
+        fi
+
+    # What the target branch has published and what it has quarantined, for
+    # the two steps below. A branch with no manifest yet has published
+    # nothing.
+    - name: Read the manifest of the target branch
+      if: needs.plan.outputs.target == 'gh-pages' && needs.plan.outputs.dry-run != 'true'
+      run: |
+        set -euo pipefail
+        export LC_ALL=C
+        work="$RUNNER_TEMP/amd-bench-publish"
+        manifest="$work/site-manifest.json"
+        state=present
+        if ! gh api -H 'Accept: application/vnd.github.raw' \
+            "repos/${GITHUB_REPOSITORY}/contents/data/bench/v1/manifest.json?ref=${TARGET}" \
+            > "$manifest" 2> "$work/manifest.err"; then
+          rm -f "$manifest"
+          state=absent
+          if ! grep -q 'HTTP 404' "$work/manifest.err"; then
+            state=unreadable
+            head -n 3 "$work/manifest.err" | tr -cd '[:alnum:][:space:]().:/-' || true
+          fi
+        elif ! jq -e 'type == "object"' "$manifest" > /dev/null; then
+          rm -f "$manifest"
+          state=unreadable
+        fi
+        echo "the manifest of ${TARGET} is ${state}"
+        printf '%s\n' "$state" > "$work/site-manifest.state"
+
+    # The release is public and permanent, and its assets are added, never
+    # replaced: an asset that is there with other contents is a conflict. A
+    # quarantined shard is not archived, and with no readable manifest to say
+    # which shards those are, nothing is. A failure here fails the job at its
+    # end and does not stop the pages; the pages link to the release by name,
+    # so running the job again completes the archive.
+    - name: Archive the raw records in the monthly pre-release
+      if: needs.plan.outputs.target == 'gh-pages' && needs.plan.outputs.dry-run != 'true'
+      run: |
+        set -euo pipefail
+        export LC_ALL=C
+        work="$RUNNER_TEMP/amd-bench-publish"
+        owner=${GITHUB_REPOSITORY_OWNER,,}
+        asset_re="^(bench-${SHARD_RE}\.(ndjson\.gz|logs\.tar\.gz|collect\.json)|matrix-[0-9a-f]{64}\.json)$"
+
+        # From the paginated listing, which is complete however many assets
+        # a month collects.
+        assets() {
+          local id
+          id=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/$1" --jq .id) || return 1
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/releases/${id}/assets?per_page=100" \
+            --jq '.[] | [.name, .state, (.size | tostring), (.digest // "")] | @tsv'
+        }
+
+        archive() {
+          local tag=$1 month=${1#bench-raw-} notes="$work/notes-$1.md"
+          local before after name bytes hash file line want result=0
+          if ! gh release view "$tag" --json tagName >/dev/null 2>&1; then
+            {
+              echo "Raw nixlbench records of the bench runs stamped ${month}, as the \"AMD Nightly Bench\" workflow collected them. Not a software release."
+              echo
+              echo "- \`bench-<stamp>-<slug>-<run>.a<attempt>.ndjson.gz\`: the records of one branch of one bench run."
+              echo "- \`bench-<...>.logs.tar.gz\`: the output of every process of that run's cases."
+              echo "- \`bench-<...>.collect.json\`: the collector's summary of that run."
+              echo "- \`matrix-<sha256>.json\`: the matrix the runs were planned from."
+              echo
+              echo "Everything ran on emulated devices on shared runners. The pages made from these records are at https://${owner}.github.io/${GITHUB_REPOSITORY#*/}/bench/index.html."
+              echo
+              echo "Assets are added and never replaced."
+            } > "$notes"
+            gh release create "$tag" --prerelease --latest=false --target "$GITHUB_SHA" \
+              --title "nixlbench raw records ${month}" --notes-file "$notes" || return 1
+          fi
+
+          before=$(assets "$tag") || return 1
+          while IFS=$'\t' read -r name bytes hash; do
+            file="$work/stage/$tag/$name"
+            if ! [[ "$name" =~ $asset_re && "$bytes" =~ ^[0-9]{1,12}$ && "$hash" =~ ^[0-9a-f]{64}$ ]] \
+                || [ -L "$file" ] || [ ! -f "$file" ] \
+                || [ "$(stat -c %s "$file")" != "$bytes" ] \
+                || [ "$(sha256sum "$file" | cut -d' ' -f1)" != "$hash" ]; then
+              echo "an asset planned for ${tag} is not the file that was staged"
+              result=1
+              continue
+            fi
+            want="${name}"$'\t'"uploaded"$'\t'"${bytes}"$'\t'
+            line=$(awk -F'\t' -v name="$name" '$1 == name' <<< "$before")
+            if [ -z "$line" ]; then
+              gh release upload "$tag" "$file" || result=1
+            elif [ "$line" = "${want}sha256:${hash}" ] || [ "$line" = "$want" ]; then
+              # Assets uploaded before GitHub recorded digests have none.
+              echo "${name} is already on ${tag}"
+            elif [ "$(cut -f2 <<< "$line")" != uploaded ]; then
+              # What an interrupted upload left behind.
+              gh release upload "$tag" "$file" --clobber || result=1
+            else
+              echo "::error title=Raw archive conflict::${name} is on ${tag} with other contents; it was left as it is"
+              result=1
+            fi
+          done < <(awk -F'\t' -v tag="$tag" '$1 == tag' "$work/archive.tsv" | cut -f2-)
+
+          after=$(assets "$tag") || return 1
+          while IFS=$'\t' read -r name bytes hash; do
+            want="${name}"$'\t'"uploaded"$'\t'"${bytes}"$'\t'
+            if ! grep -qxF -e "${want}sha256:${hash}" -e "${want}" <<< "$after"; then
+              echo "${name} is not a complete, matching asset of ${tag}"
+              result=1
+            fi
+          done < <(awk -F'\t' -v tag="$tag" '$1 == tag' "$work/archive.tsv" | cut -f2-)
+          return "$result"
+        }
+
+        # Quarantine is how a shard is kept off the site and out of the
+        # release, so it is honoured before anything is uploaded.
+        quarantined='[]'
+        case "$(cat "$work/site-manifest.state" 2>/dev/null || true)" in
+          absent) ;;
+          present)
+            quarantined=$(jq -c '[.quarantine[]? | .id? | strings]' "$work/site-manifest.json") || quarantined=""
+            ;;
+          *) quarantined="" ;;
+        esac
+        if [ -z "$quarantined" ]; then
+          echo "::error title=Raw archive::the manifest of ${TARGET} could not be read, so the quarantined shards are not known; nothing was archived. Running this job again completes the archive."
+          touch "$work/archive-failed"
+          exit 0
+        fi
+        held=0
+        while IFS= read -r id; do
+          if ! [[ "$id" =~ ^${SHARD_RE}$ ]]; then continue; fi
+          echo "::notice title=Raw archive::${id} is quarantined; its raw files are not archived"
+          held=$((held + 1))
+        done < <(jq -r --argjson held "$quarantined" \
+          '.valid[].shards[].id | select(. as $id | $held | index($id))' "$work/plan.json")
+
+        # A matrix file is shared by the shards planned from it.
+        if ! jq -r --argjson held "$quarantined" '
+              .valid[].shards[] | select(.id as $id | $held | index($id) | not)
+              | .tag as $tag | .assets[]
+              | [$tag, .name, (.bytes | tostring), .sha256] | @tsv' "$work/plan.json" \
+            | sort -u > "$work/archive.tsv"; then
+          echo "::error title=Raw archive::the plan could not be read; nothing was archived"
+          touch "$work/archive-failed"
+          exit 0
+        fi
+        if [ ! -s "$work/archive.tsv" ]; then
+          if [ "$held" -eq 0 ]; then
+            echo "::error title=Raw archive::the plan lists no asset to archive; nothing was archived"
+            touch "$work/archive-failed"
+          fi
+          exit 0
+        fi
+        if [ -n "$(cut -f1,2 "$work/archive.tsv" | uniq -d)" ]; then
+          echo "::error title=Raw archive::two artifacts name the same asset with different contents; nothing was archived"
+          touch "$work/archive-failed"
+          exit 0
+        fi
+        while IFS= read -r tag; do
+          if ! [[ "$tag" =~ $TAG_RE ]]; then
+            echo "::error title=Raw archive::the plan names a release this job does not accept"
+            touch "$work/archive-failed"
+            continue
+          fi
+          if ! archive "$tag"; then
+            echo "::error title=Raw archive::the raw records were not all archived in release ${tag}; the pages are published all the same, and running this job again completes the archive"
+            touch "$work/archive-failed"
+          fi
+        done < <(cut -f1 "$work/archive.tsv" | sort -u)
+
+    # A run that was archived and never reached gh-pages, because its job was
+    # cancelled or its push refused five times, is picked up here: the raw
+    # records of the last 14 days that the manifest neither lists nor
+    # quarantines are downloaded again, each into a directory of its own so
+    # that a bad one costs only itself. Nothing here can fail the job.
+    - name: Find archived runs that were never published
+      if: needs.plan.outputs.target == 'gh-pages' && needs.plan.outputs.dry-run != 'true'
+      run: |
+        set -euo pipefail
+        export LC_ALL=C
+        work="$RUNNER_TEMP/amd-bench-publish"
+        heal_re="^(bench-${SHARD_RE}\.(ndjson\.gz|collect\.json)|matrix-[0-9a-f]{64}\.json)$"
+        warn() {
+          echo "::warning title=Bench heal::$1"
+        }
+
+        # The assets of this month's and last month's releases, and of the
+        # releases this run archives to. A release whose listing failed is
+        # left out whole, so that the publisher never reads half a listing.
+        this_month=$(date -u +%Y-%m)
+        last_month=$(date -u -d "$(date -u +%Y-%m-15) -1 month" +%Y-%m)
+        : > "$work/assets.jsonl"
+        while IFS= read -r tag; do
+          if ! [[ "$tag" =~ $TAG_RE ]]; then continue; fi
+          if ! id=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" --jq .id 2> "$work/heal.err"); then
+            if ! grep -q 'HTTP 404' "$work/heal.err"; then
+              warn "release ${tag} could not be read"
+            fi
+            continue
+          fi
+          if gh api --paginate "repos/${GITHUB_REPOSITORY}/releases/${id}/assets?per_page=100" \
+              --jq '.[] | select(.state == "uploaded") | .name' \
+              | jq -Rc --arg tag "$tag" '{tag: $tag, name: .}' > "$work/assets-one.jsonl"; then
+            cat "$work/assets-one.jsonl" >> "$work/assets.jsonl"
+          else
+            warn "the assets of release ${tag} could not be listed"
+          fi
+        done < <({
+          echo "bench-raw-${this_month}"
+          echo "bench-raw-${last_month}"
+          jq -r '.valid[].shards[].tag' "$work/plan.json"
+        } | sort -u)
+
+        # A branch with no manifest yet has published nothing, and the
+        # publisher takes a missing file to mean exactly that.
+        manifest="$work/site-manifest.json"
+        case "$(cat "$work/site-manifest.state" 2>/dev/null || true)" in
+          present | absent) ;;
+          *)
+            warn "the manifest of ${TARGET} could not be read; no earlier run is picked up"
+            exit 0
+            ;;
+        esac
+        if ! python3 .ci/scripts/amd_bench_publish.py pending --manifest "$manifest" \
+            --assets "$work/assets.jsonl" --days 14 --limit 20 > "$work/pending.tsv"; then
+          warn "the runs left to publish could not be worked out; no earlier run is picked up"
+          exit 0
+        fi
+
+        # Exactly the assets it names. The runs this job publishes itself are
+        # not downloaded again.
+        jq -r '.valid[].shards[].id' "$work/plan.json" > "$work/own-ids.txt"
+        : > "$work/heal-ids.tsv"
+        while IFS=$'\t' read -r tag name; do
+          if ! [[ "$tag" =~ $TAG_RE && "$name" =~ $heal_re ]]; then
+            warn "an asset left to publish has a name this job does not accept"
+            continue
+          fi
+          if [[ "$name" == matrix-* ]]; then
+            dest="$work/heal-matrix/$tag"
+          else
+            id=${name#bench-}
+            id=${id%.ndjson.gz}
+            id=${id%.collect.json}
+            if grep -Fxq -- "$id" "$work/own-ids.txt"; then continue; fi
+            dest="$work/heal/$id"
+            printf '%s\t%s\n' "$tag" "$id" >> "$work/heal-ids.tsv"
+          fi
+          mkdir -p "$dest"
+          if ! gh release download "$tag" --pattern "$name" --dir "$dest"; then
+            warn "${name} could not be downloaded from release ${tag}"
+          fi
+        done < "$work/pending.tsv"
+
+        # The publisher looks for a shard's matrix beside its records.
+        shopt -s nullglob
+        while IFS=$'\t' read -r tag id; do
+          if [ ! -f "$work/heal/$id/bench-${id}.ndjson.gz" ]; then
+            rm -rf "${work:?}/heal/$id"
+            continue
+          fi
+          for matrix in "$work/heal-matrix/$tag"/matrix-*.json; do
+            cp "$matrix" "$work/heal/$id/"
+          done
+          echo "::notice title=Bench heal::${id} is in release ${tag} and not on ${TARGET}; it is published with this run"
+        done < <(sort -u "$work/heal-ids.tsv")
+
+    # A commit on top of the target branch, never a forced push, and only this
+    # job's own paths are staged. Another publisher may push in between, so
+    # the whole step is tried up to five times, each from a fresh shallow
+    # clone and after a random pause that keeps two refused writers from
+    # colliding again. Whatever stops the step before the push leaves the
+    # branch as it was. A dry run makes one pass and stops before the commit.
+    - name: Publish to the target branch
+      id: push
+      env:
+        PAGES_TOKEN: ${{ github.token }}
+        SITE_URL: https://github.com/${{ github.repository }}.git
+      run: |
+        set -euo pipefail
+        export LC_ALL=C
+        work="$RUNNER_TEMP/amd-bench-publish"
+        header=$(printf 'x-access-token:%s' "$PAGES_TOKEN" | base64 -w0)
+        echo "::add-mask::${header}"
+        export GIT_CONFIG_COUNT=1
+        export GIT_CONFIG_KEY_0="http.${SITE_URL}.extraheader"
+        export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${header}"
+        export GIT_TERMINAL_PROMPT=0
+        export GIT_AUTHOR_NAME="github-actions[bot]"
+        export GIT_AUTHOR_EMAIL="41898282+github-actions[bot]@users.noreply.github.com"
+        export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+        export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+        tool="${GITHUB_WORKSPACE}/.ci/scripts/amd_bench_publish.py"
+        fail() {
+          echo "::error::$1"
+          exit 1
+        }
+        # 0 when the branch exists, 1 when it does not.
+        has_branch() {
+          local status=0
+          git ls-remote --exit-code --heads "$SITE_URL" "refs/heads/$1" > /dev/null || status=$?
+          case "$status" in
+            0) return 0 ;;
+            2) return 1 ;;
+            *) fail "the branches of ${SITE_URL} could not be listed; nothing was pushed" ;;
+          esac
+        }
+        value() {
+          sed -n "s/^$1=//p" "$2" | head -n 1
+        }
+
+        # A fresh shallow clone of the target branch in $1.
+        clone_site() {
+          if has_branch "$TARGET"; then
+            git clone -q --depth 1 --branch "$TARGET" --single-branch "$SITE_URL" "$1"
+          elif [ "$TARGET" = gh-pages ]; then
+            fail "this repository has no gh-pages branch; the nightly creates it"
+          elif has_branch gh-pages; then
+            # Seeded from gh-pages once; from then on a history of its own.
+            echo "creating ${TARGET} from gh-pages"
+            git clone -q --depth 1 --branch gh-pages --single-branch "$SITE_URL" "$1"
+            git -C "$1" checkout -q -b "$TARGET"
+          else
+            fail "this repository has no gh-pages branch to start ${TARGET} from"
+          fi
+        }
+        # The publisher on the clone in $1, with the inputs that follow.
+        publish_to() {
+          local site=$1
+          shift
+          python3 "$tool" publish --site "$site" "$@" --repo "$GITHUB_REPOSITORY" \
+            --default-branch "$DEFAULT_BRANCH" --max-bytes "$MAX_BYTES" \
+            --report "$work/report.json" --output "$work/out.env" "${mode[@]}"
+        }
+
+        args=()
+        while IFS= read -r dir; do
+          args+=(--input "$dir")
+        done < "$work/valid.txt"
+        shopt -s nullglob
+        heal=()
+        for dir in "$work"/heal/*/; do
+          heal+=(--heal "${dir%/}")
+        done
+        if [ -e "$work/assets.jsonl" ]; then
+          args+=(--assets "$work/assets.jsonl")
+        fi
+        mode=()
+        if [ "$RERENDER" = true ]; then
+          mode=(--rerender)
+        fi
+
+        pushed=false
+        attempts=5
+        if [ "$DRY_RUN" = true ]; then
+          attempts=1
+        fi
+        for attempt in $(seq "$attempts"); do
+          rm -f "$work/out.env" "$work/report.json" "$work/staged.env"
+          site="$work/site-${attempt}"
+          printf '%s\n' "$site" > "$work/last-site"
+          clone_site "$site"
+
+          status=0
+          publish_to "$site" "${args[@]}" "${heal[@]}" || status=$?
+          if [ "$status" -ne 0 ] && [ "${#heal[@]}" -gt 0 ]; then
+            # A run from the archive that the publisher cannot take would
+            # otherwise come back and stop every publication for 14 days.
+            echo "::warning title=Bench heal::amd_bench_publish.py publish exited ${status} with the archived runs that were never published; publishing without them"
+            rm -rf "${site:?}"
+            clone_site "$site"
+            heal=()
+            status=0
+            publish_to "$site" "${args[@]}" || status=$?
+          fi
+          if [ "$status" -ne 0 ]; then
+            fail "amd_bench_publish.py publish exited ${status}; nothing was pushed"
+          fi
+
+          # With -f: a file that an ignore rule hides would be left out of the
+          # commit while the manifest lists it.
+          paths=()
+          for path in data/bench/v1 bench; do
+            if [ -e "$site/$path" ]; then paths+=("$path"); fi
+          done
+          if [ "${#paths[@]}" -gt 0 ]; then
+            git -C "$site" add -A -f -- "${paths[@]}"
+          fi
+          # The publisher's own guard: nothing outside its paths, nothing
+          # deleted, no published record changed.
+          status=0
+          python3 "$tool" check-staged --site "$site" "${mode[@]}" \
+            --output "$work/staged.env" || status=$?
+          if [ "$status" -ne 0 ]; then
+            fail "the staged changes are not this publisher's to make (check-staged exited ${status}); nothing was pushed"
+          fi
+          # And the guard of the other writers, kept apart from the script.
+          deleted=$(git -C "$site" diff --cached --name-only --diff-filter=D)
+          foreign=$(git -C "$site" diff --cached --name-only | { grep -Ev '^(data/bench/v1|bench)/' || true; })
+          if [ -n "$deleted" ] || [ -n "$foreign" ]; then
+            echo "::error::publishing would delete files from ${TARGET} or change files of another writer; nothing was pushed"
+            printf '%s\n' "$deleted" "$foreign"
+            exit 1
+          fi
+          if git -C "$site" diff --cached --quiet; then
+            echo "${TARGET} already holds these runs"
+            break
+          fi
+          if [ "$DRY_RUN" = true ]; then
+            echo "dry run: these changes were built and are not pushed"
+            git -C "$site" diff --cached --stat
+            break
+          fi
+
+          generation=$(value generation "$work/out.env")
+          added=$(value bytes_added "$work/out.env")
+          stored=$(value disk_bytes "$work/staged.env")
+          if ! [[ "$generation" =~ ^[0-9]{1,12}$ && "$added" =~ ^-?[0-9]{1,15}$ && "$stored" =~ ^[0-9]{1,15}$ ]]; then
+            fail "the publisher reported no generation or no byte counts; nothing was pushed"
+          fi
+          read -r -a ids <<< "$(value shards "$work/out.env")"
+          for id in "${ids[@]}"; do
+            if ! [[ "$id" =~ ^${SHARD_RE}$ ]]; then
+              fail "the publisher reported a shard with a name this job does not accept; nothing was pushed"
+            fi
+          done
+          if [ "${#ids[@]}" -gt 0 ]; then
+            subject="bench: publish ${ids[0]}"
+            if [ "${#ids[@]}" -gt 1 ]; then
+              subject+=" +$((${#ids[@]} - 1)) more"
+            fi
+            subject+=" (generation ${generation}, $(printf '%+d' "$added") tree bytes, +${stored} stored)"
+          else
+            subject="bench: re-render (generation ${generation}, +${stored} stored)"
+          fi
+          git -C "$site" commit -q -m "$subject"
+          if git -C "$site" push -q origin "HEAD:refs/heads/${TARGET}"; then
+            pushed=true
+            echo "pushed: ${subject}"
+            break
+          fi
+          if [ "$attempt" -eq "$attempts" ]; then
+            fail "the push to ${TARGET} was refused on each of ${attempts} attempts; nothing was published"
+          fi
+          delay=$((5 + RANDOM % 20))
+          echo "::warning::${TARGET} refused the push (attempt ${attempt} of ${attempts}); trying again in ${delay}s"
+          sleep "$delay"
+        done
+
+        # From the last attempt's files, by key. What the verify job is given
+        # ends up on a command line, so it is checked here.
+        generation=$(value generation "$work/out.env")
+        verify=$(value verify "$work/out.env")
+        if [ "$pushed" = true ]; then
+          if ! [[ "$generation" =~ ^[0-9]{1,12}$ ]]; then
+            fail "the publisher reported no generation for the push"
+          fi
+          read -r -a pairs <<< "$verify"
+          for pair in "${pairs[@]}"; do
+            if ! [[ "$pair" =~ ^[A-Za-z0-9._+/-]{1,300}=[0-9a-f]{64}$ ]]; then
+              fail "the publisher reported a file to verify that this job does not accept"
+            fi
+          done
+        fi
+        {
+          echo "pushed=${pushed}"
+          echo "generation=${generation}"
+          echo "verify=${verify}"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Pack the preview
+      if: needs.plan.outputs.dry-run == 'true'
+      run: |
+        set -euo pipefail
+        work="$RUNNER_TEMP/amd-bench-publish"
+        site=$(cat "$work/last-site")
+        mkdir -p "$work/preview"
+        paths=()
+        for path in data/bench/v1 bench; do
+          if [ -e "$site/$path" ]; then paths+=("$path"); fi
+        done
+        tar -C "$site" -czf "$work/preview/bench-publish-preview.tar.gz" "${paths[@]}"
+        cp "$work/report.json" "$work/plan.json" "$work/preview/"
+
+    - name: Upload the preview
+      if: needs.plan.outputs.dry-run == 'true'
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: bench-publish-preview
+        path: ${{ runner.temp }}/amd-bench-publish/preview/
+        if-no-files-found: error
+        retention-days: 7
+
+    - name: Upload the report
+      if: ${{ !cancelled() && needs.plan.outputs.dry-run != 'true' }}
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: bench-publish-report
+        path: |
+          ${{ runner.temp }}/amd-bench-publish/report.json
+          ${{ runner.temp }}/amd-bench-publish/plan.json
+          ${{ runner.temp }}/amd-bench-publish/staged.env
+        if-no-files-found: warn
+
+    # What the publisher reports is text about data this job does not trust,
+    # so it is reduced to plain characters before it reaches the summary.
+    - name: Report
+      if: always()
+      env:
+        PUSHED: ${{ steps.push.outputs.pushed }}
+      run: |
+        set -euo pipefail
+        export LC_ALL=C
+        work="$RUNNER_TEMP/amd-bench-publish"
+        owner=${GITHUB_REPOSITORY_OWNER,,}
+        report="$work/report.json"
+        plain() {
+          sed 's|[^A-Za-z0-9._+/ :=,()-]|_|g' | cut -c1-300
+        }
+        value() {
+          if [ -f "$2" ]; then sed -n "s/^$1=//p" "$2" | head -n 1; fi
+        }
+        site=""
+        if [ -f "$work/last-site" ]; then site=$(cat "$work/last-site"); fi
+        manifest="${site}/data/bench/v1/manifest.json"
+
+        if [ "$TARGET" = gh-pages ]; then
+          base="https://${owner}.github.io/${GITHUB_REPOSITORY#*/}/bench"
+        else
+          base="https://github.com/${GITHUB_REPOSITORY}/blob/${TARGET}/bench"
+        fi
+        {
+          echo "### Bench publish"
+          echo
+          if [ "$DRY_RUN" = true ]; then
+            echo "Dry run: nothing was pushed or archived. The pages and the data are in the artifact \`bench-publish-preview\`."
+          elif [ "${PUSHED:-false}" = true ]; then
+            echo "Pushed to \`${TARGET}\`."
+            if [ "$TARGET" = gh-pages ]; then
+              echo "Landing page: ${base}/index.html"
+            else
+              echo "\`${TARGET}\` is not served; the pages are files of that branch: ${base}/index.html"
+            fi
+          else
+            echo "Nothing was pushed to \`${TARGET}\`."
+          fi
+          echo
+          if [ -s "$report" ]; then
+            echo "- Generation: $(jq -r '.generation' "$report" | plain)"
+            while IFS= read -r id; do
+              if ! [[ "$id" =~ ^${SHARD_RE}$ ]]; then continue; fi
+              totals=""
+              if [ -f "$manifest" ]; then
+                totals=$(jq -r --arg id "$id" '
+                  .statuses as $names | .shards[] | select(.id == $id)
+                  | [range(0; $names | length) as $i | "\($names[$i]) \(.n[$i])"] | join(", ")' \
+                  "$manifest" | plain)
+              fi
+              if [ "${PUSHED:-false}" = true ]; then
+                echo "- Published \`${id}\`: ${totals:-no totals} (${base}/runs/${id}.html)"
+              elif [ "$DRY_RUN" = true ]; then
+                echo "- Built, not pushed: \`${id}\`: ${totals:-no totals} (\`bench/runs/${id}.html\` in the preview)"
+              else
+                echo "- Built, not pushed: \`${id}\`: ${totals:-no totals}"
+              fi
+            done < <(jq -r '.published[]?.id' "$report")
+            for key in noop rebuilt quarantined; do
+              count=$(jq -r --arg key "$key" '.[$key] // [] | length' "$report")
+              if [ "$count" != 0 ]; then
+                echo "- ${key}: ${count}"
+              fi
+            done
+            while IFS= read -r line; do
+              echo "- Skipped: ${line}"
+            done < <(jq -r '.skipped[]? | "\(.what): \(.why)" | gsub("\\s+"; " ")' "$report" | head -n 20 | plain)
+            echo "- Bytes added to the tree: $(jq -r '.bytes_added' "$report" | plain)"
+            echo "- Bytes stored by the commit, before packing: $(value disk_bytes "$work/staged.env" | plain)"
+            echo "- Tree now: $(jq -r '.tree_bytes // {} | to_entries | map("\(.key) \(.value) bytes") | join(", ")' "$report" | plain)"
+            while IFS= read -r line; do
+              echo "- Warning: ${line}"
+            done < <(jq -r '.warnings[]? | tostring | gsub("\\s+"; " ")' "$report" | head -n 20 | plain)
+          else
+            echo "The publisher wrote no report."
+          fi
+          if size=$(gh api "repos/${GITHUB_REPOSITORY}" --jq .size 2>/dev/null); then
+            echo "- Repository size: $(plain <<< "$size") KB"
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        if [ -e "$work/archive-failed" ] || [ -e "$work/input-invalid" ]; then
+          echo "::error::an artifact was not published, or the raw records were not all archived; see the steps above"
+          exit 1
+        fi
+
+  # Outside the group, so that waiting for Pages never holds up the next
+  # publication. A failure here fails this job only: the commit is on the
+  # branch, nothing is rolled back, and running the job again repeats the
+  # check. The publish job ends red after it pushed when the archive failed
+  # or one artifact was invalid, so this job does not wait for its success.
+  verify:
+    name: Check that the site serves the publication
+    needs: [plan, publish]
+    if: ${{ !cancelled() && needs.publish.outputs.pushed == 'true' && needs.plan.outputs.target == 'gh-pages' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pages: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GENERATION: ${{ needs.publish.outputs.generation }}
+      VERIFY: ${{ needs.publish.outputs.verify }}
+    steps:
+    - name: Check out the CI scripts
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+        persist-credentials: false
+        sparse-checkout: .ci/scripts
+
+    # Waits until the manifest that is served has the generation that was
+    # pushed and the pages have the pushed contents, then checks that the
+    # pages of the other writers still answer.
+    - name: Wait for the site
+      run: |
+        set -euo pipefail
+        export LC_ALL=C
+        owner=${GITHUB_REPOSITORY_OWNER,,}
+        if ! url=$(gh api "repos/${GITHUB_REPOSITORY}/pages" --jq .html_url 2>/dev/null) \
+            || [[ "$url" != https://* ]]; then
+          url="https://${owner}.github.io/${GITHUB_REPOSITORY#*/}/"
+          echo "::warning title=Pages::the address of the site could not be read; ${url} is assumed"
+        fi
+        url="${url%/}/"
+        if ! [[ "$GENERATION" =~ ^[0-9]{1,12}$ ]]; then
+          echo "::error::the publish job reported no generation"
+          exit 1
+        fi
+        args=()
+        read -r -a pairs <<< "$VERIFY"
+        for pair in "${pairs[@]}"; do
+          args+=(--expect "$pair")
+        done
+        python3 .ci/scripts/amd_bench_publish.py served --base-url "$url" \
+          --generation "$GENERATION" "${args[@]}"
+        echo "Served: ${url}bench/index.html at generation ${GENERATION}" >> "$GITHUB_STEP_SUMMARY"
