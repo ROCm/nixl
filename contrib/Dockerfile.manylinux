@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -30,6 +31,11 @@ ARG BASE_IMAGE_TAG="13.4.2-devel-ubi8"
 # When overridden to an Artifactory URL, the wheel stage pulls the pre-built deps
 # image instead of building wheel_base locally (CI caching). Default builds wheel_base here.
 ARG wheel_base=wheel_base
+# The image nixlbench is built in: the wheel stage, or a pre-built wheel image
+# (build-container.sh --nixlbench-base-image) so that it is not built again.
+ARG nixlbench_base=wheel
+# "cuda" (default) or "rocm"; selects the wheel_base_<stack> stage.
+ARG GPU_STACK="cuda"
 
 # CUDA donor stage — copies the toolkit and cuObject client pkg-config files
 # onto the manylinux base. The cuobjclient*.pc files are staged in a separate
@@ -40,11 +46,25 @@ RUN mkdir -p /opt/nixl-cuda-pkgconfig && \
 
 # Manylinux build base — official PyPA image (public on quay.io; ECR pull-through
 # available). AlmaLinux 8 / glibc 2.28 => manylinux_2_28 wheels.
-FROM ${MANYLINUX_IMAGE}_${ARCH}:${MANYLINUX_IMAGE_TAG} AS wheel_base
+FROM ${MANYLINUX_IMAGE}_${ARCH}:${MANYLINUX_IMAGE_TAG} AS manylinux_base
 
-# Re-declare args needed inside this stage (pre-FROM args are only visible to FROM lines).
-ARG ARCH="x86_64"
-ARG DEFAULT_PYTHON_VERSION="3.14"
+# Trusts the root CA of a TLS-intercepting proxy, passed as the "proxy_ca" build
+# secret (build-container.sh --proxy-ca-cert). A no-op without the secret.
+# Secrets are not part of the layer cache key; the checksum argument is.
+ARG PROXY_CA_SHA256=""
+RUN --mount=type=secret,id=proxy_ca,required=false \
+    if [ -s /run/secrets/proxy_ca ] && ! cmp -s /run/secrets/proxy_ca /etc/pki/ca-trust/source/anchors/proxy-ca.crt; then \
+        install -m 0644 /run/secrets/proxy_ca /etc/pki/ca-trust/source/anchors/proxy-ca.crt && \
+        update-ca-trust extract && \
+        ca_bundle=/etc/pki/tls/certs/ca-bundle.crt && \
+        if [ -f "${SSL_CERT_FILE:-}" ]; then { echo; cat /run/secrets/proxy_ca; } >> "$SSL_CERT_FILE"; fi && \
+        printf '[global]\ncert = %s\n' "$ca_bundle" > /etc/pip.conf && \
+        mkdir -p /etc/uv && printf 'system-certs = true\n' > /etc/uv/uv.toml && \
+        git config --system http.sslCAInfo "$ca_bundle" && \
+        mkdir -p /usr/local/cargo && printf '[http]\ncainfo = "%s"\n' "$ca_bundle" > /usr/local/cargo/config.toml; \
+    fi
+
+FROM manylinux_base AS wheel_base_cuda
 
 # CUDA version (e.g. 12.9 / 13.4), passed explicitly. Drives the
 # /usr/local/cuda-<version> symlink below and the cu12/cu13 wheel split; the
@@ -68,6 +88,70 @@ COPY --from=cuda /opt/nixl-cuda-pkgconfig/ /usr/lib64/pkgconfig/
 ENV CUDA_HOME=/usr/local/cuda \
     PATH=/usr/local/cuda/bin:${PATH} \
     LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs:${LD_LIBRARY_PATH:-}
+
+# ROCm build base (x86_64 only). ROCm is a build-time dependency here and a host
+# prerequisite at runtime; it is never bundled into the wheel.
+FROM manylinux_base AS wheel_base_rocm
+
+ARG ARCH="x86_64"
+ARG ROCM_VERSION="10.1.0"
+ENV ROCM_PATH=/opt/rocm
+
+# The component rpms populate /opt/rocm/core-<X.Y> only; link the unversioned
+# view instead of installing the gfx metapackage. amdrocm-runtime-devel (HIP and
+# HSA headers) is installed without dependencies: the only one not already there
+# is amdrocm-llvm-devel (2 GB, unused). Of amdrocm-llvm only the two libraries
+# libamd_comgr links are kept; the ldd check fails the build if that changes.
+RUN if [ "$ARCH" != "x86_64" ]; then \
+        echo "ERROR: GPU_STACK=rocm supports x86_64 only (ROCm publishes no $ARCH packages)" >&2; \
+        exit 1; \
+    fi && \
+    ROCM_MM="$(echo "$ROCM_VERSION" | cut -d. -f1,2)" && \
+    if [ "${ROCM_VERSION%%.*}" = "7" ]; then \
+        ROCM_REPO_URL="https://repo.amd.com/rocm/packages-multi-arch/rhel8/x86_64/"; \
+        ROCM_REPO_GPG="https://repo.amd.com/rocm/packages-multi-arch/gpg/rocm.gpg"; \
+    else \
+        ROCM_REPO_URL="https://stable.repo.amd.com/rocm/core/packages/rhel8/x86_64/"; \
+        ROCM_REPO_GPG="https://stable.repo.amd.com/rocm/gpg/packages.gpg"; \
+    fi && \
+    printf '[amdrocm]\nname=AMD ROCm %s\nbaseurl=%s\nenabled=1\ngpgcheck=1\ngpgkey=%s\ntimeout=300\nretries=20\n' \
+        "$ROCM_VERSION" "$ROCM_REPO_URL" "$ROCM_REPO_GPG" > /etc/yum.repos.d/amdrocm.repo && \
+    ROCM_PKGS="" && \
+    for pkg in base sysdeps llvm runtime hipfile hipfile-devel hipify; do \
+        ROCM_PKGS="$ROCM_PKGS amdrocm-${pkg}${ROCM_MM}-${ROCM_VERSION}"; \
+    done && \
+    dnf install -y $ROCM_PKGS && \
+    dnf download --destdir /tmp/rocm-rpm "amdrocm-runtime-devel${ROCM_MM}-${ROCM_VERSION}" && \
+    rpm -K /tmp/rocm-rpm/*.rpm | grep 'signatures OK' && \
+    rpm -i --nodeps /tmp/rocm-rpm/*.rpm && \
+    rm -rf /tmp/rocm-rpm && \
+    dnf clean all && \
+    ROCM_CORE="/opt/rocm/core-${ROCM_MM}" && \
+    find "$ROCM_CORE/lib/llvm" -mindepth 1 \( -type f -o -type l \) \
+        ! -name 'libLLVM.so*' ! -name 'libLLVM-*.so' ! -name 'libclang-cpp.so*' -delete && \
+    rm -f "$ROCM_CORE/bin/hipify-clang" && \
+    for entry in bin include lib .info; do \
+        [ -e "$ROCM_PATH/$entry" ] || ln -s "$ROCM_CORE/$entry" "$ROCM_PATH/$entry"; \
+    done && \
+    for f in lib/libamdhip64.so include/hip/hip_runtime.h bin/hipify-perl \
+             lib/libhsa-runtime64.so include/hsa/hsa.h \
+             lib/libhipfile.so include/hipfile.h .info/version; do \
+        test -e "$ROCM_PATH/$f" || { echo "ERROR: ROCm $ROCM_VERSION install is missing $ROCM_PATH/$f" >&2; exit 1; }; \
+    done && \
+    if ldd "$ROCM_PATH/lib/libamdhip64.so" "$ROCM_PATH/lib/libhipfile.so" | grep 'not found'; then \
+        echo "ERROR: the ROCm $ROCM_VERSION runtime has unresolved libraries" >&2; \
+        exit 1; \
+    fi
+
+ENV PATH=${ROCM_PATH}/bin:${PATH} \
+    LD_LIBRARY_PATH=${ROCM_PATH}/lib:${LD_LIBRARY_PATH:-}
+
+FROM wheel_base_${GPU_STACK} AS wheel_base
+
+# Re-declare args needed inside this stage (pre-FROM args are only visible to FROM lines).
+ARG ARCH="x86_64"
+ARG DEFAULT_PYTHON_VERSION="3.14"
+ARG GPU_STACK
 
 # CUDA needs gcc <= 14. The PyPA manylinux base + system "Development Tools" can
 # pull in a gcc that CUDA rejects, so pin gcc-toolset-14 on PATH ahead of the
@@ -132,7 +216,8 @@ RUN yum groupinstall -y 'Development Tools' &&  \
     librdmacm-devel \
     pciutils-devel \
     wget \
-    zlib
+    zlib && \
+    if [ "$GPU_STACK" = "rocm" ]; then dnf clean all; fi
 
 # Build latest hwloc from source to avoid older RHEL8 API limitations.
 RUN cd /tmp && \
@@ -149,7 +234,8 @@ RUN cd /tmp && \
 # Build OpenSSL
 ARG OPENSSL_VERSION="3.0.16"
 ARG OPENSSL_SHA256="57e03c50feab5d31b152af2b764f10379aecd8ee92f16c985983ce4a99f7ef86"
-RUN yum install -y perl-IPC-Cmd perl-Test-Simple perl-Data-Dumper perl-Time-Piece
+RUN yum install -y perl-IPC-Cmd perl-Test-Simple perl-Data-Dumper perl-Time-Piece && \
+    if [ "$GPU_STACK" = "rocm" ]; then dnf clean all; fi
 RUN cd /tmp && \
     wget -q ${WGET_RETRY_OPTS} "https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz" && \
     echo "${OPENSSL_SHA256}  openssl-${OPENSSL_VERSION}.tar.gz" | sha256sum -c - && \
@@ -214,7 +300,8 @@ RUN --mount=type=secret,id=ghconfig,target=/root/.gitconfig git clone https://gi
         -DABSL_ENABLE_INSTALL=ON && \
     make -j${NPROC:-$(nproc)} && \
     make install && \
-    ldconfig
+    ldconfig && \
+    if [ "$GPU_STACK" = "rocm" ]; then rm -rf /workspace/abseil-cpp; fi
 
 ARG GRPC_NPROC
 RUN --mount=type=secret,id=ghconfig,target=/root/.gitconfig git clone --recurse-submodules -b ${GRPC_TAG} --depth 1 --shallow-submodules https://github.com/grpc/grpc && \
@@ -237,7 +324,8 @@ RUN --mount=type=secret,id=ghconfig,target=/root/.gitconfig git clone --recurse-
     -DgRPC_ZLIB_PROVIDER=package ../.. && \
     make -j${GRPC_NPROC:-$(nproc)} && \
     make install && \
-    ldconfig
+    ldconfig && \
+    if [ "$GPU_STACK" = "rocm" ]; then rm -rf /workspace/grpc; fi
 
 ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib64:$LD_LIBRARY_PATH
 
@@ -253,10 +341,17 @@ RUN --mount=type=secret,id=ghconfig,target=/root/.gitconfig cd /workspace && \
 RUN wget ${WGET_RETRY_OPTS} https://curl.se/download/curl-8.19.0.tar.gz && \
     tar xzf curl-8.19.0.tar.gz && cd curl-8.19.0 && \
     ./configure --prefix=/usr/local --with-ssl=/usr/local/openssl --without-libpsl --enable-shared && \
-    make -j${NPROC:-$(nproc)} && make install
+    make -j${NPROC:-$(nproc)} && make install && \
+    if [ "$GPU_STACK" = "rocm" ]; then rm -rf /workspace/curl-8.19.0 /workspace/curl-8.19.0.tar.gz; fi
 
-RUN --mount=type=secret,id=ghconfig,target=/root/.gitconfig git clone --recurse-submodules --depth 1 --shallow-submodules https://github.com/aws/aws-sdk-cpp.git --branch 1.11.920
-RUN mkdir aws_sdk_build && cd aws_sdk_build && \
+# The ROCm build clones in the RUN that builds, so that the layer can drop the 2 GB tree.
+RUN --mount=type=secret,id=ghconfig,target=/root/.gitconfig if [ "$GPU_STACK" != "rocm" ]; then \
+    git clone --recurse-submodules --depth 1 --shallow-submodules https://github.com/aws/aws-sdk-cpp.git --branch 1.11.920; \
+    fi
+RUN --mount=type=secret,id=ghconfig,target=/root/.gitconfig if [ "$GPU_STACK" = "rocm" ]; then \
+    git clone --recurse-submodules --depth 1 --shallow-submodules https://github.com/aws/aws-sdk-cpp.git --branch 1.11.920; \
+    fi && \
+    mkdir aws_sdk_build && cd aws_sdk_build && \
     export LDFLAGS="-L/usr/local/openssl/lib64 -L/usr/local/openssl/lib" && \
     export CFLAGS="-I/usr/local/openssl/include" && \
     export CXXFLAGS="-I/usr/local/openssl/include" && \
@@ -266,7 +361,8 @@ RUN mkdir aws_sdk_build && cd aws_sdk_build && \
         -DCURL_LIBRARY=/usr/local/lib/libcurl.so \
         -DCURL_INCLUDE_DIR=/usr/local/include \
         -DOPENSSL_USE_STATIC_LIBS=OFF && \
-    make -j${NPROC:-$(nproc)} && make install
+    make -j${NPROC:-$(nproc)} && make install && \
+    if [ "$GPU_STACK" = "rocm" ]; then rm -rf /workspace/aws-sdk-cpp /workspace/aws_sdk_build; fi
 
 ENV PKG_CONFIG_PATH=$PKG_CONFIG_PATH:/usr/local/lib64/pkgconfig:/usr/lib64/pkgconfig:/usr/lib/pkgconfig
 
@@ -280,7 +376,8 @@ RUN --mount=type=secret,id=ghconfig,target=/root/.gitconfig git clone https://gi
 RUN --mount=type=secret,id=ghconfig,target=/root/.gitconfig git clone --depth 1 https://github.com/GNOME/libxml2.git --branch 2.15 && \
     cd libxml2 && \
     ACLOCAL_PATH=/usr/share/aclocal ./autogen.sh && make -j${NPROC:-$(nproc)} && \
-    make install
+    make install && \
+    if [ "$GPU_STACK" = "rocm" ]; then rm -rf /workspace/libxml2; fi
 
 # Fetch the upstream fix with its parent so git show can produce the patch.
 RUN --mount=type=secret,id=ghconfig,target=/root/.gitconfig git clone --depth 1 https://github.com/Azure/azure-sdk-for-cpp.git --branch azure-storage-blobs_12.15.0 && \
@@ -301,7 +398,8 @@ RUN --mount=type=secret,id=ghconfig,target=/root/.gitconfig git clone --depth 1 
     cmake --install sdk/core && \
     cmake --install sdk/storage/azure-storage-common && \
     cmake --install sdk/storage/azure-storage-blobs && \
-    cmake --install sdk/identity
+    cmake --install sdk/identity && \
+    if [ "$GPU_STACK" = "rocm" ]; then rm -rf /workspace/azure-sdk-for-cpp; fi
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
@@ -311,7 +409,9 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     RUST_VERSION=1.95.0 \
     RUSTARCH=${ARCH}-unknown-linux-gnu
 
-RUN wget ${WGET_RETRY_OPTS} "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
+# The wheel build does not use Rust; the ROCm build skips the toolchain.
+RUN if [ "$GPU_STACK" != "rocm" ]; then \
+    wget ${WGET_RETRY_OPTS} "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
     chmod +x rustup-init && \
     ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
     case "$ARCH" in \
@@ -321,7 +421,8 @@ RUN wget ${WGET_RETRY_OPTS} "https://static.rust-lang.org/rustup/archive/1.28.1/
     esac && \
     echo "$RUSTUP_SHA256 *rustup-init" | sha256sum -c - && \
     rm rustup-init && \
-    chmod -R a+w $RUSTUP_HOME $CARGO_HOME
+    chmod -R a+w $RUSTUP_HOME $CARGO_HOME; \
+    fi
 
 RUN wget ${WGET_RETRY_OPTS} https://www.mellanox.com/downloads/DOCA/DOCA_v3.5.0/host/doca-host-3.5.0-082000_26.07_rhel8.${ARCH}.rpm -O doca-host.rpm && \
     rpm -i doca-host.rpm && \
@@ -330,14 +431,19 @@ RUN wget ${WGET_RETRY_OPTS} https://www.mellanox.com/downloads/DOCA/DOCA_v3.5.0/
     rpm -ivh --nodeps doca-sdk-common-*rpm && \
     rpm -ivh --nodeps doca-sdk-rdma-*rpm && \
     rpm -ivh --nodeps doca-sdk-verbs-*rpm && \
-    rpm -ivh --nodeps doca-sdk-gpunetio-*rpm && \
+    if [ "$GPU_STACK" != "rocm" ]; then rpm -ivh --nodeps doca-sdk-gpunetio-*rpm; fi && \
     rpm -ivh --nodeps doca-sdk-telemetry-exporter-*rpm && \
     # CollectX provides libclx-api.pc, required (Requires.private) by
     # doca-telemetry-exporter.pc and needed to link the telemetry exporter plugin.
     # Pulls both collectx-clxapi and collectx-clxapidev.
     rpm -ivh --nodeps collectx-clxapi*rpm && \
     # Check that gpunetio and telemetry-exporter development packages are installed correctly
-    pkg-config --cflags --libs doca-gpunetio && \
+    # The ROCm build drops the 900 MB bundle and its unpacked package repository.
+    if [ "$GPU_STACK" = "rocm" ]; then \
+        rm -f /workspace/doca-host.rpm && rpm -e doca-host && dnf clean all; \
+    else \
+        pkg-config --cflags --libs doca-gpunetio; \
+    fi && \
     pkg-config --cflags --libs doca-telemetry-exporter
 
 ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/lib:$LD_LIBRARY_PATH
@@ -349,7 +455,9 @@ WORKDIR /workspace
 RUN rm -rf /usr/lib/ucx
 RUN rm -rf /opt/hpcx/ucx
 
-RUN --mount=type=secret,id=ghconfig,target=/root/.gitconfig cd /workspace && \
+# gdrcopy is NVIDIA-only; it has no ROCm counterpart.
+RUN --mount=type=secret,id=ghconfig,target=/root/.gitconfig if [ "$GPU_STACK" != "rocm" ]; then \
+    cd /workspace && \
     git clone --depth 1 https://github.com/NVIDIA/gdrcopy.git && \
     cd gdrcopy && \
     git fetch --tags --depth=1 && \
@@ -359,13 +467,19 @@ RUN --mount=type=secret,id=ghconfig,target=/root/.gitconfig cd /workspace && \
     CUDA=/usr/local/cuda ./build-rpm-packages.sh && \
     rpm -Uvh gdrcopy-kmod-*.el8.noarch.rpm && \
     rpm -Uvh gdrcopy-*.el8.$ARCH.rpm && \
-    rpm -Uvh gdrcopy-devel-*.el8.noarch.rpm
+    rpm -Uvh gdrcopy-devel-*.el8.noarch.rpm; \
+    fi
 
 # Build libfabric from source
 RUN wget ${WGET_RETRY_OPTS} \
     "https://github.com/ofiwg/libfabric/releases/download/${LIBFABRIC_VERSION}/libfabric-${LIBFABRIC_VERSION#v}.tar.bz2" -O libfabric.tar.bz2 && \
     tar xjf libfabric.tar.bz2 && rm libfabric.tar.bz2 && \
     cd libfabric-* && \
+    if [ "$GPU_STACK" = "rocm" ]; then \
+        LIBFABRIC_GPU_PARAMS="--with-rocr=$ROCM_PATH --enable-rocr-dlopen"; \
+    else \
+        LIBFABRIC_GPU_PARAMS="--with-cuda=/usr/local/cuda --enable-cuda-dlopen --with-gdrcopy --enable-gdrcopy-dlopen"; \
+    fi && \
     ./autogen.sh && \
     ./configure --prefix=/usr/local \
                 --disable-verbs \
@@ -374,13 +488,11 @@ RUN wget ${WGET_RETRY_OPTS} \
                 --disable-usnic \
                 --disable-rstream \
                 --enable-efa \
-                --with-cuda=/usr/local/cuda \
-                --enable-cuda-dlopen \
-                --with-gdrcopy \
-                --enable-gdrcopy-dlopen && \
+                $LIBFABRIC_GPU_PARAMS && \
     make -j${NPROC:-$(nproc)} && \
     make install && \
-    ldconfig
+    ldconfig && \
+    if [ "$GPU_STACK" = "rocm" ]; then rm -rf /workspace/libfabric-*; fi
 
 # By default, uv downloads python packages to $HOME/.cache/uv and hard links them
 # from the virtual environment. This means that the files reside in /root/.cache/uv,
@@ -401,7 +513,8 @@ RUN uv pip install --upgrade meson meson-python pybind11 patchelf pyYAML click s
 # NIXL EP needs torch >= 2.14, which is only on the cu13 (cu132) index. Empty selects 2.14 for
 # CUDA 13 and 2.13 for CUDA 12 (NIXL EP is auto-disabled there).
 ARG DEFAULT_TORCH_VERSION=""
-RUN if [ -z "$TORCH_CUDA_INDEX" ]; then \
+RUN if [ "$GPU_STACK" != "rocm" ]; then \
+    if [ -z "$TORCH_CUDA_INDEX" ]; then \
         if [ "${CUDA_VERSION%%.*}" = "13" ]; then TORCH_CUDA_INDEX="cu132"; \
         else TORCH_CUDA_INDEX="cu$(echo "$CUDA_VERSION" | tr -d .)"; fi; \
     fi && \
@@ -409,7 +522,8 @@ RUN if [ -z "$TORCH_CUDA_INDEX" ]; then \
         if [ "${CUDA_VERSION%%.*}" = "13" ]; then DEFAULT_TORCH_VERSION="2.14"; else DEFAULT_TORCH_VERSION="2.13"; fi; \
     fi && \
     export UV_INDEX="https://download.pytorch.org/whl/${TORCH_CUDA_INDEX}" && \
-    uv pip install "torch==${DEFAULT_TORCH_VERSION}.*"
+    uv pip install "torch==${DEFAULT_TORCH_VERSION}.*"; \
+    fi
 # Upgrade setuptools to latest version for compatibility with PEP 639 (license format)
 RUN uv pip install --upgrade 'setuptools>=80.9.0'
 
@@ -439,6 +553,11 @@ RUN --mount=type=secret,id=ghconfig,target=/root/.gitconfig cd /usr/local/src &&
          UCX_SONAME_PARAM=""; \
          UCX_MODULE_DEEPBIND_PARAM=""; \
      fi && \
+     if [ "$GPU_STACK" = "rocm" ]; then \
+         UCX_GPU_PARAM="--with-rocm=$ROCM_PATH"; \
+     else \
+         UCX_GPU_PARAM="--with-cuda=/usr/local/cuda"; \
+     fi && \
      ./contrib/configure-release-mt  \
          --enable-shared             \
          --disable-static            \
@@ -448,7 +567,7 @@ RUN --mount=type=secret,id=ghconfig,target=/root/.gitconfig cd /usr/local/src &&
          --without-avx               \
          --enable-cma                \
          --enable-devel-headers      \
-         --with-cuda=/usr/local/cuda \
+         $UCX_GPU_PARAM              \
          --with-verbs                \
          --with-dm                   \
          --without-gdrcopy           \
@@ -460,7 +579,14 @@ RUN --mount=type=secret,id=ghconfig,target=/root/.gitconfig cd /usr/local/src &&
          $UCX_MODULE_DEEPBIND_PARAM && \
      make -j &&                      \
      make -j install-strip &&        \
-     ldconfig
+     ldconfig &&                     \
+     if [ "$GPU_STACK" = "rocm" ]; then \
+         if ! ls /usr/lib64/ucx/*rocm*.so* >/dev/null 2>&1; then \
+             echo "ERROR: UCX was built without its ROCm module (no *rocm* under /usr/lib64/ucx)" >&2; \
+             exit 1; \
+         fi && \
+         rm -rf /usr/local/src/ucx; \
+     fi
 
 FROM $wheel_base AS wheel
 
@@ -471,6 +597,7 @@ ENV CUDA_VERSION=${CUDA_VERSION}
 ARG TORCH_CUDA_INDEX=""
 ENV TORCH_CUDA_INDEX=${TORCH_CUDA_INDEX}
 
+ARG GPU_STACK
 ARG ARCH="x86_64"
 ARG BUILD_TYPE="release"
 ARG BUILD_NIXL_EP=""
@@ -554,7 +681,13 @@ RUN if [ "$BUILD_UCX_SPCX_PLUGIN" = "true" ]; then \
 # meson setup clones the taskflow and prometheus-cpp [wrap-git] subprojects from github.com.
 RUN --mount=type=secret,id=ghconfig,target=/root/.gitconfig rm -rf build && \
     mkdir build && \
-    BUILD_NIXL_EP_RESOLVED="$(./contrib/resolve-nixl-ep.sh)" && \
+    if [ "$GPU_STACK" = "rocm" ]; then \
+        BUILD_NIXL_EP_RESOLVED="false"; \
+        GPU_STACK_FLAGS="-Drocm_path=$ROCM_PATH"; \
+    else \
+        BUILD_NIXL_EP_RESOLVED="$(./contrib/resolve-nixl-ep.sh)" && \
+        GPU_STACK_FLAGS="-Dcudapath_lib=/usr/local/cuda/lib64 -Dcudapath_inc=/usr/local/cuda/include -Drelease_wheel=true"; \
+    fi && \
     if [ "$BUILD_NIXL_EP_RESOLVED" = "true" ]; then \
         echo "=== NIXL EP enabled: Building NIXL with NIXL EP support ===" && \
         NIXL_EP_FLAG="-Dbuild_nixl_ep=true -Dbuild_examples=true"; \
@@ -562,9 +695,7 @@ RUN --mount=type=secret,id=ghconfig,target=/root/.gitconfig rm -rf build && \
         NIXL_EP_FLAG=""; \
     fi && \
     meson setup build/ --prefix=/usr/local/nixl --buildtype=$BUILD_TYPE $NIXL_EP_FLAG -Ducx_path=/usr/local \
-    -Dcudapath_lib="/usr/local/cuda/lib64" \
-    -Dcudapath_inc="/usr/local/cuda/include" \
-    -Drelease_wheel=true && \
+    $GPU_STACK_FLAGS && \
     cd build && \
     ninja -j"${NPROC}" && \
     ninja install
@@ -576,7 +707,7 @@ ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib64/plugins
 RUN echo "/usr/local/nixl/lib/$ARCH-linux-gnu" > /etc/ld.so.conf.d/nixl.conf && \
     echo "/usr/local/nixl/lib/$ARCH-linux-gnu/plugins" >> /etc/ld.so.conf.d/nixl.conf && \
     ldconfig && \
-    if [ "${CUDA_VERSION%%.*}" = "13" ]; then \
+    if [ "$GPU_STACK" != "rocm" ] && [ "${CUDA_VERSION%%.*}" = "13" ]; then \
         OBJ_PLUGIN="$(find /usr/local/nixl -name libplugin_OBJ.so -print -quit)"; \
         test -n "$OBJ_PLUGIN" || { echo "ERROR: libplugin_OBJ.so not found" >&2; exit 1; }; \
         readelf -d "$OBJ_PLUGIN" | grep 'libcuobjclient'; \
@@ -590,7 +721,13 @@ ARG WHL_PYTHON_VERSIONS="3.10,3.11,3.12,3.13,3.14"
 ARG WHL_TORCH_VERSIONS="2.14,2.15,2.16"
 ARG WHL_PLATFORM="manylinux_2_28_$ARCH"
 RUN IFS=',' read -ra PYTHON_VERSIONS <<< "$WHL_PYTHON_VERSIONS" && \
-    BUILD_NIXL_EP_RESOLVED="$(./contrib/resolve-nixl-ep.sh)" && \
+    if [ "$GPU_STACK" = "rocm" ]; then \
+        BUILD_NIXL_EP_RESOLVED="false"; \
+        GPU_STACK_FLAGS="--rocm-path $ROCM_PATH"; \
+    else \
+        BUILD_NIXL_EP_RESOLVED="$(./contrib/resolve-nixl-ep.sh)" && \
+        GPU_STACK_FLAGS=""; \
+    fi && \
     if [ "$BUILD_NIXL_EP_RESOLVED" = "true" ]; then \
         EP_BUILD_FLAGS="--build-nixl-ep --torch-versions $WHL_TORCH_VERSIONS"; \
     else \
@@ -606,12 +743,75 @@ RUN IFS=',' read -ra PYTHON_VERSIONS <<< "$WHL_PYTHON_VERSIONS" && \
             --nixl-plugins-dir $NIXL_PLUGIN_DIR \
             --output-dir dist \
             ${TORCH_CUDA_INDEX:+--torch-cuda-index $TORCH_CUDA_INDEX} \
-            $EP_BUILD_FLAGS ; \
+            $EP_BUILD_FLAGS $GPU_STACK_FLAGS ; \
     done
 
 # Copy the meta package wheel to the dist directory, which will be used to push to PyPI.
 # The meta-wheel is identical for cu12 and cu13 builds (it pins both backends via
 # -Drelease_wheel=true), so only emit it once — arbitrarily during the cu12 build.
-RUN if [ "$(echo $CUDA_VERSION | cut -d. -f1)" = "12" ]; then \
+RUN if [ "$GPU_STACK" != "rocm" ] && [ "$(echo $CUDA_VERSION | cut -d. -f1)" = "12" ]; then \
       cp build/src/bindings/python/nixl-meta/nixl*.whl dist/; \
     fi
+
+# Just the wheels, for "--target wheel_dist --output type=local,dest=<dir>"
+# (build-container.sh --wheel-output-dir).
+FROM scratch AS wheel_dist
+COPY --from=wheel /workspace/nixl/dist /
+
+# nixlbench as a wheel of its own that requires the NIXL wheel built above, for
+# "--target nixlbench_wheel_dist" (build-container.sh --nixlbench-wheel-output-dir).
+# Nothing the NIXL wheels are built from depends on these stages, so a nixlbench
+# build failure cannot keep the NIXL wheels from being built: that relies on the
+# builder skipping the stages a target does not need, as choosing between
+# wheel_base_cuda and wheel_base_rocm already does. They take their files from
+# nixlbench_wheel, never from wheel, so a pre-built nixlbench_base does not make
+# the wheel stage build again.
+FROM ${nixlbench_base} AS nixlbench_wheel
+
+ARG GPU_STACK
+ARG ARCH="x86_64"
+ARG NPROC=1
+ARG WHL_PLATFORM="manylinux_2_28_$ARCH"
+
+WORKDIR /workspace/nixl
+
+# gflags-devel is installed here rather than in wheel_base, whose layers the
+# NIXL wheels are built from. nixl-wheels.sha256 lists the NIXL wheels nixlbench
+# was linked and tested against, to compare with the ones that are published.
+RUN if [ "$GPU_STACK" != "rocm" ]; then \
+        echo "ERROR: the nixlbench wheel is only built for ROCm so far (GPU_STACK=$GPU_STACK)" >&2; \
+        exit 1; \
+    fi && \
+    dnf install -y gflags-devel && \
+    dnf clean all && \
+    ./contrib/build-nixlbench-wheel.sh \
+        --nixl-path /usr/local/nixl \
+        --nixl-wheel-dir dist \
+        --rocm-path "$ROCM_PATH" \
+        --platform "$WHL_PLATFORM" \
+        --output-dir /wheels/nixlbench && \
+    (cd dist && sha256sum -- *.whl) > /wheels/nixlbench/nixl-wheels.sha256
+
+# Installs and runs the nixlbench wheel where neither NIXL nor gflags is
+# installed: on the ROCm base stage, which is therefore built (or taken from the
+# cache) even with a pre-built nixlbench_base. Like the NIXL wheel it needs
+# OpenSSL 3 on the host, which EL8 does not have: the one built for the wheels
+# stands in, registered with ldconfig because the test runs nixlbench without
+# LD_LIBRARY_PATH.
+FROM wheel_base_${GPU_STACK} AS nixlbench_wheel_test
+
+COPY --from=nixlbench_wheel /usr/local/openssl/ /usr/local/openssl/
+COPY --from=nixlbench_wheel /etc/ld.so.conf.d/nixl-openssl.conf /etc/ld.so.conf.d/nixl-openssl.conf
+COPY --from=nixlbench_wheel /workspace/nixl/dist/ /wheels/nixl/
+COPY --from=nixlbench_wheel /wheels/nixlbench/ /wheels/nixlbench/
+COPY --from=nixlbench_wheel /workspace/nixl/contrib/test-nixlbench-wheel.sh /usr/local/bin/
+
+RUN ldconfig && \
+    test-nixlbench-wheel.sh --nixl-wheel-dir /wheels/nixl --nixlbench-wheel-dir /wheels/nixlbench
+
+# Just the tested nixlbench wheel and nixl-wheels.sha256.
+FROM scratch AS nixlbench_wheel_dist
+COPY --from=nixlbench_wheel_test /wheels/nixlbench /
+
+# Keeps the wheel image as the default target.
+FROM wheel

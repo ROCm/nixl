@@ -24,6 +24,28 @@ scheduler runs them concurrently. `build-rocm.sh` remains the reference for the
 sequential build and for configuring NIXL/nixlbench
 (`-Dnixlbench_gpu=rocm -Drocm_path=...`).
 
+### Python package naming
+
+`build-rocm.sh` does not pass `-Dwheel_variant`. With `-Drocm_path` set and no
+CUDA present, meson derives the variant from the ROCm install as
+`rocm<major>_<minor>`, so the Python bindings are installed as
+`nixl_rocm7_14` on a ROCm 7.14 image and `nixl_rocm10_1` on a ROCm 10.1 image.
+To force a name, pass `-Dwheel_variant=<variant>` in the script's third
+argument (`EXTRA_BUILD_ARGS`).
+
+The build also produces the pure-Python `nixl` meta wheel (the `nixl`
+dispatcher), exactly as a CUDA build does, and the script copies it to
+`dist/nixl-<version>-py3-none-any.whl`. It depends on the backend of the ROCm
+version it was built against (`nixl-rocm7.14` or `nixl-rocm10.1`) and is for
+local use only; it is not the `rocm-nixl` distribution.
+
+This image is a CI and development environment. The `rocm-nixl` release wheel
+is built by a separate flow: `contrib/Dockerfile.manylinux` with
+`GPU_STACK=rocm` builds one intermediate backend wheel per ROCm version
+(`nixl_rocm<X>_<Y>-*.whl`, no meta wheel), and `contrib/wheel_merge_rocm.py`
+merges them into a single `rocm_nixl-*.whl`; see
+[`contrib/README.md`](../contrib/README.md).
+
 ## AIS on AMD GPU (docker + nixlbench)
 
 For an interactive AIS run on VRAM with an NVMe-backed directory mounted

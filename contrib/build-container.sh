@@ -1,6 +1,7 @@
 #!/bin/bash
 
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -57,6 +58,16 @@ CUDA_VERSION=${CUDA_VERSION:-}
 # torch wheel index for the manylinux wheel build; unset = Dockerfile default
 # (cu132 for CUDA 13, cu<CUDA_VERSION> for CUDA 12).
 TORCH_CUDA_INDEX=${TORCH_CUDA_INDEX:-}
+# ROCm X.Y.Z for the manylinux wheel build. Setting it builds a ROCm wheel
+# instead of a CUDA one, for that ROCm release only: the backend package is
+# named nixl_rocm<X>_<Y>.
+ROCM_VERSION=""
+WHL_BASE_SET="false"
+PROXY_CA_CERT=""
+WHEEL_OUTPUT_DIR=""
+NIXLBENCH_WHEEL_OUTPUT_DIR=""
+NIXLBENCH_BASE_IMAGE=""
+NIXLBENCH_NIXL_WHEEL_DIR=""
 BUILD_INFINIA="false"
 INFINIA_LIBS_IMAGE="il.artifactory.nvidia.com/sw-nbu-swx-nixl-docker-local/static/infinia-libs:v2.5.0-rcx.1"
 APT_MIRROR=""
@@ -91,6 +102,7 @@ get_options() {
         --wheel-base)
             if [ "$2" ]; then
                 WHL_BASE=$2
+                WHL_BASE_SET="true"
                 shift
             else
                 missing_requirement $1
@@ -169,6 +181,54 @@ get_options() {
                 shift
             else
                 missing_requirement $1
+            fi
+            ;;
+        --rocm-version)
+            if [ "$2" ]; then
+                ROCM_VERSION=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --proxy-ca-cert)
+            if [ "$2" ]; then
+                PROXY_CA_CERT=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --wheel-output-dir)
+            if [ "$2" ]; then
+                WHEEL_OUTPUT_DIR=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --nixlbench-wheel-output-dir)
+            if [ "$2" ]; then
+                NIXLBENCH_WHEEL_OUTPUT_DIR=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --nixlbench-base-image)
+            if [ "$2" ]; then
+                NIXLBENCH_BASE_IMAGE=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --nixlbench-nixl-wheel-dir)
+            if [ "$2" ]; then
+                NIXLBENCH_NIXL_WHEEL_DIR=$2
+                shift
+            else
+                missing_requirement "$1"
             fi
             ;;
         --manylinux-image)
@@ -317,6 +377,15 @@ show_build_options() {
     echo "Python Versions for wheel build: ${WHL_PYTHON_VERSIONS}"
     echo "Wheel Platform: ${WHL_PLATFORM}"
     echo "Torch index: ${TORCH_CUDA_INDEX:-<Dockerfile default>}"
+    if [ -n "$ROCM_VERSION" ]; then
+        echo "GPU stack: ROCm ${ROCM_VERSION}"
+    fi
+    if [ -n "$NIXLBENCH_WHEEL_OUTPUT_DIR" ]; then
+        echo "nixlbench wheel: ${NIXLBENCH_WHEEL_OUTPUT_DIR} (built in: ${NIXLBENCH_BASE_IMAGE:-the wheel stage})"
+        if [ -n "$NIXLBENCH_NIXL_WHEEL_DIR" ]; then
+            echo "nixlbench wheel must match the NIXL wheels in: ${NIXLBENCH_NIXL_WHEEL_DIR}"
+        fi
+    fi
     echo "UCX Repo: ${UCX_REPO}"
     echo "UCX Ref: ${UCX_REF}"
     if [ -n "$UCX_SONAME_SUFFIX" ]; then
@@ -389,6 +458,12 @@ WHL_PYTHON_VERSIONS="${WHL_PYTHON_VERSIONS}"
 WHL_PLATFORM="${WHL_PLATFORM}"
 TAG="${TAG}"
 EOF
+    if [ -n "$ROCM_VERSION" ]; then
+        cat >> "$BUILD_OPTIONS_FILE" <<EOF
+GPU_STACK="rocm"
+ROCM_VERSION="${ROCM_VERSION}"
+EOF
+    fi
 }
 
 show_help() {
@@ -414,6 +489,12 @@ show_help() {
     echo "  [--torch-versions torch versions to build for, comma separated (default: uses Dockerfile ARG default)]"
     echo "  [--cuda-version CUDA MAJOR.MINOR for the manylinux wheel build, e.g. 12.9 (default: ${CUDA_VERSION_DEFAULT})]
   [--torch-cuda-index torch wheel index for the manylinux wheel build (default: cu132 for CUDA 13, cu<CUDA_VERSION> for CUDA 12)]
+  [--rocm-version ROCm X.Y.Z, e.g. 10.1.0: build the manylinux wheel for that ROCm release instead of for CUDA; x86_64 only, and defaults --wheel-base to manylinux_2_28]
+  [--proxy-ca-cert optional root CA certificate (PEM file) of a TLS-intercepting proxy, passed to the manylinux wheel build as the proxy_ca secret; the build is unchanged without it]
+  [--wheel-output-dir directory to write the manylinux wheels to instead of creating an image (BuildKit local output)]
+  [--nixlbench-wheel-output-dir directory outside the build context to write the nixlbench wheel to, built against and requiring the manylinux NIXL wheels, instead of creating an image; requires --rocm-version, cannot be used with --wheel-output-dir]
+  [--nixlbench-base-image pre-built wheel image (this script's default output, from the same sources and options) to build the nixlbench wheel in instead of building the NIXL wheels again; the ROCm base stage is still built, or taken from the build cache, to test the wheel in; requires --nixlbench-wheel-output-dir]
+  [--nixlbench-nixl-wheel-dir directory a --wheel-output-dir build wrote the NIXL wheels to; fail unless they are the wheels the nixlbench wheel was built and tested against; requires --nixlbench-wheel-output-dir]
   [--manylinux-image PyPA manylinux image prefix (default: ${MANYLINUX_IMAGE})]
   [--manylinux-image-tag pinned PyPA manylinux image tag (default: ${MANYLINUX_IMAGE_TAG})]"
     echo "  [--wheel-base-image pre-built wheel base image URL; skips wheel_base stage and builds only the wheel stage]"
@@ -441,14 +522,106 @@ if [ -d "$NIXL_DIR/build" ]; then
     exit 1
 fi
 
+if [ -n "$ROCM_VERSION" ]; then
+    # Ask the dockerfile itself rather than matching paths, as for the spcx flag.
+    if ! grep -q '^ARG GPU_STACK' "$DOCKER_FILE"; then
+        error "ERROR:" "--rocm-version requires a dockerfile that supports ROCm (contrib/Dockerfile.manylinux); $DOCKER_FILE does not"
+    fi
+    if [ "$ARCH" != "x86_64" ]; then
+        error "ERROR:" "--rocm-version is only supported on x86_64 (requested arch: $ARCH)"
+    fi
+    if ! [[ "$ROCM_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        error "ERROR:" "invalid --rocm-version '$ROCM_VERSION' (expected X.Y.Z)"
+    fi
+    if [ -n "$CUDA_VERSION" ]; then
+        error "ERROR:" "--cuda-version (or CUDA_VERSION in the environment) cannot be used with --rocm-version"
+    fi
+    if [ -n "$TORCH_CUDA_INDEX" ]; then
+        error "ERROR:" "--torch-cuda-index (or TORCH_CUDA_INDEX in the environment) cannot be used with --rocm-version"
+    fi
+    if [ -n "$WHL_TORCH_VERSIONS" ]; then
+        error "ERROR:" "--torch-versions cannot be used with --rocm-version (the ROCm wheel is not built against torch)"
+    fi
+    if [ "$BUILD_NIXL_EP" = "true" ]; then
+        error "ERROR:" "--build-nixl-ep cannot be used with --rocm-version (nixl_ep is CUDA-only)"
+    fi
+    # ROCm supports distributions with glibc older than 2.39 (EL9, Ubuntu 22.04).
+    if [ "$WHL_BASE_SET" = "false" ]; then
+        WHL_BASE=manylinux_2_28
+        WHL_PLATFORM=${WHL_BASE}_${ARCH}
+    fi
+fi
+
+if [ -n "$NIXLBENCH_WHEEL_OUTPUT_DIR" ]; then
+    if ! grep -q '^FROM .* AS nixlbench_wheel_dist$' "$DOCKER_FILE"; then
+        error "ERROR:" "--nixlbench-wheel-output-dir requires a dockerfile with a nixlbench_wheel_dist stage (contrib/Dockerfile.manylinux); $DOCKER_FILE has none"
+    fi
+    if [ -z "$ROCM_VERSION" ]; then
+        error "ERROR:" "--nixlbench-wheel-output-dir requires --rocm-version (the nixlbench wheel is only built for ROCm so far)"
+    fi
+    if [ -n "$WHEEL_OUTPUT_DIR" ]; then
+        error "ERROR:" "--nixlbench-wheel-output-dir cannot be used with --wheel-output-dir (a build exports one directory); run this script once for each"
+    fi
+    # The nixlbench build reuses the cached NIXL wheel build, whose cache key
+    # is the content of the build context.
+    case "$(readlink -m "$NIXLBENCH_WHEEL_OUTPUT_DIR")" in
+        "$BUILD_CONTEXT"|"$BUILD_CONTEXT"/*)
+            error "ERROR:" "--nixlbench-wheel-output-dir must be outside the build context ($BUILD_CONTEXT): files written there change the context and the NIXL wheels would be rebuilt"
+            ;;
+    esac
+fi
+
+if [ -n "$NIXLBENCH_NIXL_WHEEL_DIR" ]; then
+    if [ -z "$NIXLBENCH_WHEEL_OUTPUT_DIR" ]; then
+        error "ERROR:" "--nixlbench-nixl-wheel-dir requires --nixlbench-wheel-output-dir"
+    fi
+    if [ ! -d "$NIXLBENCH_NIXL_WHEEL_DIR" ]; then
+        error "ERROR:" "--nixlbench-nixl-wheel-dir: $NIXLBENCH_NIXL_WHEEL_DIR is not a directory"
+    fi
+    # Known before building: the wheels written there changed the context, so
+    # the cached NIXL build they come from is not the one nixlbench would get.
+    if [ -z "$NIXLBENCH_BASE_IMAGE" ]; then
+        case "$(readlink -m "$NIXLBENCH_NIXL_WHEEL_DIR")" in
+            "$BUILD_CONTEXT"|"$BUILD_CONTEXT"/*)
+                error "ERROR:" "--nixlbench-nixl-wheel-dir is inside the build context ($BUILD_CONTEXT): the NIXL wheels written there changed the context, so NIXL would be built again and nixlbench linked against that build instead of theirs; write the NIXL wheels outside the build context or pass --nixlbench-base-image"
+                ;;
+        esac
+    fi
+fi
+
+if [ -n "$NIXLBENCH_BASE_IMAGE" ]; then
+    if [ -z "$NIXLBENCH_WHEEL_OUTPUT_DIR" ]; then
+        error "ERROR:" "--nixlbench-base-image requires --nixlbench-wheel-output-dir"
+    fi
+    if ! grep -q '^ARG nixlbench_base=' "$DOCKER_FILE"; then
+        error "ERROR:" "--nixlbench-base-image requires a dockerfile that consumes it (contrib/Dockerfile.manylinux); $DOCKER_FILE does not"
+    fi
+    BUILD_ARGS+=" --build-arg nixlbench_base=$NIXLBENCH_BASE_IMAGE"
+fi
+
+if [ -n "$PROXY_CA_CERT" ]; then
+    if [ ! -f "$PROXY_CA_CERT" ] || [ ! -r "$PROXY_CA_CERT" ]; then
+        error "ERROR:" "--proxy-ca-cert file not found or not readable: $PROXY_CA_CERT"
+    fi
+    if ! grep -q 'id=proxy_ca' "$DOCKER_FILE"; then
+        error "ERROR:" "--proxy-ca-cert requires a dockerfile that consumes the proxy_ca secret (contrib/Dockerfile.manylinux); $DOCKER_FILE does not"
+    fi
+    BUILD_ARGS+=" --secret id=proxy_ca,src=$(readlink -f "$PROXY_CA_CERT")"
+    BUILD_ARGS+=" --build-arg PROXY_CA_SHA256=$(sha256sum < "$PROXY_CA_CERT" | cut -d' ' -f1)"
+fi
+
 BUILD_ARGS+="${BASE_IMAGE:+ --build-arg BASE_IMAGE=$BASE_IMAGE}"
 BUILD_ARGS+="${BASE_IMAGE_TAG:+ --build-arg BASE_IMAGE_TAG=$BASE_IMAGE_TAG}"
 BUILD_ARGS+=" --build-arg MANYLINUX_IMAGE=$MANYLINUX_IMAGE --build-arg MANYLINUX_IMAGE_TAG=$MANYLINUX_IMAGE_TAG"
 BUILD_ARGS+=" --build-arg WHL_PYTHON_VERSIONS=$WHL_PYTHON_VERSIONS"
 BUILD_ARGS+="${DEFAULT_PYTHON_VERSION:+ --build-arg DEFAULT_PYTHON_VERSION=$DEFAULT_PYTHON_VERSION}"
 BUILD_ARGS+="${WHL_TORCH_VERSIONS:+ --build-arg WHL_TORCH_VERSIONS=$WHL_TORCH_VERSIONS}"
-CUDA_VERSION="${CUDA_VERSION:-$CUDA_VERSION_DEFAULT}"
-BUILD_ARGS+=" --build-arg CUDA_VERSION=$CUDA_VERSION"
+if [ -n "$ROCM_VERSION" ]; then
+    BUILD_ARGS+=" --build-arg GPU_STACK=rocm --build-arg ROCM_VERSION=$ROCM_VERSION"
+else
+    CUDA_VERSION="${CUDA_VERSION:-$CUDA_VERSION_DEFAULT}"
+    BUILD_ARGS+=" --build-arg CUDA_VERSION=$CUDA_VERSION"
+fi
 BUILD_ARGS+="${TORCH_CUDA_INDEX:+ --build-arg TORCH_CUDA_INDEX=$TORCH_CUDA_INDEX}"
 BUILD_ARGS+=" --build-arg WHL_PLATFORM=$WHL_PLATFORM"
 BUILD_ARGS+=" --build-arg ARCH=$ARCH"
@@ -546,6 +719,17 @@ if [ -n "$WHEEL_BASE_IMAGE" ]; then
     DOCKER_BUILD_TARGET="--target wheel"
 fi
 
+if [ -n "$WHEEL_OUTPUT_DIR" ]; then
+    if ! grep -q '^FROM .* AS wheel_dist$' "$DOCKER_FILE"; then
+        error "ERROR:" "--wheel-output-dir requires a dockerfile with a wheel_dist stage (contrib/Dockerfile.manylinux); $DOCKER_FILE has none"
+    fi
+    DOCKER_BUILD_TARGET="--target wheel_dist --output type=local,dest=$WHEEL_OUTPUT_DIR"
+fi
+
+if [ -n "$NIXLBENCH_WHEEL_OUTPUT_DIR" ]; then
+    DOCKER_BUILD_TARGET="--target nixlbench_wheel_dist --output type=local,dest=$NIXLBENCH_WHEEL_OUTPUT_DIR"
+fi
+
 # Infinia DDN libs: pre-pulled from Artifactory on the host and placed flat into
 # infinia-libs/ in the build context. The Dockerfile's BUILD_INFINIA RUN block
 # copies them to /opt/ddn/red/ — no registry reference in the Dockerfile. The whole
@@ -587,4 +771,12 @@ show_build_options
 # The Dockerfiles use RUN --mount, which the legacy builder rejects. Default to
 # BuildKit for Docker releases that do not already (pre-23); podman ignores this.
 export DOCKER_BUILDKIT=${DOCKER_BUILDKIT:-1}
-docker build --platform linux/$ARCH -f $DOCKER_FILE $BUILD_ARGS ${DOCKER_BUILD_EXTRA_ARGS:-} $TAG $NO_CACHE ${DOCKER_BUILD_TARGET:-} $BUILD_CONTEXT
+docker build --platform linux/$ARCH -f $DOCKER_FILE $BUILD_ARGS ${DOCKER_BUILD_EXTRA_ARGS:-} $TAG $NO_CACHE ${DOCKER_BUILD_TARGET:-} $BUILD_CONTEXT || exit
+
+if [ -n "$NIXLBENCH_NIXL_WHEEL_DIR" ]; then
+    NIXL_WHEEL_SUMS="$(readlink -m "$NIXLBENCH_WHEEL_OUTPUT_DIR")/nixl-wheels.sha256"
+    if ! (cd "$NIXLBENCH_NIXL_WHEEL_DIR" && sha256sum --check --quiet "$NIXL_WHEEL_SUMS"); then
+        error "ERROR:" "the nixlbench wheel in $NIXLBENCH_WHEEL_OUTPUT_DIR was not built against the NIXL wheels in $NIXLBENCH_NIXL_WHEEL_DIR: do not use it with them"
+    fi
+    echo "The nixlbench wheel was built against the NIXL wheels in $NIXLBENCH_NIXL_WHEEL_DIR"
+fi
