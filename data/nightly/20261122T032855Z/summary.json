@@ -1,0 +1,1425 @@
+{
+ "schema": 1,
+ "run_id": 44980797766,
+ "run_attempt": 1,
+ "repository": "ROCm/nixl",
+ "stamp": "20261122T032855Z",
+ "upstream_main_sha": "8f0c2c8308b0897a09f4f2dae07e07343ef692c2",
+ "sync": "success",
+ "branches": [
+  {
+   "branch": "main",
+   "slug": "main",
+   "sha": "5f0f4c54f77e60e3cccef2c47380cfb9b627f623",
+   "passed": false,
+   "reason": "the branch cannot build ROCm wheels yet",
+   "wheels_artifact": "rocm-nixl-wheels-main",
+   "results": {
+    "schema": 1,
+    "ref": "main",
+    "sha": "5f0f4c54f77e60e3cccef2c47380cfb9b627f623",
+    "version": "1.6.0",
+    "workflow_run_id": 44980797766,
+    "supported": false,
+    "jobs": [
+     {
+      "name": "plan",
+      "result": "success",
+      "duration_s": 8.0
+     },
+     {
+      "name": "build",
+      "result": "skipped",
+      "duration_s": null
+     },
+     {
+      "name": "merge",
+      "result": "skipped",
+      "duration_s": null
+     },
+     {
+      "name": "test",
+      "result": "skipped",
+      "duration_s": null
+     },
+     {
+      "name": "rocjitsu",
+      "result": "skipped",
+      "duration_s": null
+     },
+     {
+      "name": "rocjitsu-2vm",
+      "result": "skipped",
+      "duration_s": null
+     }
+    ],
+    "wheels": [],
+    "tests": [],
+    "nixlbench": {
+     "required": false,
+     "supported": false,
+     "enabled": false,
+     "result": "skipped",
+     "artifact": null,
+     "wheel": null,
+     "rocm": []
+    }
+   }
+  },
+  {
+   "branch": "for-upstream/ci/rocm-image",
+   "slug": "for-upstream-ci-rocm-image",
+   "sha": "2368dfac7caa8f3390de776c2db918d5c0940508",
+   "passed": false,
+   "reason": "the branch cannot build ROCm wheels yet",
+   "wheels_artifact": "rocm-nixl-wheels-for-upstream-ci-rocm-image",
+   "results": {
+    "schema": 1,
+    "ref": "for-upstream/ci/rocm-image",
+    "sha": "2368dfac7caa8f3390de776c2db918d5c0940508",
+    "version": "1.6.0",
+    "workflow_run_id": 44980797766,
+    "supported": false,
+    "jobs": [
+     {
+      "name": "plan",
+      "result": "success",
+      "duration_s": 8.0
+     },
+     {
+      "name": "build",
+      "result": "skipped",
+      "duration_s": null
+     },
+     {
+      "name": "merge",
+      "result": "skipped",
+      "duration_s": null
+     },
+     {
+      "name": "test",
+      "result": "skipped",
+      "duration_s": null
+     },
+     {
+      "name": "rocjitsu",
+      "result": "skipped",
+      "duration_s": null
+     },
+     {
+      "name": "rocjitsu-2vm",
+      "result": "skipped",
+      "duration_s": null
+     }
+    ],
+    "wheels": [],
+    "tests": [],
+    "nixlbench": {
+     "required": false,
+     "supported": false,
+     "enabled": false,
+     "result": "skipped",
+     "artifact": null,
+     "wheel": null,
+     "rocm": []
+    }
+   }
+  },
+  {
+   "branch": "for-upstream/feat/rocm-wheels",
+   "slug": "for-upstream-feat-rocm-wheels",
+   "sha": "348d4ca14da8683c7dcc06d89594a5036f692b37",
+   "passed": true,
+   "reason": null,
+   "wheels_artifact": "rocm-nixl-wheels-for-upstream-feat-rocm-wheels",
+   "results": {
+    "schema": 1,
+    "ref": "for-upstream/feat/rocm-wheels",
+    "sha": "348d4ca14da8683c7dcc06d89594a5036f692b37",
+    "version": "1.6.0.dev20261122",
+    "workflow_run_id": 44980797766,
+    "supported": true,
+    "jobs": [
+     {
+      "name": "plan",
+      "result": "success",
+      "duration_s": 8.0
+     },
+     {
+      "name": "build",
+      "result": "success",
+      "duration_s": 5781.0
+     },
+     {
+      "name": "merge",
+      "result": "success",
+      "duration_s": 71.0
+     },
+     {
+      "name": "test",
+      "result": "success",
+      "duration_s": 63.0
+     },
+     {
+      "name": "rocjitsu",
+      "result": "success",
+      "duration_s": 237.0
+     },
+     {
+      "name": "rocjitsu-2vm",
+      "result": "success",
+      "duration_s": 249.0
+     }
+    ],
+    "wheels": [
+     {
+      "file": "rocm_nixl-1.6.0.dev20261122-cp310-cp310-manylinux_2_28_x86_64.whl",
+      "bytes": 74950358,
+      "sha256": "18e029991f5408eba65f9db63f2e68b04f801c703bfd01cd5a8ebc26e00e8ca1",
+      "python": "3.10",
+      "rocm": [
+       "7.14",
+       "10.1",
+       "10.2"
+      ]
+     },
+     {
+      "file": "rocm_nixl-1.6.0.dev20261122-cp311-cp311-manylinux_2_28_x86_64.whl",
+      "bytes": 74957013,
+      "sha256": "817f4eadc8b6b915dd5fa98de611e9e60a0152a86ae029ac8c999eee5601fdf0",
+      "python": "3.11",
+      "rocm": [
+       "7.14",
+       "10.1",
+       "10.2"
+      ]
+     },
+     {
+      "file": "rocm_nixl-1.6.0.dev20261122-cp312-cp312-manylinux_2_28_x86_64.whl",
+      "bytes": 75006841,
+      "sha256": "8a28353edbaa348c45708df8bd0f1e0165433c6f8561a609ec9502075975a9ee",
+      "python": "3.12",
+      "rocm": [
+       "7.14",
+       "10.1",
+       "10.2"
+      ]
+     },
+     {
+      "file": "rocm_nixl-1.6.0.dev20261122-cp313-cp313-manylinux_2_28_x86_64.whl",
+      "bytes": 75007468,
+      "sha256": "9ffc3810f8240b4cccd600de1f6741787fe6bc095de792dbf4d509d21d4352ea",
+      "python": "3.13",
+      "rocm": [
+       "7.14",
+       "10.1",
+       "10.2"
+      ]
+     },
+     {
+      "file": "rocm_nixl-1.6.0.dev20261122-cp314-cp314-manylinux_2_28_x86_64.whl",
+      "bytes": 75007851,
+      "sha256": "b31961dd88163d8d312e48d4380a1d23ff6d61b5e3d444fbe680ebe458aa8f6d",
+      "python": "3.14",
+      "rocm": [
+       "7.14",
+       "10.1",
+       "10.2"
+      ]
+     }
+    ],
+    "tests": [
+     {
+      "job": "test",
+      "rocm": "7.14.1",
+      "script": "rocm_wheel_smoke_test.py",
+      "checks": [
+       {
+        "name": "import",
+        "status": "PASS",
+        "detail": "'import nixl' selected nixl_rocm7_14; also installed: nixl_rocm10_1, nixl_rocm10_2",
+        "duration_s": 0.091516,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "no-torch",
+        "status": "PASS",
+        "detail": "rocm-nixl has no torch requirement; torch is not installed",
+        "duration_s": 0.003233,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "plugins",
+        "status": "PASS",
+        "detail": "UCX, POSIX, AIS plugins in /__w/nixl/nixl/venv/lib/python3.12/site-packages/.nixl_rocm7_14.mesonpy.libs/plugins",
+        "duration_s": 0.001399,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "agent",
+        "status": "PASS",
+        "detail": "agent with UCX backend, plugins AIS, AZURE_BLOB, GUSLI, LIBFABRIC, OBJ, POSIX, REDIS, UCX",
+        "duration_s": 0.548292,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "posix-transfer",
+        "status": "PASS",
+        "detail": "1048576 bytes DRAM -> file -> DRAM through POSIX",
+        "duration_s": 0.042257,
+        "bytes": 2097152,
+        "path": "posix"
+       },
+       {
+        "name": "ucx-vram-transfer",
+        "status": "SKIP",
+        "detail": "--gpu not given",
+        "duration_s": 0.0004,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "ais-transfer",
+        "status": "SKIP",
+        "detail": "--ais-dir not given",
+        "duration_s": 0.000379,
+        "bytes": null,
+        "path": null
+       }
+      ]
+     },
+     {
+      "job": "test",
+      "rocm": "10.1.0",
+      "script": "rocm_wheel_smoke_test.py",
+      "checks": [
+       {
+        "name": "import",
+        "status": "PASS",
+        "detail": "'import nixl' selected nixl_rocm10_1; also installed: nixl_rocm10_2, nixl_rocm7_14",
+        "duration_s": 0.092396,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "no-torch",
+        "status": "PASS",
+        "detail": "rocm-nixl has no torch requirement; torch is not installed",
+        "duration_s": 0.003212,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "plugins",
+        "status": "PASS",
+        "detail": "UCX, POSIX, AIS plugins in /__w/nixl/nixl/venv/lib/python3.12/site-packages/.nixl_rocm10_1.mesonpy.libs/plugins",
+        "duration_s": 0.001599,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "agent",
+        "status": "PASS",
+        "detail": "agent with UCX backend, plugins AIS, AZURE_BLOB, GUSLI, LIBFABRIC, OBJ, POSIX, REDIS, UCX",
+        "duration_s": 0.549097,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "posix-transfer",
+        "status": "PASS",
+        "detail": "1048576 bytes DRAM -> file -> DRAM through POSIX",
+        "duration_s": 0.0425,
+        "bytes": 2097152,
+        "path": "posix"
+       },
+       {
+        "name": "ucx-vram-transfer",
+        "status": "SKIP",
+        "detail": "--gpu not given",
+        "duration_s": 0.000421,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "ais-transfer",
+        "status": "SKIP",
+        "detail": "--ais-dir not given",
+        "duration_s": 0.000619,
+        "bytes": null,
+        "path": null
+       }
+      ]
+     },
+     {
+      "job": "test",
+      "rocm": "10.2.0",
+      "script": "rocm_wheel_smoke_test.py",
+      "checks": [
+       {
+        "name": "import",
+        "status": "PASS",
+        "detail": "'import nixl' selected nixl_rocm10_2; also installed: nixl_rocm10_1, nixl_rocm7_14",
+        "duration_s": 0.072265,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "no-torch",
+        "status": "PASS",
+        "detail": "rocm-nixl has no torch requirement; torch is not installed",
+        "duration_s": 0.002701,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "plugins",
+        "status": "PASS",
+        "detail": "UCX, POSIX, AIS plugins in /__w/nixl/nixl/venv/lib/python3.12/site-packages/.nixl_rocm10_2.mesonpy.libs/plugins",
+        "duration_s": 0.001593,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "agent",
+        "status": "PASS",
+        "detail": "agent with UCX backend, plugins AIS, AZURE_BLOB, GUSLI, LIBFABRIC, OBJ, POSIX, REDIS, UCX",
+        "duration_s": 0.541315,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "posix-transfer",
+        "status": "PASS",
+        "detail": "1048576 bytes DRAM -> file -> DRAM through POSIX",
+        "duration_s": 0.041116,
+        "bytes": 2097152,
+        "path": "posix"
+       },
+       {
+        "name": "ucx-vram-transfer",
+        "status": "SKIP",
+        "detail": "--gpu not given",
+        "duration_s": 0.000426,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "ais-transfer",
+        "status": "SKIP",
+        "detail": "--ais-dir not given",
+        "duration_s": 0.000346,
+        "bytes": null,
+        "path": null
+       }
+      ]
+     },
+     {
+      "job": "rocjitsu",
+      "rocm": "10.1.0",
+      "script": "rocm_wheel_smoke_test.py",
+      "checks": [
+       {
+        "name": "import",
+        "status": "PASS",
+        "detail": "'import nixl' selected nixl_rocm10_1; also installed: nixl_rocm10_2, nixl_rocm7_14",
+        "duration_s": 0.834825,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "no-torch",
+        "status": "PASS",
+        "detail": "rocm-nixl has no torch requirement; torch is not installed",
+        "duration_s": 0.005454,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "plugins",
+        "status": "PASS",
+        "detail": "UCX, POSIX, AIS plugins in /home/ubuntu/nixl-smoke/venv/lib/python3.12/site-packages/.nixl_rocm10_1.mesonpy.libs/plugins",
+        "duration_s": 0.00059,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "agent",
+        "status": "PASS",
+        "detail": "agent with UCX backend, plugins AIS, AZURE_BLOB, GUSLI, LIBFABRIC, OBJ, POSIX, REDIS, UCX",
+        "duration_s": 0.771328,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "posix-transfer",
+        "status": "PASS",
+        "detail": "1048576 bytes DRAM -> file -> DRAM through POSIX",
+        "duration_s": 0.069789,
+        "bytes": 2097152,
+        "path": "posix"
+       },
+       {
+        "name": "ucx-vram-transfer",
+        "status": "PASS",
+        "detail": "1048576 bytes VRAM -> VRAM between two agents through UCX",
+        "duration_s": 2.294975,
+        "bytes": 1048576,
+        "path": "ucx"
+       },
+       {
+        "name": "ais-transfer",
+        "status": "PASS",
+        "detail": "1048576 bytes VRAM -> file -> VRAM through AIS in /mnt/nixl-nvme; hipFile fast path (O_DIRECT file, HIPFILE_ALLOW_COMPAT_MODE=false so no POSIX fallback was possible)",
+        "duration_s": 1.049831,
+        "bytes": 2097152,
+        "path": "ais-fast-path"
+       }
+      ]
+     },
+     {
+      "job": "rocjitsu-2vm",
+      "rocm": "10.1.0",
+      "script": "rocm_wheel_two_node_test.py",
+      "checks": [
+       {
+        "name": "import",
+        "status": "PASS",
+        "detail": "'import nixl' selected nixl_rocm10_1; also installed: nixl_rocm10_2, nixl_rocm7_14",
+        "duration_s": 1.01329,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "memory",
+        "status": "PASS",
+        "detail": "2 x 1048576 bytes of DRAM allocated",
+        "duration_s": 0.395264,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "ucx-tls",
+        "status": "SKIP",
+        "detail": "no --require-transport, so UCX may use every transport",
+        "duration_s": 0.007226,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "ucx-devices",
+        "status": "PASS",
+        "detail": "UCX_NET_DEVICES=rocm-ernic0,rocm-rdma-ernic0:1 (the interface holding 192.168.100.12); UCX can use rocm-ernic0",
+        "duration_s": 1.025826,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "rdma-devices",
+        "status": "PASS",
+        "detail": "rocm-rdma-ernic0 (port 1 4: ACTIVE)",
+        "duration_s": 0.001008,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "ucx-transports",
+        "status": "PASS",
+        "detail": "UCX 1.23.0; components self, tcp, sysv, posix, cma, ib, rocm_cpy, rocm_ipc (verbs module loaded); transport/device self/memory, tcp/rocm-ernic0, sysv/memory, posix/memory, cma/memory, rocm_copy/rocm_cpy, rocm_ipc/rocm_ipc",
+        "duration_s": 0.003198,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "agent",
+        "status": "PASS",
+        "detail": "agent two-node-initiator with the UCX backend",
+        "duration_s": 0.043749,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "register",
+        "status": "PASS",
+        "detail": "2 buffer(s) registered with UCX",
+        "duration_s": 0.015961,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "metadata",
+        "status": "PASS",
+        "detail": "metadata exchanged with 192.168.100.11:18601 (1 fetch attempt(s))",
+        "duration_s": 0.106144,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "descriptors",
+        "status": "PASS",
+        "detail": "received over UCX and covered by the target's metadata",
+        "duration_s": 0.061868,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "write",
+        "status": "PASS",
+        "detail": "1048576 bytes dram -> the target's dram",
+        "duration_s": 0.03125,
+        "bytes": 1048576,
+        "path": "tcp"
+       },
+       {
+        "name": "read-back",
+        "status": "PASS",
+        "detail": "1048576 bytes read back from the target match the pattern",
+        "duration_s": 0.032237,
+        "bytes": 1048576,
+        "path": "tcp"
+       },
+       {
+        "name": "target-verified",
+        "status": "PASS",
+        "detail": "the target verified its buffer and acknowledged",
+        "duration_s": 0.011247,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "transport",
+        "status": "PASS",
+        "detail": "UCX's selection for the endpoint to the target: remote memory read by ucp_get*(multi) into host memory from host (inter-node): tcp/rocm-ernic0; remote memory write by ucp_put* from host memory to host (inter-node): tcp/rocm-ernic0; remote memory write by ucp_put* from sgl host memory to host (inter-node): tcp/rocm-ernic0",
+        "duration_s": 0.002251,
+        "bytes": null,
+        "path": null
+       }
+      ],
+      "label": "stage1-initiator"
+     },
+     {
+      "job": "rocjitsu-2vm",
+      "rocm": "10.1.0",
+      "script": "rocm_wheel_two_node_test.py",
+      "checks": [
+       {
+        "name": "import",
+        "status": "PASS",
+        "detail": "'import nixl' selected nixl_rocm10_1; also installed: nixl_rocm10_2, nixl_rocm7_14",
+        "duration_s": 0.772551,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "memory",
+        "status": "PASS",
+        "detail": "1 x 1048576 bytes of DRAM allocated",
+        "duration_s": 0.00326,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "ucx-tls",
+        "status": "SKIP",
+        "detail": "no --require-transport, so UCX may use every transport",
+        "duration_s": 0.00038,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "ucx-devices",
+        "status": "PASS",
+        "detail": "UCX_NET_DEVICES=rocm-ernic0,rocm-rdma-ernic0:1 (the interface holding 192.168.100.11); UCX can use rocm-ernic0",
+        "duration_s": 0.794754,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "rdma-devices",
+        "status": "PASS",
+        "detail": "rocm-rdma-ernic0 (port 1 4: ACTIVE)",
+        "duration_s": 0.000763,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "ucx-transports",
+        "status": "PASS",
+        "detail": "UCX 1.23.0; components self, tcp, sysv, posix, cma, ib, rocm_cpy, rocm_ipc (verbs module loaded); transport/device self/memory, tcp/rocm-ernic0, sysv/memory, posix/memory, cma/memory, rocm_copy/rocm_cpy, rocm_ipc/rocm_ipc",
+        "duration_s": 0.002863,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "agent",
+        "status": "PASS",
+        "detail": "agent two-node-target with the UCX backend",
+        "duration_s": 0.041142,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "register",
+        "status": "PASS",
+        "detail": "1 buffer(s) registered with UCX",
+        "duration_s": 0.01104,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "metadata",
+        "status": "PASS",
+        "detail": "received the metadata of two-node-initiator",
+        "duration_s": 4.033738,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "descriptors",
+        "status": "PASS",
+        "detail": "buffer descriptors sent to two-node-initiator as a UCX notification",
+        "duration_s": 0.011365,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "target-buffer",
+        "status": "PASS",
+        "detail": "1048576 bytes written by the initiator match the pattern",
+        "duration_s": 0.07105,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "served-read",
+        "status": "PASS",
+        "detail": "the initiator read the buffer back and finished",
+        "duration_s": 0.051197,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "transport",
+        "status": "SKIP",
+        "detail": "the target issues no put or get; see the initiator",
+        "duration_s": 0.000578,
+        "bytes": null,
+        "path": null
+       }
+      ],
+      "label": "stage1-target"
+     },
+     {
+      "job": "rocjitsu-2vm",
+      "rocm": "10.1.0",
+      "script": "rocm_wheel_two_node_test.py",
+      "checks": [
+       {
+        "name": "import",
+        "status": "PASS",
+        "detail": "'import nixl' selected nixl_rocm10_1; also installed: nixl_rocm10_2, nixl_rocm7_14",
+        "duration_s": 0.094242,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "memory",
+        "status": "PASS",
+        "detail": "2 x 1048576 bytes of VRAM allocated",
+        "duration_s": 0.994497,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "ucx-tls",
+        "status": "SKIP",
+        "detail": "no --require-transport, so UCX may use every transport",
+        "duration_s": 0.000429,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "ucx-devices",
+        "status": "PASS",
+        "detail": "UCX_NET_DEVICES=rocm-ernic0,rocm-rdma-ernic0:1 (the interface holding 192.168.100.12); UCX can use rocm-ernic0",
+        "duration_s": 0.712106,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "rdma-devices",
+        "status": "PASS",
+        "detail": "rocm-rdma-ernic0 (port 1 4: ACTIVE)",
+        "duration_s": 0.000609,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "ucx-transports",
+        "status": "PASS",
+        "detail": "UCX 1.23.0; components self, tcp, sysv, posix, cma, ib, rocm_cpy, rocm_ipc (verbs module loaded); transport/device self/memory, tcp/rocm-ernic0, sysv/memory, posix/memory, cma/memory, rocm_copy/rocm_cpy, rocm_ipc/rocm_ipc",
+        "duration_s": 0.0027,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "agent",
+        "status": "PASS",
+        "detail": "agent two-node-initiator with the UCX backend",
+        "duration_s": 0.03824,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "register",
+        "status": "PASS",
+        "detail": "2 buffer(s) registered with UCX",
+        "duration_s": 0.009328,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "metadata",
+        "status": "PASS",
+        "detail": "metadata exchanged with 192.168.100.11:18602 (1 fetch attempt(s))",
+        "duration_s": 0.107269,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "descriptors",
+        "status": "PASS",
+        "detail": "received over UCX and covered by the target's metadata",
+        "duration_s": 0.072618,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "write",
+        "status": "PASS",
+        "detail": "1048576 bytes vram -> the target's vram",
+        "duration_s": 1.978128,
+        "bytes": 1048576,
+        "path": "tcp"
+       },
+       {
+        "name": "read-back",
+        "status": "PASS",
+        "detail": "1048576 bytes read back from the target match the pattern",
+        "duration_s": 0.731308,
+        "bytes": 1048576,
+        "path": "tcp"
+       },
+       {
+        "name": "target-verified",
+        "status": "PASS",
+        "detail": "the target verified its buffer and acknowledged",
+        "duration_s": 0.011429,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "transport",
+        "status": "PASS",
+        "detail": "UCX's selection for the endpoint to the target: remote memory read by ucp_get*(multi) into rocm/GPU0 from rocm (inter-node): tcp/rocm-ernic0; remote memory write by ucp_put* from host memory to host (inter-node): tcp/rocm-ernic0; remote memory write by ucp_put* from host memory to rocm (inter-node): tcp/rocm-ernic0; remote memory write by ucp_put* from host memory to rocm/dev[0] (inter-node): tcp/rocm-ernic0; remote memory write by ucp_put* from sgl rocm/GPU0 to rocm (inter-node): tcp/rocm-ernic0; of these, for GPU memory: 'remote memory read by ucp_get*(multi) into rocm/GPU0 from rocm', 'remote memory write by ucp_put* from host memory to rocm', 'remote memory write by ucp_put* from host memory to rocm/dev[0]', 'remote memory write by ucp_put* from sgl rocm/GPU0 to rocm'",
+        "duration_s": 0.001641,
+        "bytes": null,
+        "path": null
+       }
+      ],
+      "label": "stage2-initiator"
+     },
+     {
+      "job": "rocjitsu-2vm",
+      "rocm": "10.1.0",
+      "script": "rocm_wheel_two_node_test.py",
+      "checks": [
+       {
+        "name": "import",
+        "status": "PASS",
+        "detail": "'import nixl' selected nixl_rocm10_1; also installed: nixl_rocm10_2, nixl_rocm7_14",
+        "duration_s": 0.077881,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "memory",
+        "status": "PASS",
+        "detail": "1 x 1048576 bytes of VRAM allocated",
+        "duration_s": 0.985944,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "ucx-tls",
+        "status": "SKIP",
+        "detail": "no --require-transport, so UCX may use every transport",
+        "duration_s": 0.000416,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "ucx-devices",
+        "status": "PASS",
+        "detail": "UCX_NET_DEVICES=rocm-ernic0,rocm-rdma-ernic0:1 (the interface holding 192.168.100.11); UCX can use rocm-ernic0",
+        "duration_s": 0.704522,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "rdma-devices",
+        "status": "PASS",
+        "detail": "rocm-rdma-ernic0 (port 1 4: ACTIVE)",
+        "duration_s": 0.000599,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "ucx-transports",
+        "status": "PASS",
+        "detail": "UCX 1.23.0; components self, tcp, sysv, posix, cma, ib, rocm_cpy, rocm_ipc (verbs module loaded); transport/device self/memory, tcp/rocm-ernic0, sysv/memory, posix/memory, cma/memory, rocm_copy/rocm_cpy, rocm_ipc/rocm_ipc",
+        "duration_s": 0.002793,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "agent",
+        "status": "PASS",
+        "detail": "agent two-node-target with the UCX backend",
+        "duration_s": 0.038619,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "register",
+        "status": "PASS",
+        "detail": "1 buffer(s) registered with UCX",
+        "duration_s": 0.008075,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "metadata",
+        "status": "PASS",
+        "detail": "received the metadata of two-node-initiator",
+        "duration_s": 3.188832,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "descriptors",
+        "status": "PASS",
+        "detail": "buffer descriptors sent to two-node-initiator as a UCX notification",
+        "duration_s": 0.011728,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "target-buffer",
+        "status": "PASS",
+        "detail": "1048576 bytes written by the initiator match the pattern",
+        "duration_s": 2.030026,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "served-read",
+        "status": "PASS",
+        "detail": "the initiator read the buffer back and finished",
+        "duration_s": 0.794638,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "transport",
+        "status": "SKIP",
+        "detail": "the target issues no put or get; see the initiator",
+        "duration_s": 0.000628,
+        "bytes": null,
+        "path": null
+       }
+      ],
+      "label": "stage2-target"
+     },
+     {
+      "job": "rocjitsu-2vm",
+      "rocm": "10.1.0",
+      "script": "rocm_wheel_two_node_test.py",
+      "checks": [
+       {
+        "name": "import",
+        "status": "PASS",
+        "detail": "'import nixl' selected nixl_rocm10_1; also installed: nixl_rocm10_2, nixl_rocm7_14",
+        "duration_s": 0.082372,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "memory",
+        "status": "PASS",
+        "detail": "2 x 1048576 bytes of DRAM allocated",
+        "duration_s": 0.012809,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "ucx-tls",
+        "status": "PASS",
+        "detail": "UCX_TLS=rc,ud,dc set for --require-transport rdma",
+        "duration_s": 0.00024,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "ucx-devices",
+        "status": "PASS",
+        "detail": "UCX_NET_DEVICES=rocm-ernic0,ernic0:1 (the interface holding 192.168.100.12); UCX can use ernic0:1",
+        "duration_s": 0.748427,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "rdma-devices",
+        "status": "PASS",
+        "detail": "ernic0 (port 1 4: ACTIVE)",
+        "duration_s": 0.000731,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "ucx-transports",
+        "status": "PASS",
+        "detail": "UCX 1.23.0; components self, tcp, sysv, posix, cma, ib, rocm_cpy, rocm_ipc (verbs module loaded); transport/device rc_verbs/ernic0:1, ud_verbs/ernic0:1",
+        "duration_s": 0.006429,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "agent",
+        "status": "PASS",
+        "detail": "agent two-node-initiator with the UCX backend",
+        "duration_s": 0.052282,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "register",
+        "status": "PASS",
+        "detail": "2 buffer(s) registered with UCX",
+        "duration_s": 0.014605,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "metadata",
+        "status": "PASS",
+        "detail": "metadata exchanged with 192.168.100.11:18603 (1 fetch attempt(s))",
+        "duration_s": 0.113568,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "descriptors",
+        "status": "PASS",
+        "detail": "received over UCX and covered by the target's metadata",
+        "duration_s": 0.071885,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "write",
+        "status": "PASS",
+        "detail": "1048576 bytes dram -> the target's dram",
+        "duration_s": 0.012892,
+        "bytes": 1048576,
+        "path": "rc"
+       },
+       {
+        "name": "read-back",
+        "status": "PASS",
+        "detail": "1048576 bytes read back from the target match the pattern",
+        "duration_s": 0.018142,
+        "bytes": 1048576,
+        "path": "rc"
+       },
+       {
+        "name": "target-verified",
+        "status": "PASS",
+        "detail": "the target verified its buffer and acknowledged",
+        "duration_s": 0.013934,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "transport",
+        "status": "PASS",
+        "detail": "--require-transport rdma met; UCX's selection for the endpoint to the target: remote memory read by ucp_get*(multi) into host memory from host (inter-node): rc_verbs/ernic0:1; remote memory write by ucp_put* from host memory to host (inter-node): rc_verbs/ernic0:1; remote memory write by ucp_put* from sgl host memory to host (inter-node): rc_verbs/ernic0:1; remote memory write by ucp_put*(fast-completion) from host memory to host (inter-node): rc_verbs/ernic0:1; remote memory write by ucp_put*(multi) from host memory to host (inter-node): rc_verbs/ernic0:1",
+        "duration_s": 0.004353,
+        "bytes": null,
+        "path": null
+       }
+      ],
+      "label": "stage3-initiator"
+     },
+     {
+      "job": "rocjitsu-2vm",
+      "rocm": "10.1.0",
+      "script": "rocm_wheel_two_node_test.py",
+      "checks": [
+       {
+        "name": "import",
+        "status": "PASS",
+        "detail": "'import nixl' selected nixl_rocm10_1; also installed: nixl_rocm10_2, nixl_rocm7_14",
+        "duration_s": 0.084097,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "memory",
+        "status": "PASS",
+        "detail": "1 x 1048576 bytes of DRAM allocated",
+        "duration_s": 0.0014,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "ucx-tls",
+        "status": "PASS",
+        "detail": "UCX_TLS=rc,ud,dc set for --require-transport rdma",
+        "duration_s": 0.000259,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "ucx-devices",
+        "status": "PASS",
+        "detail": "UCX_NET_DEVICES=rocm-ernic0,ernic0:1 (the interface holding 192.168.100.11); UCX can use ernic0:1",
+        "duration_s": 0.711706,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "rdma-devices",
+        "status": "PASS",
+        "detail": "ernic0 (port 1 4: ACTIVE)",
+        "duration_s": 0.000602,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "ucx-transports",
+        "status": "PASS",
+        "detail": "UCX 1.23.0; components self, tcp, sysv, posix, cma, ib, rocm_cpy, rocm_ipc (verbs module loaded); transport/device rc_verbs/ernic0:1, ud_verbs/ernic0:1",
+        "duration_s": 0.005889,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "agent",
+        "status": "PASS",
+        "detail": "agent two-node-target with the UCX backend",
+        "duration_s": 0.030838,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "register",
+        "status": "PASS",
+        "detail": "1 buffer(s) registered with UCX",
+        "duration_s": 0.012823,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "metadata",
+        "status": "PASS",
+        "detail": "received the metadata of two-node-initiator",
+        "duration_s": 2.569402,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "descriptors",
+        "status": "PASS",
+        "detail": "buffer descriptors sent to two-node-initiator as a UCX notification",
+        "duration_s": 0.002885,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "target-buffer",
+        "status": "PASS",
+        "detail": "1048576 bytes written by the initiator match the pattern",
+        "duration_s": 0.044382,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "served-read",
+        "status": "PASS",
+        "detail": "the initiator read the buffer back and finished",
+        "duration_s": 0.101575,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "transport",
+        "status": "SKIP",
+        "detail": "the target issues no put or get; see the initiator",
+        "duration_s": 0.000567,
+        "bytes": null,
+        "path": null
+       }
+      ],
+      "label": "stage3-target"
+     },
+     {
+      "job": "rocjitsu-2vm",
+      "rocm": "10.1.0",
+      "script": "rocm_wheel_two_node_test.py",
+      "checks": [
+       {
+        "name": "import",
+        "status": "PASS",
+        "detail": "'import nixl' selected nixl_rocm10_1; also installed: nixl_rocm10_2, nixl_rocm7_14",
+        "duration_s": 0.094351,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "memory",
+        "status": "PASS",
+        "detail": "2 x 1048576 bytes of VRAM allocated",
+        "duration_s": 0.204328,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "ucx-tls",
+        "status": "PASS",
+        "detail": "UCX_TLS=rc,ud,dc,rocm set for --require-transport rdma",
+        "duration_s": 0.000527,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "ucx-devices",
+        "status": "PASS",
+        "detail": "UCX_NET_DEVICES=rocm-ernic0,ernic0:1 (the interface holding 192.168.100.12); UCX can use ernic0:1",
+        "duration_s": 0.702336,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "rdma-devices",
+        "status": "PASS",
+        "detail": "ernic0 (port 1 4: ACTIVE)",
+        "duration_s": 0.000826,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "ucx-transports",
+        "status": "PASS",
+        "detail": "UCX 1.23.0; components self, tcp, sysv, posix, cma, ib, rocm_cpy, rocm_ipc (verbs module loaded); transport/device rc_verbs/ernic0:1, ud_verbs/ernic0:1, rocm_copy/rocm_cpy, rocm_ipc/rocm_ipc",
+        "duration_s": 0.006455,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "agent",
+        "status": "PASS",
+        "detail": "agent two-node-initiator with the UCX backend",
+        "duration_s": 0.034568,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "register",
+        "status": "PASS",
+        "detail": "2 buffer(s) registered with UCX",
+        "duration_s": 0.02596,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "metadata",
+        "status": "PASS",
+        "detail": "metadata exchanged with 192.168.100.11:18604 (1 fetch attempt(s))",
+        "duration_s": 0.120821,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "descriptors",
+        "status": "PASS",
+        "detail": "received over UCX and covered by the target's metadata",
+        "duration_s": 0.053308,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "write",
+        "status": "PASS",
+        "detail": "1048576 bytes vram -> the target's vram",
+        "duration_s": 0.009733,
+        "bytes": 1048576,
+        "path": "rc"
+       },
+       {
+        "name": "read-back",
+        "status": "PASS",
+        "detail": "1048576 bytes read back from the target match the pattern",
+        "duration_s": 0.031195,
+        "bytes": 1048576,
+        "path": "rc"
+       },
+       {
+        "name": "target-verified",
+        "status": "PASS",
+        "detail": "the target verified its buffer and acknowledged",
+        "duration_s": 0.01166,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "transport",
+        "status": "PASS",
+        "detail": "--require-transport rdma met; UCX's selection for the endpoint to the target: remote memory read by ucp_get*(multi) into rocm/GPU0 from rocm/dev[0] (inter-node): rc_verbs/ernic0:1; remote memory write by ucp_put* from host memory to host (inter-node): rc_verbs/ernic0:1; remote memory write by ucp_put* from host memory to rocm (inter-node): rc_verbs/ernic0:1; remote memory write by ucp_put* from host memory to rocm/dev[0] (inter-node): rc_verbs/ernic0:1; remote memory write by ucp_put* from sgl rocm/GPU0 to rocm/dev[0] (inter-node): rc_verbs/ernic0:1; remote memory write by ucp_put*(fast-completion) from host memory to host (inter-node): rc_verbs/ernic0:1; remote memory write by ucp_put*(fast-completion) from host memory to rocm (inter-node): rc_verbs/ernic0:1; remote memory write by ucp_put*(fast-completion) from host memory to rocm/dev[0] (inter-node): rc_verbs/ernic0:1; remote memory write by ucp_put*(multi) from host memory to host (inter-node): rc_verbs/ernic0:1; remote memory write by ucp_put*(multi) from host memory to rocm (inter-node): rc_verbs/ernic0:1; remote memory write by ucp_put*(multi) from host memory to rocm/dev[0] (inter-node): rc_verbs/ernic0:1; of these, for GPU memory: 'remote memory read by ucp_get*(multi) into rocm/GPU0 from rocm/dev[0]', 'remote memory write by ucp_put* from host memory to rocm', 'remote memory write by ucp_put* from host memory to rocm/dev[0]', 'remote memory write by ucp_put* from sgl rocm/GPU0 to rocm/dev[0]', 'remote memory write by ucp_put*(fast-completion) from host memory to rocm', 'remote memory write by ucp_put*(fast-completion) from host memory to rocm/dev[0]', 'remote memory write by ucp_put*(multi) from host memory to rocm', 'remote memory write by ucp_put*(multi) from host memory to rocm/dev[0]'",
+        "duration_s": 0.002233,
+        "bytes": null,
+        "path": null
+       }
+      ],
+      "label": "stage4-initiator"
+     },
+     {
+      "job": "rocjitsu-2vm",
+      "rocm": "10.1.0",
+      "script": "rocm_wheel_two_node_test.py",
+      "checks": [
+       {
+        "name": "import",
+        "status": "PASS",
+        "detail": "'import nixl' selected nixl_rocm10_1; also installed: nixl_rocm10_2, nixl_rocm7_14",
+        "duration_s": 0.085725,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "memory",
+        "status": "PASS",
+        "detail": "1 x 1048576 bytes of VRAM allocated",
+        "duration_s": 0.160512,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "ucx-tls",
+        "status": "PASS",
+        "detail": "UCX_TLS=rc,ud,dc,rocm set for --require-transport rdma",
+        "duration_s": 0.000479,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "ucx-devices",
+        "status": "PASS",
+        "detail": "UCX_NET_DEVICES=rocm-ernic0,ernic0:1 (the interface holding 192.168.100.11); UCX can use ernic0:1",
+        "duration_s": 0.68676,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "rdma-devices",
+        "status": "PASS",
+        "detail": "ernic0 (port 1 4: ACTIVE)",
+        "duration_s": 0.000672,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "ucx-transports",
+        "status": "PASS",
+        "detail": "UCX 1.23.0; components self, tcp, sysv, posix, cma, ib, rocm_cpy, rocm_ipc (verbs module loaded); transport/device rc_verbs/ernic0:1, ud_verbs/ernic0:1, rocm_copy/rocm_cpy, rocm_ipc/rocm_ipc",
+        "duration_s": 0.005858,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "agent",
+        "status": "PASS",
+        "detail": "agent two-node-target with the UCX backend",
+        "duration_s": 0.029695,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "register",
+        "status": "PASS",
+        "detail": "1 buffer(s) registered with UCX",
+        "duration_s": 0.017255,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "metadata",
+        "status": "PASS",
+        "detail": "received the metadata of two-node-initiator",
+        "duration_s": 2.272292,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "descriptors",
+        "status": "PASS",
+        "detail": "buffer descriptors sent to two-node-initiator as a UCX notification",
+        "duration_s": 0.003258,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "target-buffer",
+        "status": "PASS",
+        "detail": "1048576 bytes written by the initiator match the pattern",
+        "duration_s": 0.042319,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "served-read",
+        "status": "PASS",
+        "detail": "the initiator read the buffer back and finished",
+        "duration_s": 0.061335,
+        "bytes": null,
+        "path": null
+       },
+       {
+        "name": "transport",
+        "status": "SKIP",
+        "detail": "the target issues no put or get; see the initiator",
+        "duration_s": 0.00056,
+        "bytes": null,
+        "path": null
+       }
+      ],
+      "label": "stage4-target"
+     }
+    ],
+    "nixlbench": {
+     "required": false,
+     "supported": true,
+     "enabled": false,
+     "result": "skipped",
+     "artifact": null,
+     "wheel": null,
+     "rocm": []
+    }
+   }
+  }
+ ]
+}
