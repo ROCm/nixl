@@ -2,6 +2,37 @@
  "schema": 1,
  "runs": [
   {
+   "stamp": "20261123T033139Z",
+   "run_id": 45106458140,
+   "upstream_main_sha": "cb66ce836f82fef05d0e907141667ebf6debeb0c",
+   "branches": [
+    {
+     "branch": "main",
+     "slug": "main",
+     "passed": false,
+     "supported": false,
+     "version": "1.6.0",
+     "sha": "5f0f4c54f77e60e3cccef2c47380cfb9b627f623"
+    },
+    {
+     "branch": "for-upstream/ci/rocm-image",
+     "slug": "for-upstream-ci-rocm-image",
+     "passed": false,
+     "supported": false,
+     "version": "1.6.0",
+     "sha": "2368dfac7caa8f3390de776c2db918d5c0940508"
+    },
+    {
+     "branch": "for-upstream/feat/rocm-wheels",
+     "slug": "for-upstream-feat-rocm-wheels",
+     "passed": true,
+     "supported": true,
+     "version": "1.6.0.dev20261123",
+     "sha": "348d4ca14da8683c7dcc06d89594a5036f692b37"
+    }
+   ]
+  },
+  {
    "stamp": "20261122T032855Z",
    "run_id": 44980797766,
    "upstream_main_sha": "8f0c2c8308b0897a09f4f2dae07e07343ef692c2",
