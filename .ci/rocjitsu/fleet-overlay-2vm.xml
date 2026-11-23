@@ -4,8 +4,8 @@ SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All righ
 SPDX-License-Identifier: Apache-2.0
 
 qemu-tool fleet overlay for .github/workflows/rocm-wheels-rocjitsu-2vm.yml,
-layered over qemu/stacks/rocm-golden.xml of the qemu-minimal commit that
-workflow pins.
+layered over fleet-overlay-common.xml, which names the images. It gives the
+fleet its shape and nothing else.
 -->
 <fleet xmlns="http://qemu-tool/fleet/1.0">
   <!-- Both restate rocm-golden.xml: two guests, and the TAP that gives their
@@ -14,12 +14,4 @@ workflow pins.
   <vm-count>2</vm-count>
   <ernic-tap>true</ernic-tap>
   <vm-name-prefix>nixl-rocjitsu-2vm</vm-name-prefix>
-  <!-- The same digests as fleet-overlay.xml; move the two files together.
-       <qemu-ref> is also the workflow's job container. -->
-  <qemu-ref>docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20261112.gdca6903-qemu.4cb9698-vfu.3719c3a@sha256:f7e61be3f29c82aeac60b8fa3f88ac3c434ab0f19a79bd144cb87ed9054aca03</qemu-ref>
-  <ernic-ref>docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-ernic-sbates-fork:20261112.gdca6903-ernic.90434a2-vfu.3719c3a@sha256:7473e631b3237707cc0d0ce635b5dff5e601dc175591f2ceafa84a3c5a85df16</ernic-ref>
-  <rocjitsu-ref>docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20261112.gdca6903-rocjitsu.50be05a@sha256:1e005700d1a3d030581969489fe42adbffedb461b7f2a4e44cc2b973c3bad3d6</rocjitsu-ref>
-  <backing-ref>docker.io/sbates130272/qemu-tool-rocm-golden:20261117.g481c892@sha256:72a0aa0c1ad44bf121fe797f56b8f4199628695974c8f6449834269aeb46e45e</backing-ref>
-  <!-- The test uses no SDXI device, so its server image is not pulled. -->
-  <sdxi-per-vm>0</sdxi-per-vm>
 </fleet>

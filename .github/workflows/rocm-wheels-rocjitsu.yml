@@ -9,11 +9,19 @@ name: ROCm Wheels - rocjitsu Smoke Test
 # at, whatever source the wheels in the artifact were built from.
 #
 # External dependencies besides the actions pinned below and uv from PyPI:
-#   - github.com/sbates130272/qemu-minimal at QEMU_MINIMAL_REF: qemu-tool, the
-#     rocm-golden fleet file and the nonroot-user action.
+#   - github.com/sbates130272/qemu-tool-action at the SHA pinned below, which
+#     installs qemu-tool, boots the guest, binds its GPU and takes it down.
+#   - github.com/sbates130272/qemu-minimal at QEMU_MINIMAL_REF, fetched by the
+#     action: qemu-tool and its rocm-golden fleet file.
+#   - PyPI: what the action installs qemu-tool with in a virtual environment
+#     of its own, and setuptools and one dependency when the qemu container
+#     starts.
+#   - The runner's Ubuntu archive, for a host package the action finds missing,
+#     and github.com/oras-project/oras releases for oras, which the action
+#     checks against its sha256.
 #   - The Docker Hub images under docker.io/sbates130272 that
-#     .ci/rocjitsu/fleet-overlay.xml pins by digest (QEMU, the device servers
-#     and the guest disk); the QEMU image is also the job container.
+#     .ci/rocjitsu/fleet-overlay-common.xml pins by digest: QEMU, the device
+#     servers and the guest disk.
 
 on:
   workflow_call:
@@ -42,7 +50,7 @@ on:
         description: ROCm version of the backend to exercise, as X.Y.Z.
         required: true
         type: string
-        default: '10.1.0'
+        default: '10.2.0'
       artifact-name:
         description: Name of the artifact holding the merged rocm-nixl wheels.
         required: true
@@ -65,16 +73,16 @@ permissions:
   actions: read
 
 env:
-  # The ROCm release in the guest image; only its backend can be selected.
-  GUEST_ROCM: '10.1'
-  # Move together with the nonroot-user action pin, the job container image
-  # and the digests in .ci/rocjitsu/fleet-overlay.xml.
-  QEMU_MINIMAL_REF: 45941a379b6afb4306902c1206d8d981565b5a5c # v2.0.0
-  # Under /var/lib/qemu-tool because the compose bind mounts are resolved by
-  # the host daemon. The compose project is the stack directory's basename.
+  # The ROCm release in the guest of the pinned qemu-tool; only its backend
+  # can be selected.
+  GUEST_ROCM: '10.2'
+  # The qemu-tool the action installs. It moves together with the
+  # qemu-tool-action pin in the steps and the four image refs of
+  # .ci/rocjitsu/fleet-overlay-common.xml, here and in the other three
+  # workflows that boot guests.
+  QEMU_MINIMAL_REF: 992b812f7391058ff411c2861547de2d57f3d6ba # v3.0.0
+  # Under the directory the action creates for the runner's user.
   STACK_DIR: /var/lib/qemu-tool/stacks/nixl-rocjitsu
-  STACK_NAME: nixl-rocjitsu
-  KEY_DIR: /var/lib/qemu-tool/nixl-rocjitsu-key
   NVME_MOUNT: /mnt/nixl-nvme
   UV_VERSION: 0.13.9
 
@@ -111,7 +119,7 @@ jobs:
           exit 0
         fi
         echo "supported=false" >> "$GITHUB_OUTPUT"
-        msg="rocjitsu smoke test skipped for ROCm ${ROCM_VERSION}: the only published rocjitsu guest image carries ROCm ${GUEST_ROCM}, so the rocm-nixl wheel's ROCm ${xy} backend cannot be selected there."
+        msg="rocjitsu smoke test skipped for ROCm ${ROCM_VERSION}: the guest of the pinned qemu-tool carries ROCm ${GUEST_ROCM}, so the rocm-nixl wheel's ROCm ${xy} backend cannot be selected there."
         echo "::notice title=rocjitsu smoke test skipped::${msg}"
         echo "${msg}" >> "$GITHUB_STEP_SUMMARY"
 
@@ -121,20 +129,10 @@ jobs:
     if: needs.gate.outputs.supported == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    container:
-      # <qemu-ref> of .ci/rocjitsu/fleet-overlay.xml.
-      image: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20261112.gdca6903-qemu.4cb9698-vfu.3719c3a@sha256:f7e61be3f29c82aeac60b8fa3f88ac3c434ab0f19a79bd144cb87ed9054aca03
-      # QEMU runs in a sibling container started through the host's docker
-      # socket: the images directory must be the same path on both sides and
-      # quick-start must see host pids.
-      options: >-
-        --device /dev/kvm
-        --pid=host
-        -v /var/run/docker.sock:/var/run/docker.sock
-        -v /var/lib/qemu-tool:/var/lib/qemu-tool
     defaults:
       run:
-        # A container job defaults to sh, which rejects "set -o pipefail".
+        # Named, so that every step runs under errexit and pipefail; the
+        # runner's default bash has no pipefail.
         shell: bash
     env:
       ROCM_XY: ${{ needs.gate.outputs.rocm-xy }}
@@ -145,41 +143,14 @@ jobs:
       with:
         persist-credentials: false
 
-    - name: Check out qemu-minimal
-      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      with:
-        repository: sbates130272/qemu-minimal
-        ref: ${{ env.QEMU_MINIMAL_REF }}
-        path: qemu-minimal
-        persist-credentials: false
-
+    # The device must exist; the action makes it usable by this user.
     - name: Require KVM
       run: |
         set -euo pipefail
-        if [ ! -c /dev/kvm ] || [ ! -w /dev/kvm ]; then
+        if [ ! -c /dev/kvm ]; then
           echo "::error::/dev/kvm is not usable on this runner; the guest cannot boot without it"
           exit 1
         fi
-        df -h / /var/lib/qemu-tool
-
-    # Exports CIUSER_UID and CIUSER_HOME.
-    - name: Run the stack as a non-root user
-      uses: sbates130272/qemu-minimal/.github/actions/nonroot-user@45941a379b6afb4306902c1206d8d981565b5a5c # qemu-minimal v2.0.0
-
-    - name: Install qemu-tool
-      run: |
-        set -euo pipefail
-        # The image ships its own qemu-tool, which would otherwise win on PATH.
-        PIPX_BIN_DIR=/usr/local/bin pipx install --force ./qemu-minimal/qemu
-        resolved=$(readlink -f "$(command -v qemu-tool)")
-        echo "qemu-tool resolves to: ${resolved}"
-        case "$resolved" in
-          /opt/qemu-tool/*)
-            echo "::error::the image's qemu-tool is shadowing the pinned one"
-            exit 1
-            ;;
-        esac
-        qemu-tool quick-start --help >/dev/null
 
     - name: Download the wheels from this run
       if: ${{ !inputs.run-id }}
@@ -217,80 +188,50 @@ jobs:
         echo "MERGED_WHEEL=${wheel[0]}" >> "$GITHUB_ENV"
         test -f .ci/scripts/rocm_wheel_smoke_test.py
 
-    # Run from the qemu-minimal checkout so the qemu container installs the
-    # pinned qemu-tool from it.
+    # Under the two layers is the rocm-golden fleet of the pinned qemu-tool.
+    # The action installs qemu-tool, prepares the host, boots the guest, waits
+    # for its SSH, stages the firmware of the rocjitsu serving its GPU and
+    # loads amdgpu; with gpu: required the step fails unless the GPU ended
+    # bound. It exports QEMU_TOOL_SSH_CONFIG, in which the guest is 'guest'.
+    # The other inputs keep the action's defaults: a fresh guest disk, no
+    # metrics stack, a guest sized from the runner, and a teardown when the
+    # job ends whatever happens.
     - name: Boot one guest with an emulated GPU and a spare NVMe
-      working-directory: qemu-minimal
+      id: fleet
+      timeout-minutes: 25
+      uses: sbates130272/qemu-tool-action@a7468c9e32d6f8f8a323d1e6861a136b8a6fa44c # v2.2.0
+      with:
+        qemu-tool-ref: ${{ env.QEMU_MINIMAL_REF }}
+        stack-dir: ${{ env.STACK_DIR }}
+        xml-overlay: |
+          ${{ github.workspace }}/.ci/rocjitsu/fleet-overlay-common.xml
+          ${{ github.workspace }}/.ci/rocjitsu/fleet-overlay.xml
+        gpu: required
+        ssh-aliases: guest
+        wait-for: ssh
+        wait-timeout: 900
+
+    - name: Check the qemu-tool pin and the fleet that booted
+      env:
+        TOOL_SHA: ${{ steps.fleet.outputs.qemu-tool-sha }}
+        VM_COUNT: ${{ steps.fleet.outputs.vm-count }}
+        FLEET_XML: ${{ steps.fleet.outputs.fleet-xml }}
       run: |
         set -euo pipefail
-        setpriv --reuid "$CIUSER_UID" --regid "$CIUSER_UID" --init-groups \
-          env HOME="$CIUSER_HOME" \
-          qemu-tool quick-start up \
-            --xml qemu/stacks/rocm-golden.xml \
-            --xml "$GITHUB_WORKSPACE/.ci/rocjitsu/fleet-overlay.xml" \
-            --stack-dir "$STACK_DIR" \
-            --key-dir "$KEY_DIR" \
-            --in-network \
-            --no-metrics \
-            --yes
-
-    # A job container cannot reach the SSH port published on the host; on the
-    # stack's network the guest answers on the qemu container's port 2222.
-    - name: Join the stack network
-      run: docker network connect "${STACK_NAME}_fleet" "$(cat /etc/hostname)"
-
-    - name: Wait for the guest to answer SSH
-      run: |
-        set -euo pipefail
-        qemu=$(docker ps -q \
-          --filter "label=com.docker.compose.project=${STACK_NAME}" \
-          --filter "label=com.docker.compose.service=qemu-1")
-        if [ -z "$qemu" ]; then
-          echo "::error::the qemu-1 container is not running"
+        echo "$FLEET_XML"
+        if [ "$TOOL_SHA" != "$QEMU_MINIMAL_REF" ]; then
+          echo "::error::the action installed qemu-tool from the commit '${TOOL_SHA}', not from QEMU_MINIMAL_REF ${QEMU_MINIMAL_REF}"
           exit 1
         fi
-        host=$(docker inspect \
-          -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$qemu")
-        if [ -z "$host" ]; then
-          echo "::error::the guest's container has no address on the stack network"
+        if [ "$VM_COUNT" != 1 ]; then
+          echo "::error::the action booted '${VM_COUNT}' guest(s), not one"
           exit 1
         fi
-        # The image says which account it was baked with.
-        user=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("username") or "ubuntu")' \
-          "${KEY_DIR}/vm-info.json" 2>/dev/null || echo ubuntu)
-
-        cfg="${RUNNER_TEMP}/guest-ssh-config"
-        cat > "$cfg" <<EOF
-        Host guest
-          HostName ${host}
-          Port 2222
-          User ${user}
-          IdentityFile ${KEY_DIR}/id_rsa
-          IdentitiesOnly yes
-          BatchMode yes
-          StrictHostKeyChecking no
-          UserKnownHostsFile /dev/null
-          LogLevel ERROR
-          ConnectTimeout 10
-          ServerAliveInterval 15
-        EOF
-        echo "SSH_CONFIG=${cfg}" >> "$GITHUB_ENV"
-
-        echo "connecting as ${user} to ${host}:2222"
-        for _ in $(seq 1 120); do
-          if ssh -F "$cfg" guest true 2>/dev/null; then
-            echo "guest answered SSH"
-            exit 0
-          fi
-          sleep 5
-        done
-        echo "::error::the guest never answered SSH at ${host}:2222"
-        ssh -v -F "$cfg" guest true 2>&1 | tail -20 || true
-        exit 1
+        ssh -F "$QEMU_TOOL_SSH_CONFIG" guest true
 
     - name: Check the guest's ROCm version
       run: |
-        ssh -F "$SSH_CONFIG" guest bash -s -- "$ROCM_XY" <<'GUEST'
+        ssh -F "$QEMU_TOOL_SSH_CONFIG" guest bash -s -- "$ROCM_XY" <<'GUEST'
         set -euo pipefail
         want=$1
         ver=""
@@ -302,88 +243,21 @@ jobs:
         case "$ver" in
           "$want".*|"$want") ;;
           *)
-            echo "::error::the guest carries ROCm '${ver:-unknown}', not ${want}; the guest image pin and GUEST_ROCM in this workflow disagree"
+            echo "::error::the guest carries ROCm '${ver:-unknown}', not ${want}; the guest image of the pinned qemu-tool, which fleet-overlay-common.xml pins by digest, and GUEST_ROCM in this workflow disagree"
             exit 1
             ;;
         esac
         GUEST
 
-    # The guest keeps amdgpu blacklisted until the firmware files that must
-    # match the rocjitsu build serving it are staged.
-    - name: Stage the GPU firmware and load amdgpu
+    # The action bound the GPU; what HIP needs besides is checked here. A bound
+    # GPU is a named node in the KFD topology.
+    - name: Check the GPU is usable in the guest
       run: |
+        ssh -F "$QEMU_TOOL_SSH_CONFIG" guest bash -s <<'GUEST'
         set -euo pipefail
-        image=$(docker ps \
-          --filter "label=com.docker.compose.project=${STACK_NAME}" \
-          --filter "label=com.docker.compose.service=rocjitsu-1" \
-          --format '{{.Image}}')
-        if [ -z "$image" ]; then
-          echo "::error::the rocjitsu-1 container is not running, so no emulated GPU is being served"
-          exit 1
-        fi
-        echo "generating firmware with ${image}"
-        fw="${RUNNER_TEMP}/rocjitsu-firmware"
-        mkdir -p "$fw"
-        # Streamed as a tar: a bind mount would be resolved by the host daemon.
-        docker run --rm --entrypoint /bin/sh "$image" -c \
-          'python3 /usr/local/bin/vfio_guest_firmware.py --generation gfx1250 --set gap --output /out && tar -cf - -C /out .' \
-          | tar -xf - -C "$fw"
-        ls -l "$fw"
-        test -s "$fw/ip_discovery.bin"
-        test -s "$fw/gc_12_1_0_imu.bin"
-
-        ssh -F "$SSH_CONFIG" guest 'rm -rf /tmp/rocjitsu-firmware && mkdir -p /tmp/rocjitsu-firmware'
-        scp -F "$SSH_CONFIG" "$fw"/*.bin guest:/tmp/rocjitsu-firmware/
-
-        ssh -F "$SSH_CONFIG" guest bash -s <<'GUEST'
-        set -euo pipefail
-        stage=/tmp/rocjitsu-firmware
-        base=/lib/firmware/amdgpu
-        upd=/lib/firmware/updates/amdgpu
-        sudo -n install -d -m 0755 "$base" "$upd"
-        for f in "$stage"/*.bin; do
-          n=$(basename "$f")
-          if [ "$n" = ip_discovery.bin ]; then
-            sudo -n install -o root -g root -m 0644 "$f" "$base/$n"
-          elif [ ! -e "$upd/$n" ] && [ ! -e "$upd/$n.xz" ]; then
-            # Never over a packaged blob: a stub is worse than real microcode.
-            sudo -n install -o root -g root -m 0644 "$f" "$upd/$n"
-          fi
-        done
-
-        probe=/usr/local/bin/amdgpu-probe
-        if [ ! -x "$probe" ]; then
-          echo "::error::the guest image has no ${probe}"
-          exit 1
-        fi
-        status=$("$probe" --status)
-        echo "amdgpu-probe --status: ${status}"
-        case "$status" in
-          absent)
-            echo "::error::no emulated AMD GPU on the guest's PCI bus: the rocjitsu vfio-user device was not attached. Not continuing without a GPU."
-            exit 1
-            ;;
-          ready|unbound)
-            sudo -n "$probe"
-            ;;
-          loaded)
-            ;;
-          *)
-            echo "::error::amdgpu cannot be probed in this guest (amdgpu-probe --status: ${status})"
-            exit 1
-            ;;
-        esac
-
-        # /dev/kfd exists after a probe that bound nothing; a bound GPU is a
-        # named node in the KFD topology.
-        gpus=0
-        for _ in $(seq 40); do
-          gpus=$(cat /sys/class/kfd/kfd/topology/nodes/*/name 2>/dev/null | grep -c . || true)
-          if [ "${gpus:-0}" -ge 1 ]; then break; fi
-          sleep 3
-        done
+        gpus=$(cat /sys/class/kfd/kfd/topology/nodes/*/name 2>/dev/null | grep -c . || true)
         if [ "${gpus:-0}" -lt 1 ]; then
-          echo "::error::amdgpu did not bind the emulated GPU: no GPU node in the KFD topology after 120 s (amdgpu-probe --status: $("$probe" --status))"
+          echo "::error::no GPU node in the KFD topology (amdgpu-probe --status: $(/usr/local/bin/amdgpu-probe --status 2>&1))"
           sudo -n dmesg | grep -i amdgpu | tail -40 || true
           exit 1
         fi
@@ -396,7 +270,7 @@ jobs:
 
     - name: Format and mount the spare NVMe
       run: |
-        ssh -F "$SSH_CONFIG" guest bash -s -- "$NVME_MOUNT" <<'GUEST'
+        ssh -F "$QEMU_TOOL_SSH_CONFIG" guest bash -s -- "$NVME_MOUNT" <<'GUEST'
         set -euo pipefail
         mnt=$1
         lsblk -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS
@@ -429,11 +303,11 @@ jobs:
     - name: Install the wheel in the guest
       run: |
         set -euo pipefail
-        ssh -F "$SSH_CONFIG" guest 'rm -rf "$HOME/nixl-smoke" && mkdir -p "$HOME/nixl-smoke/wheels"'
-        scp -F "$SSH_CONFIG" "$MERGED_WHEEL" guest:nixl-smoke/wheels/
-        scp -F "$SSH_CONFIG" .ci/scripts/rocm_wheel_smoke_test.py guest:nixl-smoke/
+        ssh -F "$QEMU_TOOL_SSH_CONFIG" guest 'rm -rf "$HOME/nixl-smoke" && mkdir -p "$HOME/nixl-smoke/wheels"'
+        scp -F "$QEMU_TOOL_SSH_CONFIG" "$MERGED_WHEEL" guest:nixl-smoke/wheels/
+        scp -F "$QEMU_TOOL_SSH_CONFIG" .ci/scripts/rocm_wheel_smoke_test.py guest:nixl-smoke/
 
-        ssh -F "$SSH_CONFIG" guest bash -s -- "$PYTHON_VERSION" "$UV_VERSION" <<'GUEST'
+        ssh -F "$QEMU_TOOL_SSH_CONFIG" guest bash -s -- "$PYTHON_VERSION" "$UV_VERSION" <<'GUEST'
         set -euo pipefail
         shopt -s nullglob
         py=$1
@@ -467,7 +341,7 @@ jobs:
     # and NVMe. The test reports which path ran.
     - name: Run the smoke test
       run: |
-        ssh -F "$SSH_CONFIG" guest bash -s -- "$ROCM_XY" "$NVME_MOUNT" <<'GUEST'
+        ssh -F "$QEMU_TOOL_SSH_CONFIG" guest bash -s -- "$ROCM_XY" "$NVME_MOUNT" <<'GUEST'
         set -euo pipefail
         cd "$HOME/nixl-smoke"
         . venv/bin/activate
@@ -479,8 +353,8 @@ jobs:
       if: always()
       run: |
         mkdir -p "$GITHUB_WORKSPACE/rocjitsu-results"
-        if [ -n "${SSH_CONFIG:-}" ]; then
-          scp -F "$SSH_CONFIG" guest:nixl-smoke/smoke.json "$GITHUB_WORKSPACE/rocjitsu-results/" || true
+        if [ -n "${QEMU_TOOL_SSH_CONFIG:-}" ]; then
+          scp -F "$QEMU_TOOL_SSH_CONFIG" guest:nixl-smoke/smoke.json "$GITHUB_WORKSPACE/rocjitsu-results/" || true
         fi
 
     - name: Upload the test results
@@ -496,8 +370,8 @@ jobs:
       run: |
         out="$GITHUB_WORKSPACE/rocjitsu-diagnostics"
         mkdir -p "$out"
-        if [ -n "${SSH_CONFIG:-}" ]; then
-          g() { ssh -F "$SSH_CONFIG" guest "$@"; }
+        if [ -n "${QEMU_TOOL_SSH_CONFIG:-}" ]; then
+          g() { ssh -F "$QEMU_TOOL_SSH_CONFIG" guest "$@"; }
           g 'sudo -n dmesg' > "$out/dmesg.txt" 2>&1 || true
           g bash -s > "$out/amdgpu-probe-state.txt" 2>&1 <<'GUEST' || true
         echo "amdgpu-probe --status: $(/usr/local/bin/amdgpu-probe --status 2>&1)"
@@ -519,7 +393,7 @@ jobs:
         echo "--- ROCm"
         cat /opt/rocm/core-*/.info/version /etc/rocjitsu-guest.json 2>&1
         GUEST
-          scp -F "$SSH_CONFIG" guest:nixl-smoke/smoke-test.log guest:nixl-smoke/pip-list.txt "$out/" || true
+          scp -F "$QEMU_TOOL_SSH_CONFIG" guest:nixl-smoke/smoke-test.log guest:nixl-smoke/pip-list.txt "$out/" || true
         fi
         if [ -f "$STACK_DIR/docker-compose.yml" ]; then
           qemu-tool compose --stack-dir "$STACK_DIR" logs --no-color --tail 500 \
@@ -534,19 +408,3 @@ jobs:
         name: rocjitsu-smoke-${{ inputs.rocm-version }}-py${{ inputs.python-version }}${{ inputs.artifact-suffix }}
         path: rocjitsu-diagnostics/
         if-no-files-found: warn
-
-    - name: Take the stack down
-      if: always()
-      working-directory: qemu-minimal
-      run: |
-        qemu-tool quick-start down \
-          --xml qemu/stacks/rocm-golden.xml \
-          --xml "$GITHUB_WORKSPACE/.ci/rocjitsu/fleet-overlay.xml" \
-          --stack-dir "$STACK_DIR" \
-          --yes || true
-        left=$(docker ps -aq --filter "label=com.docker.compose.project=${STACK_NAME}")
-        if [ -n "$left" ]; then
-          echo "::warning::removing containers the teardown left behind"
-          # shellcheck disable=SC2086
-          docker rm -f $left || true
-        fi

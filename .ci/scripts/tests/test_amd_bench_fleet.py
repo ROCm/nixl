@@ -46,9 +46,12 @@ VM_LANES = {
     "vm1-fabric": (1, "fleet-overlay-backends.xml"),
 }
 FABRIC_LANES = ("vm1-loop", "vm1-fabric")
-# The rocjitsu wheel tests stay on qemu-tool v2.0.0 and its ROCm 10.1 guest.
-LEGACY = ("fleet-overlay.xml", "fleet-overlay-2vm.xml")
-LEGACY_GUEST = "qemu-tool-rocm-golden:20261117.g481c892@sha256:"
+# The overlay each rocjitsu wheel test lays over the common one.
+WHEEL_TESTS = {
+    "rocm-wheels-rocjitsu.yml": "fleet-overlay.xml",
+    "rocm-wheels-rocjitsu-2vm.yml": "fleet-overlay-2vm.xml",
+}
+VM_WORKFLOWS = ("amd-bench-vm.yml", "amd-bench-probe.yml", *WHEEL_TESTS)
 TAGS = {
     "qemu-ref": "registry.invalid/ci/qemu-fork:20260101.g1-qemu.2",
     "ernic-ref": "registry.invalid/ci/ernic-fork:20260101.g1-ernic.3",
@@ -751,20 +754,25 @@ class FleetCheckTest(Scratch):
         self.assertIn("'x : :warning: :y' guest(s)", text)
 
 
-class LegacyOverlaysTest(unittest.TestCase):
-    """The overlays of the rocjitsu wheel tests, which this stage leaves alone."""
+class WheelTestOverlaysTest(unittest.TestCase):
+    """The overlays of the rocjitsu wheel tests, which the bench lanes do not boot."""
 
-    def test_they_still_pin_the_10_1_guest_and_know_no_newer_element(self) -> None:
-        for name in LEGACY:
+    def test_they_name_no_image(self) -> None:
+        for name in WHEEL_TESTS.values():
             layer = ci.read_layer(OVERLAYS / name)
-            self.assertIn(LEGACY_GUEST, layer.values["backing-ref"], name)
-            self.assertNotIn("vm-nvme-vram", layer.values, name)
-            self.assertNotIn("vm-nvme-vram", layer.data.decode("utf-8"), name)
-            self.assertLessEqual(set(ci.PIN_ELEMENTS), set(layer.values), name)
+            self.assertEqual(set(ci.PIN_ELEMENTS) & set(layer.values), set(), name)
 
-    def test_no_migrated_lane_passes_them(self) -> None:
+    def test_each_workflow_lays_its_own_over_the_common_one(self) -> None:
+        for workflow, name in WHEEL_TESTS.items():
+            text = (WORKFLOWS / workflow).read_text(encoding="utf-8")
+            layers = re.findall(
+                r"^ +\$\{\{ github\.workspace \}\}/\.ci/rocjitsu/(\S+)$", text, re.M
+            )
+            self.assertEqual(layers, [COMMON, name], workflow)
+
+    def test_no_bench_lane_passes_them(self) -> None:
         text = (SCRIPTS / "amd_bench_stack.sh").read_text(encoding="utf-8")
-        for name in LEGACY:
+        for name in WHEEL_TESTS.values():
             self.assertNotIn(f"/{name}", text)
         for _, name in VM_LANES.values():
             self.assertIn(f".ci/rocjitsu/{name}", text)
@@ -785,10 +793,9 @@ class WorkflowTextTest(unittest.TestCase):
             self.assertEqual(steps.count(step), 1, step)
         self.assertEqual([step for step in steps if step in order], order)
 
-    def test_the_two_workflows_boot_from_the_same_pins(self) -> None:
+    def test_the_workflows_boot_from_the_same_pins(self) -> None:
         texts = [
-            (WORKFLOWS / name).read_text(encoding="utf-8")
-            for name in ("amd-bench-vm.yml", "amd-bench-probe.yml")
+            (WORKFLOWS / name).read_text(encoding="utf-8") for name in VM_WORKFLOWS
         ]
         for pattern in (
             r"uses: sbates130272/qemu-tool-action@(\S+ # \S+)$",

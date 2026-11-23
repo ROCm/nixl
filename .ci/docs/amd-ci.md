@@ -137,13 +137,16 @@ publication of the wheels. They are in
 [amd-bench.md](amd-bench.md#the-bench-workflow).
 
 The container test runs for each ROCm version. The rocjitsu VM tests cover the
-ROCm 10.1 backend only: the one published guest image carries ROCm 10.1, so
-for 7.14 and 10.2 the rocjitsu jobs skip their test with a notice and succeed.
+ROCm 10.2 backend only: the guest image of the pinned qemu-tool (v3.0.0)
+carries ROCm 10.2, so for 7.14 and 10.1 the rocjitsu jobs skip their test with
+a notice and succeed.
 
-The bench VM lanes use a newer guest: they boot the ROCm 10.2 guest of
-qemu-tool v2.1.0 and run the 10.2 backend only; see
-[amd-bench.md](amd-bench.md#lanes). The rocjitsu wheel tests stay on the 10.1
-guest until they move to that one.
+The bench VM lanes boot the same guest, from the same pins, and run the 10.2
+backend only; see [amd-bench.md](amd-bench.md#lanes). All four workflows that
+boot guests do so with
+[qemu-tool-action](https://github.com/sbates130272/qemu-tool-action) over
+[`fleet-overlay-common.xml`](../rocjitsu/fleet-overlay-common.xml), which
+pins the images by digest.
 
 Every branch is built for all three ROCm versions. The merge fails for a
 branch whose `contrib/wheel_merge_rocm.py` has no PyTorch pin for one of them,

@@ -3,27 +3,27 @@
 SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 
-qemu-tool fleet overlay that is the first layer of every job on qemu-tool 2.1
-or later, over the rocm-golden.xml of the qemu-tool the job pins and under the
-job's own overlay: .github/workflows/amd-bench-vm.yml and the VM jobs of
-amd-bench-probe.yml. rocm-wheels-rocjitsu.yml and rocm-wheels-rocjitsu-2vm.yml
-are on qemu-tool v2.0.0, which refuses <vm-nvme-vram>, and do not pass it.
+qemu-tool fleet overlay that is the first layer of every VM job, over the
+rocm-golden.xml of the qemu-tool the job pins and under the job's own overlay:
+.github/workflows/amd-bench-vm.yml, the VM jobs of amd-bench-probe.yml,
+rocm-wheels-rocjitsu.yml and rocm-wheels-rocjitsu-2vm.yml.
 -->
 <fleet xmlns="http://qemu-tool/fleet/1.0">
   <!-- The four images rocm-golden.xml of the pinned qemu-tool names by tag,
        each at the digest that tag had when QEMU_MINIMAL_REF was pinned. QEMU
        and the NIC server are built against one libvfio-user and move as a
-       pair; the guest is that file's guest, ROCm 10.2. The jobs fail after
-       the boot when a tag here differs from the one in that file, so move
-       these, QEMU_MINIMAL_REF and the action pin together. -->
+       pair; the guest is that file's guest, ROCm 10.2. The bench and probe
+       jobs fail after the boot when a tag here differs from the one in that
+       file, so move these, QEMU_MINIMAL_REF and the action pin together, in
+       all four workflows. -->
   <qemu-ref>docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20261112.gdca6903-qemu.4cb9698-vfu.3719c3a@sha256:f7e61be3f29c82aeac60b8fa3f88ac3c434ab0f19a79bd144cb87ed9054aca03</qemu-ref>
   <ernic-ref>docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-ernic-sbates-fork:20261112.gdca6903-ernic.90434a2-vfu.3719c3a@sha256:7473e631b3237707cc0d0ce635b5dff5e601dc175591f2ceafa84a3c5a85df16</ernic-ref>
   <rocjitsu-ref>docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20261112.gdca6903-rocjitsu.50be05a@sha256:1e005700d1a3d030581969489fe42adbffedb461b7f2a4e44cc2b973c3bad3d6</rocjitsu-ref>
   <backing-ref>docker.io/sbates130272/qemu-tool-rocm-golden:20261119.g2aea67d@sha256:14b3785bee88a224f3930be1b091c1a8e594c53c90954ad83fbeaf119a103396</backing-ref>
   <!-- No job uses an SDXI device, so its server image is not pulled. -->
   <sdxi-per-vm>0</sdxi-per-vm>
-  <!-- The base file points every NVMe at the GPU's memory. Off, so the lanes
-       measure what they did before the pin moved; turning it on is a change
-       of its own. -->
+  <!-- The base file points every NVMe at the GPU's memory. Off, so the jobs
+       measure and test what they did before the base file did that; turning
+       it on is a change of its own. -->
   <vm-nvme-vram>false</vm-nvme-vram>
 </fleet>
