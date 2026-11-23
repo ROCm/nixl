@@ -145,7 +145,7 @@ there, see [Publishing](#publishing). Neither can change the result of
 The container lane is [`amd-bench-container.yml`](../../.github/workflows/amd-bench-container.yml)
 and the four VM lanes are [`amd-bench-vm.yml`](../../.github/workflows/amd-bench-vm.yml).
 The VM lanes run the ROCm 10.2 backend only, which is what the guest image
-of qemu-tool v2.1.0 carries. The runner,
+of qemu-tool v3.0.0 carries. The runner,
 [`amd_bench_run.py`](../scripts/amd_bench_run.py), runs on the hosted runner
 and reaches each guest over SSH.
 
@@ -351,15 +351,13 @@ A device that reads or writes GPU memory directly, the RDMA NIC or an NVMe
 drive, does peer-to-peer DMA. Across a host bridge the guest's kernel allows
 that only on an AMD CPU of family 23 (Zen) or later (`cpu_supports_p2pdma()`
 in `drivers/pci/p2pdma.c`). qemu-tool starts every guest with `-cpu EPYC`,
-which under KVM sets the family and the model name and may leave the vendor
-that of the runner's own CPU, and a hosted runner is not always AMD. No
-setting of the fleet XML changes that CPU string at the pinned qemu-tool
-(v2.1.0): it is fixed in `run_vm.py`, and the only setting that reaches it is
-the integer `vm-cpu-phys-bits`. Making a guest report AuthenticAMD on any
-runner therefore needs a change to qemu-tool, a `vendor=AuthenticAMD` on its
-`-cpu` argument, and a new `QEMU_MINIMAL_REF` here. That change has been
-requested for qemu-tool's next release; whether such a guest then runs these
-cases is not known until it is tried.
+which under KVM sets the family and the model name and by itself leaves the
+vendor that of the runner's own CPU, and a hosted runner is not always AMD.
+Up to qemu-tool v2.1.0 no setting changed that. The pinned qemu-tool (v3.0.0)
+adds `vendor=AuthenticAMD` to the `-cpu` argument of every guest unless
+`<vm-cpu-vendor>` says otherwise, which no overlay here does. Whether a guest
+on an Intel runner then runs these cases is not known until a lane draws one;
+the record below says which vendor each guest showed.
 
 In the first run of the lanes `vm1-local` drew an Intel runner. Its two AIS
 `fast-required` cases failed with "No such device", and the guest's kernel
@@ -832,9 +830,10 @@ and the merged compose configuration.
 
 ## Selecting the rocm-ernic backend
 
-The pinned qemu-tool (v2.1.0) always starts the NIC server on its `tcp` mesh
-and has no setting for anything else; the server takes its backend from its
-command line only. The
+Up to qemu-tool v2.1.0 the NIC server was always started on its `tcp` mesh,
+with no setting for anything else; the server takes its backend from its
+command line only. The pinned qemu-tool (v3.0.0) can name a backend in a
+`<devices>` block of the fleet XML, which the jobs do not use yet. The
 `ernic-backend` job therefore writes a `docker-compose.override.yml` into the
 stack directory before the boot. The action and quick-start, `--clean-overlays`
 included, leave that file alone, and quick-start runs compose in that directory
@@ -869,17 +868,20 @@ TAP stack cannot use these backends.
 
 What is kept only until something else happens, to be removed then:
 
-- **A qemu-tool release with the backend setting:** the override, the limits
-  above, and the steps of `amd-bench-vm.yml` and of the probe that write it,
-  check how compose merged it and compare what it repeats.
-- **A qemu-tool release that can set the guest's CPU vendor:** nothing is
-  removed. The pin moves, and the section on the guest's CPU is rewritten once
-  a run shows what such a guest does.
+- **The backend setting of qemu-tool, which v3.0.0 has** (`<backend>` of an
+  ernic `<server>` in a `<devices>` block): the override, the limits above,
+  and the steps of `amd-bench-vm.yml` and of the probe that write it, check
+  how compose merged it and compare what it repeats. Not done with the move
+  of the pin.
+- **The guest's CPU vendor, which qemu-tool v3.0.0 sets:** nothing is
+  removed. The section on the guest's CPU is rewritten once a run shows what
+  such a guest does.
 - **A qemu-tool-action release** with a GPU bring-up that reports without
-  failing the boot, host aliases of the caller's choice and the digests of the
-  images it ran: the lanes' own GPU step, the SSH configuration rewritten from
-  the action's manifest, and the comparison of the overlay's tags with
-  qemu-tool's fleet file.
+  failing the boot and host aliases of the caller's choice, which v2.2.0 has
+  (`gpu: optional`, `ssh-aliases`), and the digests of the images it ran,
+  which it has not: the lanes' own GPU step, the SSH configuration rewritten
+  from the action's manifest, and the comparison of the overlay's tags with
+  qemu-tool's fleet file. Not done with the move of the pin.
 - **The first run in which all four lanes pass:** what only confirms that the
   action did as it was asked, namely the comparison of each container's image
   in `fleet-check` and the retries around the first SSH login.

@@ -49,7 +49,7 @@ env:
   # qemu-tool-action pin in the steps and the four image refs of
   # .ci/rocjitsu/fleet-overlay-common.xml: the pins.* checks fail when they
   # disagree.
-  QEMU_MINIMAL_REF: c32dc74b86f59a27e6cabd77620f8c6fc6e3e8ed # v2.1.0
+  QEMU_MINIMAL_REF: 992b812f7391058ff411c2861547de2d57f3d6ba # v3.0.0
   # The ROCm release in the guest of the pinned qemu-tool.
   GUEST_ROCM: '10.2'
   PYTHONDONTWRITEBYTECODE: 1
@@ -172,7 +172,7 @@ jobs:
       - name: Install qemu-tool
         id: tool
         timeout-minutes: 10
-        uses: sbates130272/qemu-tool-action@cbbf816c2c2cb4a9d911f03bc5117767c5536f43 # v2.1.0
+        uses: sbates130272/qemu-tool-action@a7468c9e32d6f8f8a323d1e6861a136b8a6fa44c # v2.2.0
         with:
           operation: install
           qemu-tool-ref: ${{ env.QEMU_MINIMAL_REF }}
@@ -233,7 +233,7 @@ jobs:
       - name: Boot one guest with an emulated GPU and two spare NVMe drives
         id: fleet
         timeout-minutes: 25
-        uses: sbates130272/qemu-tool-action@cbbf816c2c2cb4a9d911f03bc5117767c5536f43 # v2.1.0
+        uses: sbates130272/qemu-tool-action@a7468c9e32d6f8f8a323d1e6861a136b8a6fa44c # v2.2.0
         with:
           qemu-tool-ref: ${{ env.QEMU_MINIMAL_REF }}
           stack-dir: ${{ env.STACK_DIR }}
@@ -495,7 +495,7 @@ jobs:
         if: always() && steps.fleet.outputs.stack-dir != ''
         continue-on-error: true
         timeout-minutes: 5
-        uses: sbates130272/qemu-tool-action@cbbf816c2c2cb4a9d911f03bc5117767c5536f43 # v2.1.0
+        uses: sbates130272/qemu-tool-action@a7468c9e32d6f8f8a323d1e6861a136b8a6fa44c # v2.2.0
         with:
           operation: down
 
@@ -515,11 +515,12 @@ jobs:
           path: amd-bench-probe-diagnostics/
           if-no-files-found: warn
 
-  # The pinned qemu-tool always starts the NIC server as a node of its TCP
-  # mesh. A docker-compose.override.yml in the stack directory, which the
-  # action and qemu-tool leave alone and compose merges by itself, replaces
-  # that command and the mesh's health check for the one NIC server of a
-  # one-guest stack with no TAP.
+  # The fleet as these overlays leave it starts the NIC server as a node of
+  # the TCP mesh; the <devices> block of qemu-tool 3, which can name another
+  # backend, is not used yet. A docker-compose.override.yml in the stack
+  # directory, which the action and qemu-tool leave alone and compose merges
+  # by itself, replaces that command and the mesh's health check for the one
+  # NIC server of a one-guest stack with no TAP.
   ernic-backend:
     name: NIC backend ${{ matrix.lane }}
     needs: plan
@@ -605,7 +606,7 @@ jobs:
       - name: Install qemu-tool
         id: tool
         timeout-minutes: 10
-        uses: sbates130272/qemu-tool-action@cbbf816c2c2cb4a9d911f03bc5117767c5536f43 # v2.1.0
+        uses: sbates130272/qemu-tool-action@a7468c9e32d6f8f8a323d1e6861a136b8a6fa44c # v2.2.0
         with:
           operation: install
           qemu-tool-ref: ${{ env.QEMU_MINIMAL_REF }}
@@ -763,7 +764,7 @@ jobs:
       - name: Boot one guest with the selected NIC backend
         id: fleet
         timeout-minutes: 25
-        uses: sbates130272/qemu-tool-action@cbbf816c2c2cb4a9d911f03bc5117767c5536f43 # v2.1.0
+        uses: sbates130272/qemu-tool-action@a7468c9e32d6f8f8a323d1e6861a136b8a6fa44c # v2.2.0
         with:
           qemu-tool-ref: ${{ env.QEMU_MINIMAL_REF }}
           stack-dir: ${{ env.STACK_DIR }}
@@ -1556,7 +1557,7 @@ jobs:
         if: always() && steps.fleet.outputs.stack-dir != ''
         continue-on-error: true
         timeout-minutes: 5
-        uses: sbates130272/qemu-tool-action@cbbf816c2c2cb4a9d911f03bc5117767c5536f43 # v2.1.0
+        uses: sbates130272/qemu-tool-action@a7468c9e32d6f8f8a323d1e6861a136b8a6fa44c # v2.2.0
         with:
           operation: down
 

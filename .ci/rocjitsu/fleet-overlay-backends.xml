@@ -8,7 +8,8 @@ qemu-tool fleet overlay for the vm1-loop and vm1-fabric lanes of
 amd-bench-probe.yml, layered over fleet-overlay-common.xml, which names the
 images. It gives the fleet its shape and nothing else: one guest, no TAP and
 no P4. The jobs replace the NIC server's command with a compose override,
-which the pinned qemu-tool cannot be asked to do.
+which was the only way before the <devices> block of qemu-tool 3 and is
+kept until the lanes move to that block.
 -->
 <fleet xmlns="http://qemu-tool/fleet/1.0">
   <!-- Both are what the compose override depends on, and the jobs check
