@@ -333,6 +333,11 @@ jobs:
     - name: Stage the GPU firmware and load amdgpu
       run: bash .ci/scripts/amd_bench_stack.sh gpu
 
+    # After the GPU is bound and before any case. It records and warns only:
+    # no case is skipped for what it finds.
+    - name: Record the CPUs and what peer-to-peer DMA rests on
+      run: bash .ci/scripts/amd_bench_stack.sh facts || true
+
     - name: Prepare the lane's drives and NICs
       run: bash .ci/scripts/amd_bench_stack.sh prepare
 

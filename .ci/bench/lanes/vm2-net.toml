@@ -90,6 +90,73 @@ env = { FI_UNIVERSE_SIZE = "16" }
 [case.axes]
 op = ["WRITE", "READ"]
 
+# Experiments, see "Experiments you can dispatch" in .ci/docs/amd-bench.md.
+# The cases under x-vram are in the weekly tier, which no schedule runs. Each
+# is a nightly case with one thing changed: take "x-vram/<change>/" out of
+# its key for the case it is compared with.
+#
+# rc with GPU memory failed the data check at S and passed at N-r. buf64 is S
+# with the 64 MiB buffer N-r has on VRAM, and buf32 is N-r with the 32 MiB
+# one of S, so that the buffer's size is told from the rest of a profile.
+[[case]]
+key = "vm2-net/x-vram/buf64/ucx/rc/{mem}/{op}/S"
+workload = "x-vram/buf64/ucx/rc/{mem}/{op}/S"
+profile = "S"
+backend = "UCX"
+transport = "rc"
+attach = "net-rdma"
+tier = "weekly"
+flags = { total_buffer_size = 67108864 }
+[case.axes]
+mem = ["VV", "DV", "VD"]
+op = ["WRITE", "READ"]
+
+[[case]]
+key = "vm2-net/x-vram/buf32/ucx/rc/VV/WRITE/N-r"
+workload = "x-vram/buf32/ucx/rc/VV/WRITE/N-r"
+profile = "N-r"
+backend = "UCX"
+transport = "rc"
+op = "WRITE"
+init_mem = "VRAM"
+tgt_mem = "VRAM"
+attach = "net-rdma"
+tier = "weekly"
+timeout_s = 360
+flags = { total_buffer_size = 33554432 }
+
+# S transfers for about 63 ms here, 80 iterations of 0.8 ms (one is a batch
+# of 4 blocks), in a process that lives 6 s. This warm-up lasts about 13 s,
+# so a result that depends on how old the buffer is changes.
+[[case]]
+key = "vm2-net/x-vram/warm/ucx/rc/{mem}/{op}/S"
+workload = "x-vram/warm/ucx/rc/{mem}/{op}/S"
+profile = "S"
+backend = "UCX"
+transport = "rc"
+attach = "net-rdma"
+tier = "weekly"
+timeout_s = 360
+flags = { warmup_iter = 16384 }
+[case.axes]
+mem = ["VV", "DV", "VD"]
+op = ["WRITE", "READ"]
+
+# For the log alone: at this level UCX says whether the RDMA device and ROCm
+# can share GPU memory as a dmabuf, and when an export of one fails.
+[[case]]
+key = "vm2-net/x-vram/ucxdebug/ucx/rc/VV/WRITE/S"
+workload = "x-vram/ucxdebug/ucx/rc/VV/WRITE/S"
+profile = "S"
+backend = "UCX"
+transport = "rc"
+op = "WRITE"
+init_mem = "VRAM"
+tgt_mem = "VRAM"
+attach = "net-rdma"
+tier = "weekly"
+env = { UCX_LOG_LEVEL = "debug" }
+
 [[pair]]
 key = "vm2-net/vram-dram/tcp/WRITE/N"
 kind = "vram-dram"

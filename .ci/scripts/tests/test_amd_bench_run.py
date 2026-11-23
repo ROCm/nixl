@@ -1904,6 +1904,22 @@ class SchedulingTest(unittest.TestCase):
         after = [record["kind"] for record in done.records[uring + 1 : uring + 4]]
         self.assertEqual(after, ["sample", "counter", "test"])
 
+    def test_a_probe_with_no_class_records_and_gates_nothing(self) -> None:
+        probe = (
+            '[[probe]]\nname = "cpu"\nwhen = "start"\nclasses = []\n'
+            "cmd = \"echo 'guest CPU: GenuineIntel, family 6'; exit 1\"\n"
+        )
+        env = self.bench.env(provides=("gpu", "io_uring"), extra=probe)
+        done = self.bench.run("s", env=env)
+        self.assertEqual(done.code, 0, done.text)
+        (test,) = done.kind("test")
+        self.assertEqual((test["test_id"], test["status"]), ("cpu/start", "fail"))
+        self.assertEqual(test["error_excerpt"], "guest CPU: GenuineIntel, family 6")
+        self.assertIn("probe cpu fail: nothing now suspect", done.text)
+        reasons = {case["skip_reason"] for case in done.kind("case")}
+        self.assertNotIn("device-suspect", reasons)
+        self.assertEqual(done.case("s/posix/gpu")["status"], "pass")
+
     def test_required_failure_exits_1(self) -> None:
         self.bench.lane(
             "r",

@@ -171,6 +171,13 @@ after each case that used it, in every guest. After a failed probe the
 remaining cases of that device are recorded as `skip` with the reason
 `device-suspect`.
 
+Each VM template has one more probe, `cpu-amd-zen`, run once in every guest
+at the start. It is the run's record of the guest's CPU, as a `test` record
+of the suite `probe`: `pass` on an AMD CPU of family 23 (Zen) or later, and
+otherwise `fail` with the vendor, family and model name in its excerpt. It
+makes no device suspect and no case is skipped for it; see
+[The guest's CPU and peer-to-peer DMA](#the-guests-cpu-and-peer-to-peer-dma).
+
 ### Budgets and failures
 
 | Lane | Job timeout | Runner's budget | Allowed to fail |
@@ -206,7 +213,7 @@ for the branch, or empty for a `ROCm Wheels` run started by hand.
 | Artifact | From | Holds |
 | --- | --- | --- |
 | `bench-records-<lane>-<rocm><suffix>` | Each lane job | `records.ndjson` and `logs/<case>/` with the output of every process. |
-| `bench-diagnostics-<lane>-<rocm><suffix>` | Each lane job | `runner.log`, the preflight output (`nixlbench --version`, `ldd`), the rendered `env.json` and `run-meta.json`, `e1-vram-timing.txt`; for a VM lane also the guests' kernel logs and device state, the NIC server's statistics and the compose logs. |
+| `bench-diagnostics-<lane>-<rocm><suffix>` | Each lane job | `runner.log`, the preflight output (`nixlbench --version`, `ldd`), the rendered `env.json` and `run-meta.json`, `e1-vram-timing.txt`; for a VM lane also the guests' kernel logs and device state, the NIC server's statistics, the compose logs and the files listed under [The guest's CPU and peer-to-peer DMA](#the-guests-cpu-and-peer-to-peer-dma). |
 | `bench-collected<suffix>` | `collect` | `bench-<stamp>-<slug>-<run>.a<attempt>.ndjson.gz` (and `.zst`), the logs as `.logs.tar.gz`, `matrix-<sha256>.json`, `collect.json` and `summary.md`. |
 
 ### The fabric lanes
@@ -310,7 +317,10 @@ gh workflow run amd-nightly-bench.yml -f run-id=<id of that run> \
   `all` by default. An unknown name fails the plan.
 - `tier` is `nightly` by default. `pr` runs the short cases only, and only
   `bench-container` and `vm1-local` have any, so the other lanes are left out
-  with a notice.
+  with a notice. `weekly` adds the experiment cases to the nightly ones, with
+  five rounds of each sentinel; no schedule runs it, and it is meant to be
+  used with `only`, see
+  [Experiments you can dispatch](#experiments-you-can-dispatch).
 - `only` is a list of case key patterns separated by spaces, such as
   `"vm1-loop/ucx/rc/*"`; the other cases of a lane are recorded as `skip` with
   the reason `filter`.
@@ -323,6 +333,142 @@ python3 .ci/scripts/amd_bench_run.py list --lane vm1-loop --tier nightly \
 python3 .ci/scripts/amd_bench_run.py validate --lane vm1-loop \
   --env .ci/bench/envs/gha-kvm-vm1-loopback.toml
 ```
+
+### The guest's CPU and peer-to-peer DMA
+
+A device that reads or writes GPU memory directly, the RDMA NIC or an NVMe
+drive, does peer-to-peer DMA. Across a host bridge the guest's kernel allows
+that only on an AMD CPU of family 23 (Zen) or later (`cpu_supports_p2pdma()`
+in `drivers/pci/p2pdma.c`). qemu-tool starts every guest with `-cpu EPYC`,
+which under KVM sets the family and the model name and may leave the vendor
+that of the runner's own CPU, and a hosted runner is not always AMD. No
+setting of the fleet XML changes that CPU string at the pinned qemu-tool
+(v2.0.0): it is fixed in `run_vm.py`, and the only setting that reaches it is
+the integer `vm-cpu-phys-bits`. Making a guest report AuthenticAMD on any
+runner therefore needs a change to qemu-tool, a `vendor=AuthenticAMD` on its
+`-cpu` argument, and a new `QEMU_MINIMAL_REF` here. That is worth doing once
+a run has recorded a guest whose vendor is not AMD; whether such a guest then
+runs these cases is not known until it is tried.
+
+In the first run of the lanes `vm1-local` drew an Intel runner. Its two AIS
+`fast-required` cases failed with "No such device", and the guest's kernel
+logged `amdgpu 0000:02:00.0: AIS: P2P DMA not accessible` so often that the
+boot messages, which name the CPU, were gone from the log by the end of the
+lane. The vendor that guest showed is therefore not known. Every VM lane now
+records it, after the GPU is bound and before the first case:
+
+| Where | Holds |
+| --- | --- |
+| A notice on the lane job | The vendor, family, model and model name each guest reports, and the runner's CPU. |
+| A warning on the lane job | Only when a guest's CPU is not an AMD one of family 23 or later: peer-to-peer DMA is expected to be refused, so the cases that move data between VRAM and the NIC or an NVMe drive are expected to fail on this runner. |
+| The `test` record `cpu-amd-zen/start` (and `cpu-amd-zen-tgt/start` in `vm2-net`) | `pass` or `fail`, as above. The runner's own CPU is `runner_cpu_model` of the run record. |
+| `runner-cpu.txt` | The first processor of the runner's `/proc/cpuinfo`, and `lscpu`. |
+| `<guest>-facts.txt` | The guest's CPU and `lscpu`; the lines of its kernel log that mention p2p; the `p2pmem` directory of each AMD PCI function, when it has one, and the PCI tree; the properties of each KFD node (`simd_count`, `array_count`, `cu_per_simd_array` and the rest) and of its memory banks; the ROCm version, the HIP, HSA and hipFile libraries with their versions, and `hipconfig --version`. |
+| `<guest>-dmesg-start.txt` | The whole kernel log before the first case. |
+| `<guest>-dmesg-p2p.txt` | At the end of the lane: how many lines of the kernel log mention p2p, and the 40 most frequent without their timestamps. A notice on the job says so when there are any. |
+| `notes.txt` | The text of the notice and of the warning. |
+
+**Nothing is gated on the CPU.** No case is skipped or expected to fail in
+its record, and no need is withheld: that an Intel runner explains those
+failures is not yet proven, and the record is what will show it.
+
+### Experiments you can dispatch
+
+The first run of the lanes (bench run 44820022442) left three questions, and
+one dispatch answers them. The cases for it are in the `weekly` tier, with
+`x-vram` as the second segment of their key, so no nightly and no pull
+request runs one. Each is a nightly case with one thing changed, and its key
+is that case's with `x-vram/<change>/` after the lane.
+
+```bash
+gh workflow run amd-nightly-bench.yml -f run-id=<id> -f tier=weekly \
+  -f lanes="vm2-net vm1-loop vm1-fabric" \
+  -f only="*/x-vram/* vm2-net/ucx/rc/*/*/S vm1-loop/ucx/rc/*/*/S vm1-fabric/ais/*/*/S vm2-net/ucx/rc/VV/WRITE/N-r vm1-fabric/ais/compat-allowed/WRITE/N"
+```
+
+`<id>` is an `AMD Nightly` or `ROCm Wheels` run whose wheel artifacts have
+not expired. The first pattern selects the 33 experiment cases. The other
+five select the 22 nightly cases they are compared with, so that both run
+on the same runner in the same job: the 20 rc and AIS cases at `S`, and the
+two at `N-r` and `N` that `buf32` is compared with. The nightly
+`ucx/ud/VD/WRITE/S` is left out, because `long` is that case with more time.
+Every other case of the three lanes is recorded as `skip` with the reason
+`filter`. Add `--ref <branch>` while the cases are on a branch only: the
+tier, the matrix and the scripts are those of the ref the workflow is started
+at.
+
+**1. Is it the size of the buffer, or the timing?** 14 cases failed
+nixlbench's data check: rc with GPU memory in `vm2-net` (6) and between host
+and GPU memory in `vm1-loop` (4), and AIS in `vm1-fabric` (4). In each a
+device does DMA on GPU memory and the profile is `S`, which has a 32 MiB
+buffer and makes all of its transfers within about 0.1 s, soon after the
+buffer is filled. The same transfers passed at `N` and `N-r`, whose VRAM
+buffer is 64 MiB and which run for longer. One explanation, not proven, is
+that nixlbench fills the buffer with a `hipMemset` it does not wait for, so
+that the fill and the device write the same memory at once.
+
+| Change | Cases | Differs from the nightly case in |
+| --- | --- | --- |
+| `buf64` | `vm2-net/x-vram/buf64/ucx/rc/{VV,DV,VD}/{WRITE,READ}/S`, `vm1-loop/x-vram/buf64/ucx/rc/{DV,VD}/{WRITE,READ}/S`, `vm1-fabric/x-vram/buf64/ais/{compat-allowed,fast-required}/{WRITE,READ}/S` | `total_buffer_size` 67108864 in place of 33554432. |
+| `buf32` | `vm2-net/x-vram/buf32/ucx/rc/VV/WRITE/N-r`, `vm1-fabric/x-vram/buf32/ais/compat-allowed/WRITE/N` | `total_buffer_size` 33554432 in place of 67108864, in a case that passed. |
+| `warm` | The 14 keys of `buf64`, with `warm` for `buf64` | `warmup_iter` 16384 in `vm2-net`, 65536 in `vm1-loop` and 8192 in `vm1-fabric` in place of 16. An iteration is a batch of 4 blocks, and in the first run took about 0.8 ms in `vm2-net`, 0.2 ms in `vm1-loop` and 1.6 ms in `vm1-fabric` (the latter at `N`: AIS printed no row at `S`). At those rates each is a warm-up of about 13 s, where the 80 iterations of `S` take 16 to 125 ms and its whole process lives 2 to 6 s. |
+
+| Result | Means |
+| --- | --- |
+| The nightly case fails, `buf64` passes and `buf32` fails | The 32 MiB buffer itself: look at what the HIP runtime, the driver or the emulated GPU does differently for that size. |
+| The nightly case and `buf64` fail, `buf32` passes | Not the size: something else that `S` and the larger profiles differ in, of which the time between the fill and the first transfer is one. |
+| `warm` passes where the nightly case fails | The result depends on how old the buffer is, which is what a fill that is still running predicts. Waiting for the fill in nixlbench is then the fix to try. |
+| `warm` fails as well | Not a race that ends: the device reads or writes other memory than the process sees, however long it runs. |
+| The nightly cases pass this time | Not deterministic. Compare the runners' CPUs of the two runs, and dispatch again. |
+
+**2. How was the GPU memory registered?** `vm2-net/x-vram/ucxdebug/ucx/rc/VV/WRITE/S`
+is the failing rc case with `UCX_LOG_LEVEL=debug`, for its log alone; its
+status may differ from the nightly case's because logging slows it. In
+`init.ucx.log` and `tgt.ucx.log` of its log directory look for `dmabuf is
+supported` or `dmabuf is not supported` from the RDMA device and from ROCm,
+and for `failed to export dmabuf handle`. Those lines are what the case is
+for, not the protocol table that every UCX case logs: in the first run that
+table read the same in the failing `S` case and in the passing `N-r` case.
+The initiator of an rc `VV` `WRITE` has no entry "from rocm" at all; its own
+VRAM buffer is listed as "from host memory to rocm", `zero-copy` over
+`rc_verbs/ernic0:1`. That the local buffer is classed as host memory is a
+lead on how it was registered; what it implies is not verified. UCX logs
+each `ibv_reg_dmabuf_mr` call at the trace level only, which a release build
+may not have.
+
+**3. Is ud from GPU to host memory slow, or stuck?** `ucx/ud/VD/WRITE/S`
+printed no row in 180 s in `vm2-net` and in `vm1-loop`, where the other ud
+cases take seconds. `vm1-loop/x-vram/long/ucx/ud/VD/WRITE/S` has 900 s, and
+`vm1-loop/x-vram/short/ucx/ud/VD/WRITE/S` runs 8 iterations in place of 80.
+They are the last two cases of the lane, so that one the runner has to kill
+costs no other case its device, and `long` is the first of the two, so that
+`short` cannot cost it its own. A case of the weekly tier may have a timeout
+of up to 900 s; any other, 480 s. As for every case, the runner starts `long`
+only if it could end, kill included, within the lane's
+[budget](#budgets-and-failures): 930 s of the 46 minutes must be left when
+its turn comes, about 3 minutes after the first case.
+
+| Result | Means |
+| --- | --- |
+| Both pass | Slow. The durations give the time an iteration takes; fewer iterations or a longer timeout make the nightly case pass. |
+| `short` passes, `long` times out | It stalls after some iterations, or an iteration takes more than 11 s. |
+| Both time out | Stuck, or an iteration takes more than 22 s. |
+| `long` is `skip` with the reason `budget` | The boot and the installation left it less than 930 s. Dispatch again with `lanes` set to `vm1-loop` and `only` to `*/x-vram/long/*`, so that it is the first case started. |
+| `long` times out and `short` is `skip` with the reason `device-suspect` | `long` did not stop when asked and the runner had to kill it. For the rate, dispatch again with `only` set to `*/x-vram/short/*`. |
+
+The same run records the CPU of every guest it boots; see
+[The guest's CPU and peer-to-peer DMA](#the-guests-cpu-and-peer-to-peer-dma).
+Which runner a job draws is not chosen. For one more draw, and the AIS cases
+that failed on the Intel runner, add `vm1-local` to `lanes` and
+`vm1-local/ais/*` to `only`.
+
+The dispatch starts three VM jobs side by side. At the rates of the first run
+the selected cases take about 5 minutes in `vm2-net`, 3 in `vm1-loop` before
+the two ud cases and 2 in `vm1-fabric`, on top of the boot and the
+installation every lane job has. The two ud cases add between seconds and 19
+minutes, the latter if both run to their timeout. The nightly runs none of
+these cases; what it gains is the record of the CPU, a few seconds in each VM
+lane.
 
 ## Publishing
 

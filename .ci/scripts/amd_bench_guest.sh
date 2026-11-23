@@ -31,12 +31,15 @@
 #   preflight VENV X.Y OUT-DIR
 #                       require 'nixlbench --version' to run, installing the
 #                       libraries the image lacks if it does not
+#   facts               print the CPU, the kernel's peer-to-peer DMA state,
+#                       the KFD nodes and the ROCm runtime; never fails
 #   state [DEV]         print what the diagnostics keep
 #
 # Results go to stdout as KEY=VALUE lines among the log: NIC_IFACE, NIC_IB,
 # RDMA (ok, absent, unusable), IB_MTU, FS_DEV, RAW_DEV, BLKDEV_SEED (ok,
-# failed), BLKDEV_ACCESS (ok, lost), KV_NODE, GPU_VRAM_LIMIT. The job checks
-# each value before it uses it.
+# failed), BLKDEV_ACCESS (ok, lost), KV_NODE, GPU_VRAM_LIMIT, CPU_VENDOR,
+# CPU_FAMILY, CPU_MODEL, CPU_MODEL_NAME. The job checks each value before it
+# uses it.
 #
 # A device is written only once the same invocation has found it to be what
 # the lane expects: a drive is told from another by its controller's
@@ -758,6 +761,87 @@ cmd_preflight() {
 
 # --- diagnostics ------------------------------------------------------------
 
+# usage: cpu_field KEY; KEY of the first processor in /proc/cpuinfo.
+cpu_field() {
+  awk -F ': *' -v key="$1" '$1 ~ "^" key "[ \t]*$" && !seen++ {print $2}' /proc/cpuinfo
+}
+
+# What a transfer between GPU memory and another device rests on. The kernel
+# allows peer-to-peer DMA across a host bridge only on an AMD CPU of family
+# 23 (Zen) or later, and a guest under KVM may show its host's vendor
+# whatever CPU model it was started with.
+cmd_facts() {
+  set +e
+  local vendor family model name pci node drv f real seen=""
+  vendor=$(cpu_field vendor_id)
+  family=$(cpu_field 'cpu family')
+  model=$(cpu_field model)
+  name=$(cpu_field 'model name')
+  echo "--- CPU"
+  echo "vendor_id: ${vendor:-unknown}; cpu family: ${family:-unknown}; model: ${model:-unknown}; model name: ${name:-unknown}"
+  lscpu 2>&1
+  # Plain values only: the job puts them in a notice.
+  out CPU_VENDOR "$(printf '%s' "${vendor:-unknown}" | tr -cs 'A-Za-z0-9.-' '_')"
+  out CPU_FAMILY "$(printf '%s' "${family:-unknown}" | tr -cs 'A-Za-z0-9.-' '_')"
+  out CPU_MODEL "$(printf '%s' "${model:-unknown}" | tr -cs 'A-Za-z0-9.-' '_')"
+  out CPU_MODEL_NAME "$(printf '%s' "${name:-unknown}" | tr -cs 'A-Za-z0-9.-' '_')"
+
+  echo "--- kernel log lines that mention p2p"
+  root dmesg 2>&1 | grep -i p2p || echo "none"
+  echo "--- pci_p2pdma of the AMD PCI functions"
+  for pci in /sys/bus/pci/devices/*; do
+    [ "$(cat "$pci/vendor" 2>/dev/null)" = 0x1002 ] || continue
+    drv=none
+    if [ -e "$pci/driver" ]; then drv=$(basename "$(readlink -f "$pci/driver")"); fi
+    echo "${pci##*/} device=$(cat "$pci/device") class=$(cat "$pci/class") driver=${drv}"
+    if [ -d "$pci/p2pmem" ]; then
+      grep -H . "$pci"/p2pmem/* 2>&1
+    else
+      echo "${pci##*/} has no p2pmem directory: it publishes no peer-to-peer memory of its own"
+    fi
+  done
+  echo "--- every PCI function with a p2pmem directory"
+  ls -d /sys/bus/pci/devices/*/p2pmem 2>/dev/null || echo "none"
+  echo "--- PCI topology"
+  lspci -tvnn 2>&1
+
+  echo "--- KFD nodes"
+  for node in /sys/class/kfd/kfd/topology/nodes/*; do
+    [ -d "$node" ] || continue
+    echo "node ${node##*/}: name '$(cat "$node/name" 2>/dev/null)', gpu_id $(cat "$node/gpu_id" 2>/dev/null)"
+    cat "$node/properties" 2>/dev/null || root cat "$node/properties" 2>&1
+    for f in "$node"/mem_banks/*/properties; do
+      [ -e "$f" ] || continue
+      echo "${f#"$node"/}:"
+      cat "$f" 2>/dev/null || root cat "$f" 2>&1
+    done
+  done
+
+  echo "--- ROCm and HIP"
+  echo "ROCM_PATH: ${ROCM_PATH:-unset}"
+  for f in /opt/rocm/.info/version /opt/rocm/core/.info/version \
+           /opt/rocm/core-*/.info/version; do
+    if [ -s "$f" ]; then echo "${f}: $(head -1 "$f")"; fi
+  done
+  # The file a soname resolves to carries the runtime's own version. One
+  # install is often reachable under several of these names.
+  for f in /opt/rocm/lib /opt/rocm/core/lib /opt/rocm/core-*/lib; do
+    [ -d "$f" ] || continue
+    real=$(readlink -f "$f")
+    case " ${seen} " in *" ${real} "*) continue ;; esac
+    seen="${seen} ${real}"
+    ls -l "$real"/libamdhip64.so* "$real"/libhsa-runtime64.so* "$real"/libhipfile.so* 2>/dev/null
+  done
+  for f in /opt/rocm/bin/hipconfig /opt/rocm/core/bin/hipconfig \
+           /opt/rocm/core-*/bin/hipconfig; do
+    [ -x "$f" ] || continue
+    echo "${f} --version: $("$f" --version 2>&1 | head -1)"
+    break
+  done
+  echo "kernel $(uname -r); amdgpu module version: $(cat /sys/module/amdgpu/version 2>/dev/null || echo 'none, the module is the kernel'"'"'s')"
+  return 0
+}
+
 cmd_state() {
   local dev=${1:-}
   echo "amdgpu-probe --status: $(/usr/local/bin/amdgpu-probe --status 2>&1 || true)"
@@ -827,6 +911,7 @@ main() {
     nvmeof-down:1) cmd_nvmeof_down "$@" ;;
     install:2) cmd_install "$@" ;;
     preflight:3) cmd_preflight "$@" ;;
+    facts:0) cmd_facts ;;
     state:0|state:1) cmd_state "$@" ;;
     *) usage "unknown subcommand, or the wrong number of arguments: '${command}' with $#" ;;
   esac

@@ -52,6 +52,74 @@ mem = ["DD", "VV"]
 match = { mem = "DD" }
 set = { sentinel = true }
 
+# Experiments, see "Experiments you can dispatch" in .ci/docs/amd-bench.md.
+# The cases under x-vram are in the weekly tier, which no schedule runs. Each
+# is a nightly case with one thing changed: take "x-vram/<change>/" out of
+# its key for the case it is compared with.
+#
+# rc between host and GPU memory failed the data check at S. buf64 is S with
+# a 64 MiB buffer in place of 32 MiB.
+[[case]]
+key = "vm1-loop/x-vram/buf64/ucx/rc/{mem}/{op}/S"
+workload = "x-vram/buf64/ucx/rc/{mem}/{op}/S"
+profile = "S"
+backend = "UCX"
+transport = "rc"
+tier = "weekly"
+flags = { total_buffer_size = 67108864 }
+env = { UCX_NET_DEVICES = "{self.ucx_net_devices}" }
+[case.axes]
+mem = ["DV", "VD"]
+op = ["WRITE", "READ"]
+
+# S transfers for about 16 ms here, 80 iterations of 0.2 ms (one is a batch
+# of 4 blocks), in a process that lives 6 s. This warm-up lasts about 13 s,
+# so a result that depends on how old the buffer is changes.
+[[case]]
+key = "vm1-loop/x-vram/warm/ucx/rc/{mem}/{op}/S"
+workload = "x-vram/warm/ucx/rc/{mem}/{op}/S"
+profile = "S"
+backend = "UCX"
+transport = "rc"
+tier = "weekly"
+timeout_s = 360
+flags = { warmup_iter = 65536 }
+env = { UCX_NET_DEVICES = "{self.ucx_net_devices}" }
+[case.axes]
+mem = ["DV", "VD"]
+op = ["WRITE", "READ"]
+
+# ud from GPU to host memory printed no row in 180 s, where the other ud
+# cases take seconds. long is S with 900 s, and short is S with 8 iterations
+# in place of 80. They are last, so that one the runner has to kill costs no
+# other case its device, and long is first of the two, so that short cannot
+# cost it its own.
+[[case]]
+key = "vm1-loop/x-vram/long/ucx/ud/VD/WRITE/S"
+workload = "x-vram/long/ucx/ud/VD/WRITE/S"
+profile = "S"
+backend = "UCX"
+transport = "ud"
+op = "WRITE"
+init_mem = "VRAM"
+tgt_mem = "DRAM"
+tier = "weekly"
+timeout_s = 900
+env = { UCX_NET_DEVICES = "{self.ucx_net_devices}" }
+
+[[case]]
+key = "vm1-loop/x-vram/short/ucx/ud/VD/WRITE/S"
+workload = "x-vram/short/ucx/ud/VD/WRITE/S"
+profile = "S"
+backend = "UCX"
+transport = "ud"
+op = "WRITE"
+init_mem = "VRAM"
+tgt_mem = "DRAM"
+tier = "weekly"
+flags = { warmup_iter = 4, num_iter = 4 }
+env = { UCX_NET_DEVICES = "{self.ucx_net_devices}" }
+
 [[pair]]
 key = "vm1-loop/vram-dram/rc/WRITE/N-r"
 kind = "vram-dram"

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests of amd_bench_lib.py and of .ci/bench/schema/v1.json.
 
-    python3 -m unittest discover -s .ci/scripts/tests -v
+python3 -m unittest discover -s .ci/scripts/tests -v
 """
 
 from __future__ import annotations
@@ -364,6 +364,14 @@ class StructureTest(unittest.TestCase):
                 problems = self.problems({"one": head + CASE + extra})
                 self.assert_problem(problems, "aa_case must be an active case")
 
+    def test_only_a_weekly_case_may_take_longer_than_a_nightly_one(self) -> None:
+        weekly = CASE + 'tier = "weekly"\ntimeout_s = 900\n'
+        self.assertEqual(self.problems({"one": LANE_HEAD + weekly}), [])
+        for tier in ("pr", "nightly"):
+            late = CASE + f'tier = "{tier}"\ntimeout_s = 900\n'
+            problems = self.problems({"one": LANE_HEAD + late})
+            self.assert_problem(problems, "between 1 and 480")
+
     def test_case_checks(self) -> None:
         for change, expected in (
             (('profile = "S"', ""), "'profile' is required"),
@@ -372,7 +380,14 @@ class StructureTest(unittest.TestCase):
             (('tgt_mem = "FILE"', ""), "'tgt_mem' is required for backend POSIX"),
             (('tgt_mem = "FILE"', 'tgt_mem = "FILE"\nthreads = 0'), "at least 1"),
             (('tgt_mem = "FILE"', 'tgt_mem = "FILE"\nthreads = true'), "an integer"),
-            (('tgt_mem = "FILE"', 'tgt_mem = "FILE"\ntimeout_s = 481'), "between 1"),
+            (('tgt_mem = "FILE"', 'tgt_mem = "FILE"\ntimeout_s = 481'), "and 480"),
+            (
+                (
+                    'tgt_mem = "FILE"',
+                    'tgt_mem = "FILE"\ntier = "weekly"\ntimeout_s = 901',
+                ),
+                "and 900",
+            ),
             (('tgt_mem = "FILE"', 'tgt_mem = "FILE"\ntimeout_s = 0'), "between 1"),
             (('tgt_mem = "FILE"', 'tgt_mem = "FILE"\ndirect = "yes"'), "a boolean"),
             (

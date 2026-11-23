@@ -36,3 +36,14 @@ name = "gpu-kfd"
 when = "between"
 classes = ["gpu"]
 cmd = "test -r /dev/kfd -a -w /dev/kfd && grep -q . /sys/class/kfd/kfd/topology/nodes/*/name"
+
+# Once, at the start, for the record: the guest's kernel lets one device reach
+# the memory of another across a host bridge only on an AMD CPU of family 23
+# (Zen) or later, which is what a transfer between GPU memory and the NIC or
+# an NVMe drive needs. On any other CPU the record is a fail with the CPU in
+# its excerpt. It makes nothing suspect and no case is skipped for it.
+[[probe]]
+name = "cpu-amd-zen"
+when = "start"
+classes = []
+cmd = '''awk -F ': *' '/^vendor_id/ {v = $2} /^cpu family/ {f = $2} /^model name/ {m = $2} /^$/ {exit} END {print "guest CPU: " v ", family " f ", " m; exit !(v == "AuthenticAMD" && f + 0 >= 23)}' /proc/cpuinfo'''

@@ -1539,7 +1539,8 @@ class Runner:
                 " | ".join(lines[-5:]) or f"exit {code}, no output"
             )
             self.suspect.update(probe.classes)
-            note(f"probe {probe.name} {status}: {', '.join(probe.classes)} now suspect")
+            doubted = ", ".join(probe.classes) or "nothing"
+            note(f"probe {probe.name} {status}: {doubted} now suspect")
         self.emit(record)
 
     def probes(

@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """The committed bench matrix under .ci/bench: it loads, every case passes
 the runner's rules, it holds the cases the programme plan counts, and each
-active lane has an env template that resolves its cases."""
+active lane has an env template that resolves its cases. The experiment
+cases, under x-vram in the weekly tier, are counted apart: no nightly and no
+pull request runs one."""
 
 from __future__ import annotations
 
@@ -11,7 +13,10 @@ import contextlib
 import io
 import pathlib
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import tomllib
 import unittest
 from typing import Any, Iterator
@@ -32,6 +37,33 @@ PLAN_COUNTS = {
     "vm2-net": {"S": 26, "N": 4, "B": 1},
     "vm1-loop": {"S": 16, "N": 2},
     "vm1-fabric": {"S": 21, "N": 4, "KV": 11},
+}
+# The experiment cases per lane and change; see "Experiments you can
+# dispatch" in .ci/docs/amd-bench.md.
+EXPERIMENT_COUNTS = {
+    "vm2-net": {"buf64": 6, "buf32": 1, "warm": 6, "ucxdebug": 1},
+    "vm1-loop": {"buf64": 4, "warm": 4, "short": 1, "long": 1},
+    "vm1-fabric": {"buf64": 4, "buf32": 1, "warm": 4},
+}
+# The flags and the environment each change sets, against the nightly case
+# of the same key without "x-vram/<change>/". 'warm' is a longer warm-up.
+EXPERIMENT_FLAGS: dict[str, dict[str, lib.FlagValue]] = {
+    "buf64": {"total_buffer_size": 64 << 20},
+    "buf32": {"total_buffer_size": 32 << 20},
+    "short": {"num_iter": 4, "warmup_iter": 4},
+    "long": {},
+    "ucxdebug": {},
+}
+EXPERIMENT_ENV = {"ucxdebug": {"UCX_LOG_LEVEL": "debug"}}
+# What 'list' shows of each lane in the tiers a schedule or a pull request
+# runs, sentinel rounds and the A/A repeat included: the experiment adds
+# nothing to either.
+LISTED = {
+    "bench-container": {"pr": 26, "nightly": 41},
+    "vm1-local": {"pr": 29, "nightly": 40},
+    "vm2-net": {"pr": 0, "nightly": 36},
+    "vm1-loop": {"pr": 0, "nightly": 21},
+    "vm1-fabric": {"pr": 0, "nightly": 39},
 }
 ACTIVE_LANES = ("bench-container", "vm1-local", "vm2-net", "vm1-loop", "vm1-fabric")
 PR_LANES = ("bench-container", "vm1-local")
@@ -90,6 +122,12 @@ ENV_VARS = frozenset(
 )
 PLACEHOLDER_RE = re.compile(r"\{([^{}]*)\}")
 HOST_VAR_RE = re.compile(r"(self|init|tgt)\.[A-Za-z0-9_]+")
+
+
+def experiment(case: lib.Case) -> str:
+    """The change an experiment case makes, or nothing for any other case."""
+    parts = case.case_key.split("/")
+    return parts[2] if parts[1] == "x-vram" else ""
 
 
 def profile_family(name: str) -> str:
@@ -187,9 +225,114 @@ class MatrixTest(unittest.TestCase):
     def test_counts_match_the_plan(self) -> None:
         for name, want in PLAN_COUNTS.items():
             got = collections.Counter(
-                profile_family(case.profile) for case in self.matrix.lanes[name].cases
+                profile_family(case.profile)
+                for case in self.matrix.lanes[name].cases
+                if not experiment(case)
             )
             self.assertEqual(dict(got), want, name)
+
+    def test_experiments_are_weekly_and_gate_nothing(self) -> None:
+        counts: dict[str, collections.Counter[str]] = {}
+        for lane in self.matrix.lanes.values():
+            paired = {key for pair in lane.pairs for key in (pair.num, pair.den)}
+            for case in lane.cases:
+                change = experiment(case)
+                with self.subTest(case=case.case_key):
+                    self.assertEqual(case.tier == "weekly", bool(change))
+                    self.assertEqual("x-vram" in case.case_key, bool(change))
+                    if not change:
+                        self.assertLessEqual(case.timeout_s, 480)
+                        continue
+                    counts.setdefault(lane.name, collections.Counter())[change] += 1
+                    self.assertEqual(
+                        (case.role, case.required, case.sentinel, case.status),
+                        ("info", False, False, "active"),
+                    )
+                    self.assertNotIn(case.case_key, paired)
+                    self.assertNotEqual(case.case_key, lane.aa_case)
+        self.assertEqual(
+            {name: dict(got) for name, got in counts.items()}, EXPERIMENT_COUNTS
+        )
+
+    def test_an_experiment_is_a_nightly_case_with_one_thing_changed(self) -> None:
+        same = "profile backend engine transport op init_mem tgt_mem direct threads"
+        for lane in self.matrix.lanes.values():
+            by_key = {case.case_key: case for case in lane.cases}
+            for case in lane.cases:
+                change = experiment(case)
+                if not change:
+                    continue
+                with self.subTest(case=case.case_key):
+                    self.assertIn("VRAM", (case.init_mem, case.tgt_mem))
+                    self.assertEqual(case.workload_key, case.case_key.split("/", 1)[1])
+                    control = by_key[case.case_key.replace(f"x-vram/{change}/", "")]
+                    self.assertIn(control.tier, ("pr", "nightly"))
+                    for name in (same + " attach needs scheme").split():
+                        self.assertEqual(getattr(case, name), getattr(control, name))
+                    mine, theirs = self.flags(case), self.flags(control)
+                    changed = {
+                        name: mine.get(name)
+                        for name in sorted(set(mine) | set(theirs))
+                        if mine.get(name) != theirs.get(name)
+                    }
+                    if change == "warm":
+                        self.assertEqual(set(changed), {"warmup_iter"})
+                        longer = self.number(case, "warmup_iter")
+                        self.assertGreaterEqual(longer, 4096)
+                    else:
+                        self.assertEqual(changed, EXPERIMENT_FLAGS[change])
+                    if change in ("buf64", "buf32"):
+                        # The other of the two sizes that passed and failed.
+                        both = self.number(case, "total_buffer_size")
+                        both += self.number(control, "total_buffer_size")
+                        self.assertEqual(both, 96 << 20)
+                    env = dict(set(case.env.items()) ^ set(control.env.items()))
+                    self.assertEqual(env, EXPERIMENT_ENV.get(change, {}))
+                    if change == "long":
+                        self.assertEqual(
+                            (control.timeout_s, case.timeout_s), (180, 900)
+                        )
+                    else:
+                        self.assertIn(case.timeout_s, (control.timeout_s, 360))
+
+    def test_a_case_that_can_be_killed_late_runs_last_in_its_lane(self) -> None:
+        # A case the runner has to kill makes its devices suspect, and the
+        # cases after it are skipped.
+        for name in EXPERIMENT_COUNTS:
+            lane = self.matrix.lanes[name]
+            order = run.schedule(lane, lib.select_cases(lane, "weekly"), 1, False)
+            ud = [
+                entry
+                for entry in order
+                if experiment(entry.case) and entry.case.transport == "ud"
+            ]
+            rest = [
+                entry.position
+                for entry in order
+                if experiment(entry.case) and entry.case.transport != "ud"
+            ]
+            if ud:
+                self.assertEqual(ud, order[-len(ud) :], name)
+                self.assertGreater(ud[0].position, max(rest), name)
+                # The one with the long timeout is the one asked for: no
+                # other of them may cost it its device.
+                self.assertEqual(
+                    [experiment(entry.case) for entry in ud], ["long", "short"]
+                )
+                self.assertEqual(ud[0].case.timeout_s, 900, name)
+
+    def test_the_nightly_and_the_pr_tier_list_what_they_did(self) -> None:
+        for name, tiers in LISTED.items():
+            lane = self.matrix.lanes[name]
+            where = ["--matrix", str(BENCH), "--lane", name]
+            for tier, want in tiers.items():
+                with self.subTest(lane=name, tier=tier):
+                    code, text = run_cli("list", *where, "--tier", tier)
+                    self.assertEqual(code, 0, text)
+                    self.assertEqual(len(text.splitlines()), want)
+                    self.assertNotIn("x-vram", text)
+                    for case in lib.select_cases(lane, tier):
+                        self.assertFalse(experiment(case), case.case_key)
 
     def test_storage_sets_are_the_same_on_every_attachment(self) -> None:
         def storage(lane: str) -> dict[str, str]:
@@ -198,7 +341,7 @@ class MatrixTest(unittest.TestCase):
                     case, self.matrix.profiles[case.profile]
                 )
                 for case in self.matrix.lanes[lane].cases
-                if case.backend in ("POSIX", "AIS", "GUSLI")
+                if case.backend in ("POSIX", "AIS", "GUSLI") and not experiment(case)
             }
 
         local = storage("vm1-local")
@@ -248,6 +391,8 @@ class MatrixTest(unittest.TestCase):
     def test_pr_tier_is_the_s_cases_of_two_lanes(self) -> None:
         for lane in self.matrix.lanes.values():
             for case in lane.cases:
+                if experiment(case):
+                    continue
                 with self.subTest(case=case.case_key):
                     self.assertIn(case.tier, ("pr", "nightly"))
                     want_pr = lane.name in PR_LANES and case.profile == "S"
@@ -258,6 +403,8 @@ class MatrixTest(unittest.TestCase):
 
     def test_roles(self) -> None:
         for case in self.cases():
+            if experiment(case):
+                continue
             with self.subTest(case=case.case_key):
                 if case.profile != "S" and case.backend != "NVME_KV":
                     self.assertEqual(case.role, "track")
@@ -457,7 +604,7 @@ class EnvTemplateTest(unittest.TestCase):
                 where += ["--env", str(ENVS / f"{lane.env_class}.toml")]
                 code, text = run_cli("validate", *where)
                 self.assertEqual(code, 0, text)
-                code, text = run_cli("list", *where, "--tier", "nightly", "--commands")
+                code, text = run_cli("list", *where, "--tier", "weekly", "--commands")
                 self.assertEqual(code, 0, text)
                 self.assertNotRegex(text, r"\{[a-z_.]+\}")
                 self.assertNotIn("     # ", text)
@@ -535,8 +682,62 @@ class EnvTemplateTest(unittest.TestCase):
                     self.assertEqual(probed, want, device)
         both = {"guest1", "guest2"}
         self.assertEqual(set(self.envs["gha-kvm-vm2"].roles.values()), both)
-        kv = [p for p in self.envs["gha-kvm-vm1-nvmeof"].probes if not p.classes]
+        kv = [
+            probe
+            for probe in self.envs["gha-kvm-vm1-nvmeof"].probes
+            if probe.name == "kv-generic-node"
+        ]
         self.assertEqual([p.cmd for p in kv], ["test -c /run/amd-bench/kv"])
+
+    def test_every_guest_records_its_cpu_once_and_gates_nothing_on_it(self) -> None:
+        for name, env in self.envs.items():
+            with self.subTest(env=name):
+                cpu = [p for p in env.probes if p.name.startswith("cpu-amd-zen")]
+                guests = {
+                    host for host, spec in env.hosts.items() if spec.kind == "ssh"
+                }
+                self.assertEqual({env.roles.get(p.host, p.host) for p in cpu}, guests)
+                self.assertEqual(len(cpu), len(guests))
+                for probe in cpu:
+                    self.assertEqual((probe.when, probe.classes), ("start", ()))
+                    self.assertIn("AuthenticAMD", probe.cmd)
+                    self.assertIn("/proc/cpuinfo", probe.cmd)
+
+    @unittest.skipUnless(shutil.which("bash") and shutil.which("awk"), "needs awk")
+    def test_the_cpu_probe_passes_on_amd_zen_alone(self) -> None:
+        (cmd,) = {
+            probe.cmd
+            for env in self.envs.values()
+            for probe in env.probes
+            if probe.name.startswith("cpu-amd-zen")
+        }
+        with tempfile.TemporaryDirectory(prefix="amd-bench-cpu-") as tmp:
+            cpuinfo = pathlib.Path(tmp) / "cpuinfo"
+            for vendor, family, want in (
+                ("AuthenticAMD", 23, 0),
+                ("AuthenticAMD", 26, 0),
+                ("AuthenticAMD", 21, 1),
+                ("GenuineIntel", 6, 1),
+                ("HygonGenuine", 24, 1),
+            ):
+                cpuinfo.write_text(
+                    f"processor\t: 0\nvendor_id\t: {vendor}\ncpu family\t: {family}\n"
+                    "model\t\t: 1\nmodel name\t: Some CPU @ 2.0GHz\nstepping\t: 2\n\n"
+                    "processor\t: 1\nvendor_id\t: Other\ncpu family\t: 99\n"
+                    "model name\t: second\n\n"
+                )
+                done = subprocess.run(
+                    ["bash", "-c", cmd.replace("/proc/cpuinfo", str(cpuinfo))],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                with self.subTest(vendor=vendor, family=family):
+                    self.assertEqual(done.returncode, want, done.stderr)
+                    self.assertEqual(
+                        done.stdout,
+                        f"guest CPU: {vendor}, family {family}, Some CPU @ 2.0GHz\n",
+                    )
 
     def test_ucx_device_lists(self) -> None:
         seen: dict[str, set[str | None]] = collections.defaultdict(set)
