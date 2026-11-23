@@ -170,7 +170,7 @@ jobs:
           --run "$dir/run.json" --artifacts "$dir/artifacts.jsonl" \
           --manifests "$dir/manifests" "${summary[@]}" \
           --lanes="$LANES" --tier="$TIER" --only="$ONLY" --event "$EVENT" \
-          --guest-rocm 10.1 --max-branches 4 --output "$GITHUB_OUTPUT"
+          --guest-rocm 10.2 --max-branches 4 --output "$GITHUB_OUTPUT"
 
   # The inputs come from the plan's checked outputs, never from this run's own.
   container:

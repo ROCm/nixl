@@ -2,23 +2,27 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# The job-container side of a lane of .github/workflows/amd-bench-vm.yml: it
-# boots the lane's rocjitsu stack, prepares the guests through
-# amd_bench_guest.sh, and collects what the runner needs and what the
-# diagnostics keep. 'render' serves amd-bench-container.yml as well.
+# The runner side of a lane of .github/workflows/amd-bench-vm.yml, around the
+# steps in which qemu-tool-action boots the lane's rocjitsu stack and takes it
+# down: it names the fleet layers to boot, checks what was booted, prepares
+# the guests through amd_bench_guest.sh, and collects what the bench runner
+# needs and what the diagnostics keep. 'render' serves
+# amd-bench-container.yml as well.
 #
 #   amd_bench_stack.sh SUBCOMMAND
 #
-#   pins           check the overlay against the job container; note the
-#                  digests for the run-meta
+#   layers         name the lane's stack and its fleet layers for the boot
+#   pins           note the overlays' image pins for the run-meta
 #   override       fabric lanes: write the compose override that selects the
 #                  NIC backend
 #   ernic-image    fabric lanes: check the pinned NIC server image has the
 #                  backend and takes the backend string
-#   up             boot the stack
+#   fleet-check    check the boot used the lane's layers and the pinned
+#                  images
 #   compose-merge  fabric lanes: check compose replaced what the override names
 #   backend-check  fabric lanes: check the NIC server runs the backend
-#   ssh            join the stack's network and wait for the guests
+#   ssh            write the guests' ssh configuration from the action's
+#                  manifest and check each guest answers
 #   rocm           check the guests' ROCm version
 #   gpu            stage the GPU firmware and load amdgpu; a failure withholds
 #                  'gpu' and does not fail
@@ -30,19 +34,20 @@
 #   render         write env.json and run-meta.json and validate them
 #   diagnostics    collect logs and state; never fails
 #   fabric-down    vm1-fabric: unmount and disconnect; never fails
-#   down           take the stack down; never fails
 #
-# The steps boot the stack as rocm-wheels-rocjitsu.yml does and select the NIC
-# backend as amd-bench-probe.yml does; change them together.
+# The steps select the NIC backend as amd-bench-probe.yml does; change them
+# together.
 #
 # From the workflow: LANE, ROCM_VERSION, QEMU_MINIMAL_REF, RUN_META, and for
-# the VM lanes PYTHON_VERSION, UV_VERSION, GUEST_ROCM, BENCH_DIAG, NIXL_WHEEL,
-# NIXLBENCH_WHEEL and the nonroot-user action's CIUSER_UID and CIUSER_HOME.
+# the VM lanes PYTHON_VERSION, UV_VERSION, GUEST_ROCM, BENCH_DIAG, NIXL_WHEEL
+# and NIXLBENCH_WHEEL. From the boot step's outputs: FLEET_XML and VM_COUNT
+# for 'fleet-check', and VM_MANIFEST for 'ssh'.
 #
 # State between steps is kept under $RUNNER_TEMP/amd-bench: 'withhold' (one
 # need per line), 'env-set' and 'meta-set' (NAME=VALUE lines for
-# 'amd_bench_ci.py env --set' and 'meta --set'), 'meta-set-int', the guests'
-# ssh configuration and the name of the raw device.
+# 'amd_bench_ci.py env --set' and 'meta --set'), 'meta-set-int', the action's
+# manifest of the guests, their ssh configuration and the name of the raw
+# device.
 
 set -euo pipefail
 
@@ -77,29 +82,32 @@ NVMEOF_FS=1:4096:1073741824
 NVMEOF_RAW=2:512:67108864
 NVMEOF_KV_NSID=3
 
+# The fleet layers of a lane over the rocm-golden.xml of the pinned qemu-tool,
+# lowest first: the images every lane shares, then the lane's shape.
+COMMON_OVERLAY=.ci/rocjitsu/fleet-overlay-common.xml
 case "$LANE" in
   bench-container)
-    OVERLAY=""
+    OVERLAYS=()
     GUESTS=()
     ERNIC_BACKEND=""
     ;;
   vm1-local)
-    OVERLAY=.ci/rocjitsu/fleet-overlay-bench-local.xml
+    OVERLAYS=("$COMMON_OVERLAY" .ci/rocjitsu/fleet-overlay-bench-local.xml)
     GUESTS=(guest)
     ERNIC_BACKEND=mesh
     ;;
   vm2-net)
-    OVERLAY=.ci/rocjitsu/fleet-overlay-2vm.xml
+    OVERLAYS=("$COMMON_OVERLAY" .ci/rocjitsu/fleet-overlay-bench-net.xml)
     GUESTS=(guest1 guest2)
     ERNIC_BACKEND=mesh
     ;;
   vm1-loop)
-    OVERLAY=.ci/rocjitsu/fleet-overlay-backends.xml
+    OVERLAYS=("$COMMON_OVERLAY" .ci/rocjitsu/fleet-overlay-backends.xml)
     GUESTS=(guest)
     ERNIC_BACKEND=loopback
     ;;
   vm1-fabric)
-    OVERLAY=.ci/rocjitsu/fleet-overlay-backends.xml
+    OVERLAYS=("$COMMON_OVERLAY" .ci/rocjitsu/fleet-overlay-backends.xml)
     GUESTS=(guest)
     ERNIC_BACKEND=$NVMEOF_BACKEND
     ;;
@@ -108,11 +116,12 @@ case "$LANE" in
     exit 2
     ;;
 esac
-# Under /var/lib/qemu-tool because the compose bind mounts are resolved by the
-# host daemon. The compose project is the stack directory's basename.
+# Under the directory the action's install step creates for the runner's
+# user, and handed to its boot step. The compose project is the stack
+# directory's basename.
+STACK_ROOT=/var/lib/qemu-tool
 STACK_NAME="nixl-bench-${LANE}"
-STACK_DIR="/var/lib/qemu-tool/stacks/${STACK_NAME}"
-KEY_DIR="/var/lib/qemu-tool/${STACK_NAME}-key"
+STACK_DIR="${STACK_ROOT}/stacks/${STACK_NAME}"
 
 die() {
   echo "::error title=AMD bench ${LANE}::$1"
@@ -140,9 +149,47 @@ meta_set_int() {
   printf '%s=%s\n' "$1" "$2" >> "${work}/meta-set-int"
 }
 
-as_ciuser() {
-  setpriv --reuid "$CIUSER_UID" --regid "$CIUSER_UID" --init-groups \
-    env HOME="$CIUSER_HOME" "$@"
+# usage: shown VALUE
+# A value this script was handed, on one line and starting no workflow command.
+shown() {
+  printf '%s' "$1" | tr '\n\r' '  ' | sed 's/::/: :/g'
+}
+
+# usage: ci SUBCOMMAND [ARG...]
+# Runs a subcommand of amd_bench_ci.py that exits 2 when what it was given
+# cannot be used. What it printed is left in CI_OUT and, when it fails, its
+# reasons in CI_WHY on one line; nothing of it reaches the log as a workflow
+# command, so the caller's 'die' is the one error.
+ci() {
+  local err="${work}/ci-stderr" rc=0
+  mkdir -p "$work"
+  CI_WHY=""
+  CI_OUT=$(python3 "${scripts}/amd_bench_ci.py" "$@" 2> "$err") || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    cat "$err" >&2
+    CI_WHY=$(awk 'NR > 1 { printf "; " } { sub(/^amd_bench_ci\.py: /, ""); printf "%s", $0 }' "$err")
+    CI_WHY=${CI_WHY:-amd_bench_ci.py $1 ended with exit status ${rc}}
+  fi
+  return "$rc"
+}
+
+# usage: layer_args OPTION
+# Fills LAYER_ARGS with OPTION and the path of each of the lane's overlays.
+layer_args() {
+  local file
+  LAYER_ARGS=()
+  for file in "${OVERLAYS[@]}"; do
+    LAYER_ARGS+=("$1" "${GITHUB_WORKSPACE}/${file}")
+  done
+}
+
+# usage: overlay_value ELEMENT
+# Leaves in VALUE what the lane's overlays give a fleet element.
+overlay_value() {
+  layer_args --layer
+  ci fleet-value --element "$1" "${LAYER_ARGS[@]}" \
+    || die "the lane's overlays (${OVERLAYS[*]}) cannot be read for <$1>: ${CI_WHY}"
+  VALUE=$CI_OUT
 }
 
 container_of() {
@@ -179,64 +226,80 @@ guest_value() {
   if [[ "$value" =~ ^[A-Za-z0-9_.:/,-]+$ ]]; then echo "$value"; fi
 }
 
-overlay_digest() {
-  sed -n "s:.*<$1>.*@\(sha256\:[0-9a-f]\{64\}\)</$1>.*:\1:p" "${GITHUB_WORKSPACE}/${OVERLAY}"
-}
-
 runner_state() {
   {
     echo "--- $1"
-    df -h / /var/lib/qemu-tool 2>&1 || true
+    id 2>&1 || true
+    ls -l /dev/kvm 2>&1 || true
+    echo "ImageOS: $(shown "${ImageOS:-unset}"); ImageVersion: $(shown "${ImageVersion:-unset}")"
+    df -h / "$STACK_ROOT" 2>&1 || true
     free -m 2>&1 || true
   } | tee -a "${BENCH_DIAG}/runner.txt"
 }
 
 # --- before the boot --------------------------------------------------------
 
-# The image is pinned twice, here and in the overlay, and the two are moved by
-# hand.
+# The boot step is handed these as its stack-dir and xml-overlay inputs, so
+# the stack, its compose project and the layers are the ones this script
+# checks and reads afterwards.
+cmd_layers() {
+  local file path
+  local -a paths=()
+  [ "${#GUESTS[@]}" -gt 0 ] || die "the lane ${LANE} boots no guest, so it has no fleet layers"
+  [ "${#OVERLAYS[@]}" -ge 2 ] \
+    || die "the lane ${LANE} needs ${COMMON_OVERLAY} and an overlay of its own, and has ${#OVERLAYS[@]} layer(s)"
+  for file in "${OVERLAYS[@]}"; do
+    path="${GITHUB_WORKSPACE}/${file}"
+    test -f "$path" || die "${file} is missing"
+    path=$(realpath "$path")
+    # One path on each line of a multi-line output.
+    [[ "$path" != *$'\n'* ]] || die "the path of ${file} has a line break in it"
+    paths+=("$path")
+  done
+  {
+    echo "stack-dir=${STACK_DIR}"
+    echo "guests=${#GUESTS[@]}"
+    echo "layers<<AMD_BENCH_LAYERS_EOF"
+    printf '%s\n' "${paths[@]}"
+    echo "AMD_BENCH_LAYERS_EOF"
+  } | tee -a "${GITHUB_OUTPUT:?}"
+}
+
+# The images are pinned in fleet-overlay-common.xml alone; 'fleet-check'
+# compares them with what the pinned qemu-tool names and with what was booted.
 cmd_pins() {
-  local fleet="${GITHUB_WORKSPACE}/${OVERLAY}" want have name digest
-  test -f "$fleet" || die "${OVERLAY} is missing"
-  mkdir -p "$work"
-  want=$(sed -n 's:.*<qemu-ref>\(.*\)</qemu-ref>.*:\1:p' "$fleet")
-  have=$(docker inspect -f '{{.Config.Image}}' "$(cat /etc/hostname)" 2>/dev/null || true)
-  if [ -z "$have" ]; then
-    echo "::warning::the job container's image could not be read, so it was not compared with <qemu-ref> of ${OVERLAY}"
-  elif [ "$have" != "$want" ]; then
-    die "the job container is ${have} but <qemu-ref> of ${OVERLAY} is ${want:-missing}; move the workflow's pins with the overlay's"
-  fi
-  meta_set runner_image "${have:-$want}"
-  meta_set overlay_sha256 "$(sha256sum "$fleet" | cut -d ' ' -f 1)"
+  [ "${#OVERLAYS[@]}" -gt 0 ] || die "the lane ${LANE} has no fleet overlay"
+  [[ "${QEMU_MINIMAL_REF:?}" =~ ^[0-9a-f]{40}$ ]] || die "QEMU_MINIMAL_REF is not a commit"
+  mkdir -p "$work" "$BENCH_DIAG"
+  layer_args --overlay
+  ci fleet-pins "${LAYER_ARGS[@]}" \
+    || die "the lane's overlays (${OVERLAYS[*]}) do not pin the four images of the fleet: ${CI_WHY}"
+  printf '%s\n' "$CI_OUT" >> "${work}/meta-set"
   meta_set qemu_minimal_ref "$QEMU_MINIMAL_REF"
   meta_set ernic_backend "$ERNIC_BACKEND"
-  for name in guest_image_digest:backing-ref qemu_digest:qemu-ref \
-              ernic_digest:ernic-ref rocjitsu_digest:rocjitsu-ref; do
-    digest=$(overlay_digest "${name#*:}")
-    if [ -n "$digest" ]; then
-      meta_set "${name%%:*}" "$digest"
-    else
-      echo "::warning::${OVERLAY} pins <${name#*:}> by no digest, so the run-meta has no ${name%%:*}"
-    fi
-  done
   cat "${work}/meta-set"
   runner_state "before the boot"
 }
 
-# quick-start leaves a file of this name in the stack directory alone, and
+# The action regenerates only the directory 'qemu' under the stack directory,
+# quick-start and its --clean-overlays leave a file of this name alone, and
 # compose reads it because it is run there with no -f. It replaces the
-# command of the one NIC server and the health check of the mesh.
+# command of the one NIC server and the health check of the mesh. It is
+# written before the boot, which would otherwise create the directory.
 cmd_override() {
-  local fleet="${GITHUB_WORKSPACE}/${OVERLAY}"
+  local count tap
   fabric_lane || die "the lane ${LANE} selects no NIC backend"
   # With a second guest the other NIC server would wait for a mesh manager
   # that is gone; with the TAP the server is started through an entrypoint,
   # which ignores a replaced command.
-  if ! grep -qF '<vm-count>1</vm-count>' "$fleet" \
-      || ! grep -qF '<ernic-tap>false</ernic-tap>' "$fleet"; then
-    die "${OVERLAY} must set <vm-count>1</vm-count> and <ernic-tap>false</ernic-tap>; the override is not valid for any other stack"
+  overlay_value vm-count
+  count=$VALUE
+  overlay_value ernic-tap
+  tap=$VALUE
+  if [ "$count" != 1 ] || [ "$tap" != false ]; then
+    die "the lane's overlays (${OVERLAYS[*]}) must set <vm-count>1</vm-count> and <ernic-tap>false</ernic-tap>, and set '${count}' and '${tap}'; the override is not valid for any other stack"
   fi
-  install -d -o "$CIUSER_UID" -g "$CIUSER_UID" "$STACK_DIR"
+  mkdir -p "$STACK_DIR" "$BENCH_DIAG"
   cat > "${STACK_DIR}/docker-compose.override.yml" <<EOF
 services:
   ernic-1:
@@ -244,7 +307,6 @@ services:
     healthcheck:
       test: ["CMD", "sh", "-c", "test -S ${ERNIC_SOCK}"]
 EOF
-  chown "$CIUSER_UID:$CIUSER_UID" "${STACK_DIR}/docker-compose.override.yml"
   cat "${STACK_DIR}/docker-compose.override.yml"
   cp "${STACK_DIR}/docker-compose.override.yml" "${BENCH_DIAG}/"
 }
@@ -252,8 +314,10 @@ EOF
 cmd_ernic_image() {
   local ref missing="" word rc=0
   fabric_lane || die "the lane ${LANE} selects no NIC backend"
-  ref=$(sed -n 's:.*<ernic-ref>\(.*\)</ernic-ref>.*:\1:p' "${GITHUB_WORKSPACE}/${OVERLAY}")
-  [ -n "$ref" ] || die "${OVERLAY} has no <ernic-ref>"
+  overlay_value ernic-ref
+  ref=$VALUE
+  [ -n "$ref" ] || die "the lane's overlays (${OVERLAYS[*]}) have an empty <ernic-ref>"
+  mkdir -p "$BENCH_DIAG"
   # --help is written to stderr.
   docker run --rm "$ref" rocm-ernic --help > "${BENCH_DIAG}/ernic-help.txt" 2>&1 || true
   for word in loopback nvmeof; do
@@ -272,20 +336,99 @@ cmd_ernic_image() {
   fi
 }
 
-# --- the boot ---------------------------------------------------------------
+# --- after the boot ---------------------------------------------------------
 
-# Run from the qemu-minimal checkout so the qemu container installs the
-# pinned qemu-tool from it.
-cmd_up() {
-  cd "${GITHUB_WORKSPACE}/qemu-minimal"
-  as_ciuser qemu-tool quick-start up \
-    --xml qemu/stacks/rocm-golden.xml \
-    --xml "${GITHUB_WORKSPACE}/${OVERLAY}" \
-    --stack-dir "$STACK_DIR" \
-    --key-dir "$KEY_DIR" \
-    --in-network \
-    --no-metrics \
-    --yes
+# usage: image_note SERVICE CONTAINER REF
+# A container whose image is not the pinned one is a warning and a note, not
+# an error: the generated compose file has been checked for the reference,
+# and how compose records an image named by tag and digest is not something a
+# lane rests on.
+image_note() {
+  local service=$1 c=$2 ref=$3 have want text=""
+  docker inspect -f "${service}: {{.Config.Image}} {{.Image}}" "$c" || true
+  have=$(docker inspect -f '{{.Image}}' "$c" 2>/dev/null) || have=""
+  want=$(docker image inspect -f '{{.Id}}' "$ref" 2>/dev/null) || want=""
+  if [ -z "$have" ] || [ -z "$want" ]; then
+    text="the image of the ${service} container (${have:-not read}) could not be compared with the pinned ${ref} (${want:-not read})"
+  elif [ "$have" != "$want" ]; then
+    text="the ${service} container runs the image ${have}, but the pinned ${ref} is ${want}"
+  fi
+  if [ -n "$text" ]; then
+    echo "::warning title=AMD bench ${LANE}::${text}"
+    echo "$text" >> "${BENCH_DIAG}/notes.txt"
+  fi
+}
+
+# What the boot step reports against what this script named and pinned. An
+# xml-overlay input that reaches the action empty boots qemu-tool's own fleet
+# without an error, and a qemu-tool that names other images than the overlay
+# pins has moved without it.
+cmd_fleet_check() {
+  local base file ref service c n i images
+  local qemu_ref ernic_ref rocjitsu_ref
+  local -a rendered=() expected=()
+  mkdir -p "$work" "$BENCH_DIAG"
+
+  printf '%s\n' "${FLEET_XML:-}" > "${BENCH_DIAG}/fleet-layers.txt"
+  mapfile -t rendered < <(grep -v '^[[:space:]]*$' "${BENCH_DIAG}/fleet-layers.txt" || true)
+  base=${rendered[0]:-}
+  if [ "$(basename -- "$base")" != rocm-golden.xml ] || [ ! -f "$base" ]; then
+    die "the first fleet layer of the boot is '$(shown "${base:-not set}")', not the rocm-golden.xml of the installed qemu-tool"
+  fi
+  cp -- "$base" "${BENCH_DIAG}/fleet-base.xml"
+  for file in "${OVERLAYS[@]}"; do
+    expected+=("$(realpath "${GITHUB_WORKSPACE}/${file}")")
+  done
+  if [ "${#rendered[@]}" -ne $((${#expected[@]} + 1)) ]; then
+    die "the boot rendered $((${#rendered[@]} - 1)) layer(s) over ${base}, but the lane has ${#expected[@]} (${OVERLAYS[*]}); the xml-overlay input of the boot step is not the output of the 'layers' step"
+  fi
+  for i in "${!expected[@]}"; do
+    [ "${rendered[i + 1]}" = "${expected[i]}" ] \
+      || die "layer $((i + 2)) of the boot is '$(shown "${rendered[i + 1]}")', but the lane's is ${expected[i]}; the xml-overlay input of the boot step is not the output of the 'layers' step"
+  done
+  cat "${BENCH_DIAG}/fleet-layers.txt"
+
+  layer_args --overlay
+  ci fleet-base-check --base "$base" "${LAYER_ARGS[@]}" \
+    || die "${COMMON_OVERLAY} and QEMU_MINIMAL_REF were not moved together: ${CI_WHY}"
+  printf '%s\n' "$CI_OUT" | tee "${BENCH_DIAG}/fleet-base-check.txt"
+
+  [ "${VM_COUNT:-}" = "${#GUESTS[@]}" ] \
+    || die "the action booted '$(shown "${VM_COUNT:-no}")' guest(s), but the lane ${LANE} has ${#GUESTS[@]}"
+
+  test -f "${STACK_DIR}/docker-compose.yml" \
+    || die "the boot left no ${STACK_DIR}/docker-compose.yml"
+  overlay_value qemu-ref
+  qemu_ref=$VALUE
+  overlay_value ernic-ref
+  ernic_ref=$VALUE
+  overlay_value rocjitsu-ref
+  rocjitsu_ref=$VALUE
+  images=$(grep -F 'image:' "${STACK_DIR}/docker-compose.yml" | tr -s ' ' | sort -u | tr '\n' ' ' || true)
+  for ref in "$qemu_ref" "$ernic_ref" "$rocjitsu_ref"; do
+    grep -qF -- "image: \"${ref}\"" "${STACK_DIR}/docker-compose.yml" \
+      || die "the generated compose file runs no service from the pinned ${ref}; its images are: ${images}"
+  done
+  echo "the generated compose file names the three pinned server images"
+  # qemu-tool writes this option only for a fleet whose NVMe drives map GPU
+  # memory, which its own fleet file asks for and the common overlay turns off.
+  if grep -qF -- '--nvme-vram-dev' "${STACK_DIR}/docker-compose.yml"; then
+    die "the generated compose file points the NVMe drives at GPU memory, so <vm-nvme-vram>false of ${COMMON_OVERLAY} did not take effect"
+  fi
+
+  for n in $(seq "${#GUESTS[@]}"); do
+    for service in "qemu-${n}" "ernic-${n}" "rocjitsu-${n}"; do
+      c=$(container_of "$service")
+      [ -n "$c" ] || die "the compose project ${STACK_NAME} has no ${service} container"
+      case "$service" in
+        qemu-*) ref=$qemu_ref ;;
+        ernic-*) ref=$ernic_ref ;;
+        *) ref=$rocjitsu_ref ;;
+      esac
+      image_note "$service" "$c" "$ref"
+    done
+  done
+
   runner_state "after the boot"
 }
 
@@ -293,8 +436,8 @@ cmd_up() {
 # override's, rather than appending to them, is what a fabric lane rests on.
 cmd_compose_merge() {
   local merged="${BENCH_DIAG}/compose-config.json" verdict status detail
-  test -f "${STACK_DIR}/docker-compose.yml" || die "quick-start generated no compose file"
-  if ! as_ciuser qemu-tool compose --stack-dir "$STACK_DIR" config --format json \
+  test -f "${STACK_DIR}/docker-compose.yml" || die "the boot generated no compose file"
+  if ! qemu-tool compose --stack-dir "$STACK_DIR" config --format json \
       > "$merged" 2> "${BENCH_DIAG}/compose-config.err"; then
     die "docker compose config failed: $(tail -n 1 "${BENCH_DIAG}/compose-config.err")"
   fi
@@ -356,47 +499,27 @@ cmd_backend_check() {
   echo "the NIC server reports Backend: ${ERNIC_BACKEND}"
 }
 
-# A job container cannot reach the SSH ports published on the host; on the
-# stack's network each guest answers on its qemu container's port 2222.
+# The action publishes each guest's SSH port on the runner's loopback and has
+# already waited for it; its manifest says where, as whom and with which key.
+# The host aliases are the lanes' own, which the env templates name.
 cmd_ssh() {
-  local user n guest qemu host answered
-  docker network connect "${STACK_NAME}_fleet" "$(cat /etc/hostname)"
-  # The image says which account it was baked with.
-  user=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("username") or "ubuntu")' \
-    "${KEY_DIR}/vm-info.json" 2>/dev/null || echo ubuntu)
-  mkdir -p "$work"
-  : > "$SSH_CONFIG"
-  n=0
+  local guest answered
+  local -a aliases=()
+  mkdir -p "$work" "$BENCH_DIAG"
+  [ -n "${VM_MANIFEST:-}" ] || die "the boot step left no vm-manifest, so the guests cannot be reached"
+  printf '%s\n' "$VM_MANIFEST" > "${work}/vm-manifest.json"
+  cp "${work}/vm-manifest.json" "${BENCH_DIAG}/"
+  for guest in "${GUESTS[@]}"; do aliases+=(--alias "$guest"); done
+  ci ssh-config --manifest "${work}/vm-manifest.json" "${aliases[@]}" --out "$SSH_CONFIG" \
+    || die "the action's vm-manifest gives the lane's ${#GUESTS[@]} guest(s) no login: ${CI_WHY}"
+  printf '%s\n' "$CI_OUT"
   for guest in "${GUESTS[@]}"; do
-    n=$((n + 1))
-    qemu=$(docker ps -q \
-      --filter "label=com.docker.compose.project=${STACK_NAME}" \
-      --filter "label=com.docker.compose.service=qemu-${n}")
-    [ -n "$qemu" ] || die "the qemu-${n} container is not running"
-    host=$(docker inspect \
-      -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$qemu")
-    [ -n "$host" ] || die "${guest}'s container has no address on the stack network"
-    echo "${guest}: ${user}@${host}:2222"
-    cat >> "$SSH_CONFIG" <<EOF
-Host ${guest}
-  HostName ${host}
-  Port 2222
-  User ${user}
-  IdentityFile ${KEY_DIR}/id_rsa
-  IdentitiesOnly yes
-  BatchMode yes
-  StrictHostKeyChecking no
-  UserKnownHostsFile /dev/null
-  LogLevel ERROR
-  ConnectTimeout 10
-  ServerAliveInterval 15
-EOF
     env_set "hosts.${guest}.ssh_config" "$SSH_CONFIG"
   done
 
   for guest in "${GUESTS[@]}"; do
     answered=false
-    for _ in $(seq 1 120); do
+    for _ in $(seq 1 12); do
       if ssh -F "$SSH_CONFIG" "$guest" true 2>/dev/null; then
         answered=true
         break
@@ -405,7 +528,7 @@ EOF
     done
     if [ "$answered" != true ]; then
       ssh -v -F "$SSH_CONFIG" "$guest" true 2>&1 | tail -20 || true
-      die "${guest} never answered SSH"
+      die "${guest} does not answer SSH with the lane's configuration"
     fi
     echo "${guest} answered SSH"
   done
@@ -441,7 +564,8 @@ gpu_firmware() {
   done
   echo "generating firmware with ${image}"
   mkdir -p "$fw" || return 1
-  # Streamed as a tar: a bind mount would be resolved by the host daemon.
+  # Streamed as a tar: the files are then this user's, and the container is
+  # given no directory of the runner.
   docker run --rm --entrypoint /bin/sh "$image" -c \
     'python3 /usr/local/bin/vfio_guest_firmware.py --generation gfx1250 --set gap --output /out && tar -cf - -C /out .' \
     | tar -xf - -C "$fw" || return 1
@@ -487,7 +611,7 @@ cmd_facts() {
   local guest
   mkdir -p "$BENCH_DIAG"
   {
-    # The first processor: in the job container that is the runner's.
+    # The first processor of the runner.
     sed '/^$/q' /proc/cpuinfo
     echo "processors: $(grep -c '^processor' /proc/cpuinfo)"
     lscpu 2>&1
@@ -713,6 +837,8 @@ cmd_diagnostics() {
   if [ -f "${STACK_DIR}/docker-compose.yml" ]; then
     cp "${STACK_DIR}/docker-compose.yml" "$out/"
     cp "${STACK_DIR}/docker-compose.override.yml" "$out/" 2>/dev/null
+    # The layers quick-start wrote over the action's: sizes, ports, account.
+    cp "${STACK_DIR}"/overlay-*.xml "$out/" 2>/dev/null
     if [ ! -s "${out}/compose-config.json" ]; then
       qemu-tool compose --stack-dir "$STACK_DIR" config --format json \
         > "${out}/compose-config.json" 2> "${out}/compose-config.err"
@@ -725,7 +851,10 @@ cmd_diagnostics() {
       echo "::warning title=AMD bench ${LANE}::the emulated NICs' mesh manager evicted a node during the run; an RDMA failure in this run may be that and not the wheel"
     fi
   fi
-  cp "${work}/env.json" "${work}/run-meta.json" "${work}/withhold" "$out/" 2>/dev/null
+  # The last three are what 'render' makes the first two from: a lane that
+  # ended before it still leaves its pins and what it found of the guests.
+  cp "${work}/env.json" "${work}/run-meta.json" "${work}/withhold" \
+    "${work}/meta-set" "${work}/meta-set-int" "${work}/env-set" "$out/" 2>/dev/null
   runner_state "at the end"
   ls -l "$out"
   return 0
@@ -738,27 +867,12 @@ cmd_fabric_down() {
   fi
 }
 
-cmd_down() {
-  local left
-  cd "${GITHUB_WORKSPACE}/qemu-minimal" || return 0
-  qemu-tool quick-start down \
-    --xml qemu/stacks/rocm-golden.xml \
-    --xml "${GITHUB_WORKSPACE}/${OVERLAY}" \
-    --stack-dir "$STACK_DIR" \
-    --yes || true
-  left=$(docker ps -aq --filter "label=com.docker.compose.project=${STACK_NAME}" || true)
-  if [ -n "$left" ]; then
-    echo "::warning::removing containers the teardown left behind"
-    # shellcheck disable=SC2086
-    docker rm -f $left || true
-  fi
-}
-
 case "${1:-}" in
+  layers) cmd_layers ;;
   pins) cmd_pins ;;
   override) cmd_override ;;
   ernic-image) cmd_ernic_image ;;
-  up) cmd_up ;;
+  fleet-check) cmd_fleet_check ;;
   compose-merge) cmd_compose_merge ;;
   backend-check) cmd_backend_check ;;
   ssh) cmd_ssh ;;
@@ -771,7 +885,6 @@ case "${1:-}" in
   render) cmd_render ;;
   diagnostics) cmd_diagnostics ;;
   fabric-down) cmd_fabric_down ;;
-  down) cmd_down ;;
   *)
     echo "amd_bench_stack.sh: unknown subcommand; they are listed at the top of the script" >&2
     exit 2

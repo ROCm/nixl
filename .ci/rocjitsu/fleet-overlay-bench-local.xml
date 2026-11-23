@@ -4,24 +4,16 @@ SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All righ
 SPDX-License-Identifier: Apache-2.0
 
 qemu-tool fleet overlay for the vm1-local lane of
-.github/workflows/amd-bench-vm.yml, layered over qemu/stacks/rocm-golden.xml of
-the qemu-minimal commit that workflow pins. It is fleet-overlay.xml with a
-second spare NVMe drive. That file belongs to the rocjitsu smoke test, which
-gates the wheels, and is left as it is.
+.github/workflows/amd-bench-vm.yml and the guest-facts job of
+amd-bench-probe.yml, layered over fleet-overlay-common.xml, which names the
+images. It gives the fleet its shape and nothing else: one guest with two
+spare NVMe drives.
 -->
 <fleet xmlns="http://qemu-tool/fleet/1.0">
   <vm-count>1</vm-count>
   <vm-name-prefix>nixl-bench-local</vm-name-prefix>
-  <!-- The same digests as fleet-overlay.xml; move the two files together.
-       <qemu-ref> is also the workflow's job container. -->
-  <qemu-ref>docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20261112.gdca6903-qemu.4cb9698-vfu.3719c3a@sha256:f7e61be3f29c82aeac60b8fa3f88ac3c434ab0f19a79bd144cb87ed9054aca03</qemu-ref>
-  <ernic-ref>docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-ernic-sbates-fork:20261112.gdca6903-ernic.90434a2-vfu.3719c3a@sha256:7473e631b3237707cc0d0ce635b5dff5e601dc175591f2ceafa84a3c5a85df16</ernic-ref>
-  <rocjitsu-ref>docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20261112.gdca6903-rocjitsu.50be05a@sha256:1e005700d1a3d030581969489fe42adbffedb461b7f2a4e44cc2b973c3bad3d6</rocjitsu-ref>
-  <backing-ref>docker.io/sbates130272/qemu-tool-rocm-golden:20261117.g481c892@sha256:72a0aa0c1ad44bf121fe797f56b8f4199628695974c8f6449834269aeb46e45e</backing-ref>
-  <!-- The lane uses no SDXI device, so its server image is not pulled. -->
-  <sdxi-per-vm>0</sdxi-per-vm>
-  <!-- One guest reached over the qemu container's forwarded SSH port needs no
-       inter-guest L2 path. -->
+  <!-- One guest reached over its forwarded SSH port needs no inter-guest L2
+       path. -->
   <ernic-tap>false</ernic-tap>
   <!-- Two spare emulated NVMe drives: the lane makes a file system on the
        first by controller serial and hands the second to nixlbench as a raw

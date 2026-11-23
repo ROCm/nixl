@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+
+qemu-tool fleet overlay for the vm2-net lane of
+.github/workflows/amd-bench-vm.yml, layered over fleet-overlay-common.xml,
+which names the images. It gives the fleet its shape and nothing else.
+-->
+<fleet xmlns="http://qemu-tool/fleet/1.0">
+  <!-- Both restate rocm-golden.xml: two guests, and the TAP that gives their
+       emulated RDMA NICs a shared Ethernet segment. The lane depends on
+       them, so a change to the base file must not take them away. -->
+  <vm-count>2</vm-count>
+  <ernic-tap>true</ernic-tap>
+  <vm-name-prefix>nixl-bench-net</vm-name-prefix>
+</fleet>

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Job-side helper of the AMD bench workflows: the plan, env files, run-meta, E1.
+"""Job-side helper of the AMD bench workflows: plan, env, run-meta, fleet layers.
 
     amd_bench_ci.py plan [--matrix DIR] --run FILE --artifacts FILE
         --manifests DIR [--summary FILE] [--lanes "LANE..."] [--tier TIER]
@@ -14,6 +14,12 @@
     amd_bench_ci.py vram-timing --records FILE --out FILE
     amd_bench_ci.py guest-cpu --lane LANE --guest NAME --facts FILE
         [--cpuinfo FILE] [--notes FILE]
+    amd_bench_ci.py fleet-pins --overlay FILE [--overlay FILE]...
+    amd_bench_ci.py fleet-base-check --base FILE --overlay FILE
+        [--overlay FILE]...
+    amd_bench_ci.py fleet-value --element NAME --layer FILE [--layer FILE]...
+    amd_bench_ci.py ssh-config --manifest FILE --alias NAME [--alias NAME]...
+        --out FILE
 
 'plan' reads what a finished "AMD Nightly" or "ROCm Wheels" run left behind
 and appends the job matrices of amd-nightly-bench.yml to --output, in the
@@ -24,15 +30,25 @@ the JSON env file of amd_bench_run.py. 'meta' writes a --run-meta file.
 as a notice, and warns when the guest's kernel would refuse peer-to-peer DMA
 on it.
 
-'plan', 'env' and 'meta' exit 0, or 2 when what they were given cannot be
-used; 'vram-timing' and 'guest-cpu' always exit 0. Run it as 'python3
-amd_bench_ci.py', never with -I: it needs amd_bench_lib.py beside it and the
-standard library.
+The fleet subcommands read qemu-tool fleet XML, each file a layer over the
+ones before it. 'fleet-pins' prints the run-meta values of the overlays a job
+passes: the QEMU image, the digest of the files and the digest each of the
+four images is pinned by. 'fleet-base-check' requires those four to be the
+tags the base fleet file of the installed qemu-tool names. 'fleet-value'
+prints what the layers give one element. 'ssh-config' writes the ssh
+configuration of the guests from the 'vm-manifest' output of
+qemu-tool-action, under the lanes' own host aliases.
+
+'plan', 'env', 'meta' and the last four exit 0, or 2 when what they were
+given cannot be used; 'vram-timing' and 'guest-cpu' always exit 0. Run it as
+'python3 amd_bench_ci.py', never with -I: it needs amd_bench_lib.py beside it
+and the standard library.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import pathlib
@@ -41,6 +57,7 @@ import sys
 import tomllib
 from dataclasses import dataclass
 from typing import Any, Iterator, Mapping, Sequence
+from xml.etree import ElementTree
 
 try:
     import amd_bench_lib as lib
@@ -847,6 +864,225 @@ def cmd_guest_cpu(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- fleet layers ---------------------------------------------------------
+
+FLEET_NS = "http://qemu-tool/fleet/1.0"
+# The images a fleet names: QEMU, the NIC server, the GPU server and the guest.
+PIN_ELEMENTS = ("qemu-ref", "ernic-ref", "rocjitsu-ref", "backing-ref")
+# The run-meta key of the digest each is pinned by, in the order printed.
+PIN_KEYS = (
+    ("guest_image_digest", "backing-ref"),
+    ("qemu_digest", "qemu-ref"),
+    ("ernic_digest", "ernic-ref"),
+    ("rocjitsu_digest", "rocjitsu-ref"),
+)
+PINNED_RE = re.compile(r"([A-Za-z0-9][A-Za-z0-9._/:-]*)@(sha256:[0-9a-f]{64})")
+ELEMENT_RE = re.compile(r"[a-z][a-z0-9-]*")
+
+
+@dataclass(frozen=True)
+class Layer:
+    path: pathlib.Path
+    data: bytes
+    values: dict[str, str]
+    repeated: tuple[str, ...]
+
+
+def read_layer(path: pathlib.Path) -> Layer:
+    """The elements directly under <fleet> of one file, with their text."""
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise CiError(f"cannot read the fleet layer {path}: {exc.strerror}") from exc
+    try:
+        root = ElementTree.fromstring(data)
+    except ElementTree.ParseError as exc:
+        raise CiError(f"the fleet layer {path} is not XML: {exc}") from exc
+    if root.tag != f"{{{FLEET_NS}}}fleet":
+        raise CiError(f"{path} is not a fleet document: no <fleet> of {FLEET_NS}")
+    values: dict[str, str] = {}
+    repeated: list[str] = []
+    for child in root:
+        # A comment has no tag of its own, and neither has an instruction.
+        if not isinstance(child.tag, str):
+            continue
+        space, _, name = child.tag.rpartition("}")
+        if space != "{" + FLEET_NS:
+            continue
+        if name in values and name not in repeated:
+            repeated.append(name)
+        values[name] = (child.text or "").strip()
+    return Layer(path, data, values, tuple(repeated))
+
+
+def effective(layers: Sequence[Layer], name: str) -> str | None:
+    """What the layers give an element: the last one that has it wins."""
+    for layer in reversed(layers):
+        if name in layer.repeated:
+            raise CiError(f"{layer.path} has <{name}> more than once")
+        if name in layer.values:
+            return layer.values[name]
+    return None
+
+
+def cmd_fleet_pins(args: argparse.Namespace) -> int:
+    layers = [read_layer(path) for path in args.overlay]
+    for layer in layers:
+        if layer.repeated:
+            names = ", ".join(f"<{name}>" for name in layer.repeated)
+            raise CiError(f"{layer.path} has more than once: {names}")
+    pinned: dict[str, tuple[str, str]] = {}
+    problems = []
+    for name in PIN_ELEMENTS:
+        value = effective(layers, name)
+        found = PINNED_RE.fullmatch(value) if value is not None else None
+        if value is None:
+            problems.append(f"<{name}>: no overlay has it")
+        elif found is None:
+            problems.append(
+                f"<{name}>: '{clean(value)}' is not an image reference that "
+                "ends in @sha256: and 64 hex digits"
+            )
+        else:
+            pinned[name] = (value, found.group(2))
+    if problems:
+        raise CiError("\n".join(problems))
+    whole = hashlib.sha256(b"".join(layer.data for layer in layers))
+    say(f"runner_image={pinned['qemu-ref'][0]}")
+    say(f"overlay_sha256={whole.hexdigest()}")
+    for key, name in PIN_KEYS:
+        say(f"{key}={pinned[name][1]}")
+    return 0
+
+
+def cmd_fleet_base_check(args: argparse.Namespace) -> int:
+    base = [read_layer(args.base)]
+    overlays = [read_layer(path) for path in args.overlay]
+    same = []
+    problems = []
+    for name in PIN_ELEMENTS:
+        pinned = effective(overlays, name)
+        named = effective(base, name)
+        if pinned is None:
+            problems.append(f"<{name}>: no overlay has it")
+        if named is None:
+            problems.append(f"<{name}>: the base fleet file {args.base} has none")
+        if pinned is None or named is None:
+            continue
+        found = PINNED_RE.fullmatch(pinned)
+        # A base file that names the digest as well must name the same one.
+        if named in (pinned, found.group(1) if found else pinned):
+            same.append(f"{name}: {named}")
+        else:
+            problems.append(
+                f"<{name}>: the overlays pin '{clean(pinned)}' but the base "
+                f"fleet file {args.base} names '{clean(named)}'"
+            )
+    if problems:
+        raise CiError("\n".join(problems))
+    for line in same:
+        say(line)
+    return 0
+
+
+def cmd_fleet_value(args: argparse.Namespace) -> int:
+    if not ELEMENT_RE.fullmatch(args.element):
+        raise CiError("--element is not the name of a fleet element")
+    value = effective([read_layer(path) for path in args.layer], args.element)
+    if value is None:
+        raise CiError(f"no layer has <{args.element}>")
+    say(value)
+    return 0
+
+
+# --- ssh-config -----------------------------------------------------------
+
+SSH_HOST_RE = re.compile(r"[A-Za-z0-9.:-]+")
+SSH_USER_RE = re.compile(r"[a-z_][a-z0-9_-]*")
+SSH_KEY_RE = re.compile(r"/[A-Za-z0-9_./-]+")
+# What every guest is reached with; amd_bench_run.py is given the file.
+SSH_OPTIONS = (
+    "IdentitiesOnly yes",
+    "BatchMode yes",
+    "StrictHostKeyChecking no",
+    "UserKnownHostsFile /dev/null",
+    "LogLevel ERROR",
+    "ConnectTimeout 10",
+    "ServerAliveInterval 15",
+)
+
+
+def guest_logins(path: pathlib.Path, count: int) -> list[tuple[str, int, str, str]]:
+    """(host, port, user, key file) of the guests 1..count of a vm-manifest."""
+    manifest = read_json(path, "the manifest")
+    if not isinstance(manifest, list) or not all(isinstance(v, dict) for v in manifest):
+        raise CiError(f"the manifest {path} is not a JSON list of objects")
+    indexes = [vm.get("index") for vm in manifest]
+    if not all(is_int(index) for index in indexes) or sorted(indexes) != list(
+        range(1, count + 1)
+    ):
+        raise CiError(
+            f"the manifest {path} describes {len(manifest)} guest(s) with the "
+            f"indexes {clean(indexes)}; {count} alias(es) need the guests 1 to "
+            f"{count}, each once"
+        )
+    logins = []
+    for vm in sorted(manifest, key=lambda vm: int(vm["index"])):
+        where = f"guest {vm['index']} of the manifest {path}"
+        host, port = vm.get("ssh_host"), vm.get("ssh_port")
+        user, key = vm.get("username"), vm.get("ssh_key_file")
+        if not isinstance(host, str) or not SSH_HOST_RE.fullmatch(host):
+            raise CiError(f"{where} has no usable 'ssh_host'")
+        if not is_int(port) or not 1 <= port <= 65535:
+            raise CiError(f"{where} has no usable 'ssh_port'")
+        if not isinstance(user, str) or not SSH_USER_RE.fullmatch(user):
+            raise CiError(f"{where} has no usable 'username'")
+        if not isinstance(key, str) or not SSH_KEY_RE.fullmatch(key):
+            raise CiError(f"{where} has no usable 'ssh_key_file'")
+        if not pathlib.Path(key).is_file():
+            raise CiError(f"{where} names the key file {key}, which is not a file")
+        logins.append((host, port, user, key))
+    return logins
+
+
+def write_private(path: pathlib.Path, text: str) -> None:
+    """Writes path whole and for its owner alone, or not at all."""
+    scratch = path.with_name(path.name + ".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        scratch.unlink(missing_ok=True)
+        descriptor = os.open(scratch, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(text)
+        os.replace(scratch, path)
+    except OSError as exc:
+        raise CiError(f"cannot write {path}: {exc}") from exc
+
+
+def cmd_ssh_config(args: argparse.Namespace) -> int:
+    aliases: list[str] = args.alias
+    if not all(HOST_RE.fullmatch(alias) for alias in aliases):
+        raise CiError("--alias takes a host alias of letters, digits, _ and -")
+    if len(set(aliases)) != len(aliases):
+        raise CiError("--alias names a host alias twice")
+    logins = guest_logins(args.manifest, len(aliases))
+    lines = []
+    for alias, (host, port, user, key) in zip(aliases, logins):
+        lines += [
+            f"Host {alias}",
+            f"  HostName {host}",
+            f"  Port {port}",
+            f"  User {user}",
+            f"  IdentityFile {key}",
+            *(f"  {option}" for option in SSH_OPTIONS),
+        ]
+    write_private(args.out, "\n".join(lines) + "\n")
+    for alias, (host, port, user, _) in zip(aliases, logins):
+        say(f"{alias}: {user}@{host}:{port}")
+    return 0
+
+
 # --- command line ---------------------------------------------------------
 
 
@@ -867,7 +1103,7 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     plan.add_argument("--tier", default="")
     plan.add_argument("--only", default="")
     plan.add_argument("--event", default="workflow_dispatch")
-    plan.add_argument("--guest-rocm", default="10.1", metavar="X.Y")
+    plan.add_argument("--guest-rocm", default="10.2", metavar="X.Y")
     plan.add_argument("--max-branches", type=int, default=4, metavar="N")
     plan.add_argument("--output", type=path, required=True, metavar="FILE")
 
@@ -898,6 +1134,27 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     cpu.add_argument("--facts", type=path, required=True, metavar="FILE")
     cpu.add_argument("--cpuinfo", type=path, default=path("/proc/cpuinfo"))
     cpu.add_argument("--notes", type=path, metavar="FILE")
+
+    files: dict[str, Any] = {"type": path, "action": "append", "metavar": "FILE"}
+    pins = commands.add_parser("fleet-pins")
+    pins.set_defaults(handler=cmd_fleet_pins)
+    pins.add_argument("--overlay", required=True, **files)
+
+    based = commands.add_parser("fleet-base-check")
+    based.set_defaults(handler=cmd_fleet_base_check)
+    based.add_argument("--base", type=path, required=True, metavar="FILE")
+    based.add_argument("--overlay", required=True, **files)
+
+    value = commands.add_parser("fleet-value")
+    value.set_defaults(handler=cmd_fleet_value)
+    value.add_argument("--element", required=True, metavar="NAME")
+    value.add_argument("--layer", required=True, **files)
+
+    ssh = commands.add_parser("ssh-config")
+    ssh.set_defaults(handler=cmd_ssh_config)
+    ssh.add_argument("--manifest", type=path, required=True, metavar="FILE")
+    ssh.add_argument("--alias", action="append", required=True, metavar="NAME")
+    ssh.add_argument("--out", type=path, required=True, metavar="FILE")
     return parser.parse_args(argv)
 
 

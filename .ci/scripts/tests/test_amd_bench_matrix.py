@@ -28,6 +28,7 @@ import amd_bench_run as run  # noqa: E402
 
 BENCH = pathlib.Path(__file__).resolve().parents[2] / "bench"
 ENVS = BENCH / "envs"
+LANES = BENCH / "lanes"
 
 # Plan section 2.6: cases per lane and profile, N-r counted with N and the
 # Key Value profiles together.
@@ -97,6 +98,19 @@ TEMPLATES: dict[str, tuple[frozenset[str], frozenset[str]]] = {
         frozenset(("hosts.guest.ssh_config", "vars.gusli_blkdev")),
     ),
 }
+# Per VM env class: the names its guests have in the SSH configuration the lane
+# job writes ('amd_bench_stack.sh ssh'), whatever qemu-tool calls the guests.
+GUEST_ALIASES = {
+    "gha-kvm-vm1": {"guest"},
+    "gha-kvm-vm2": {"guest1", "guest2"},
+    "gha-kvm-vm1-loopback": {"guest"},
+    "gha-kvm-vm1-nvmeof": {"guest"},
+}
+# A ROCm install path or release, as in "/opt/rocm", "ROCM_PATH", "core-10.2",
+# "ROCm 10.2", "rocm10_2" and "rocm-10.2.0".
+ROCM_RE = re.compile(
+    r"/opt/rocm|ROCM_PATH|\bcore-\d+\.\d+|rocm[\s_/-]*\d+[._]\d+", re.IGNORECASE
+)
 # Needs of active cases that no job sets up yet: those cases end as skip/env.
 NEVER_PROVIDED = {"bench-container": {"s3"}}
 # The LBA-STD and KV-STD sets of plan section 2.5.
@@ -659,6 +673,43 @@ class EnvTemplateTest(unittest.TestCase):
                     if two:
                         # The initiator's address is where the target connects.
                         self.assertIn("ip", spec.vars)
+
+    def test_templates_and_lanes_hold_for_any_guest_image(self) -> None:
+        # The lane job chooses the guest image, and with it the ROCm release
+        # and the names qemu-tool gives the guests. A template or a lane that
+        # named either would have to change with every pin.
+        vm = {path.stem: path for path in ENVS.glob("gha-kvm-*.toml")}
+        self.assertEqual(set(vm), set(GUEST_ALIASES))
+        for name, path in vm.items():
+            hosts = tomllib.loads(path.read_text(encoding="utf-8"))["hosts"]
+            with self.subTest(env=name):
+                self.assertEqual(set(hosts), GUEST_ALIASES[name])
+                for host, spec in hosts.items():
+                    self.assertEqual((spec["kind"], spec["ssh_host"]), ("ssh", host))
+        for text in (
+            "/opt/rocm/core-10.2",
+            "$ROCM_PATH/lib",
+            "ROCm 10.2",
+            "rocm10_2",
+            "rocm-10.2.0",
+        ):
+            self.assertRegex(text, ROCM_RE)
+        for text in (
+            "the ROCm runtime",
+            "rocm-ernic",
+            "rocm_wheel_smoke_test.py",
+            "192.168.100.11",
+        ):
+            self.assertNotRegex(text, ROCM_RE)
+        files = sorted(path for where in (ENVS, LANES) for path in where.glob("*.toml"))
+        self.assertGreaterEqual(len(files), len(self.envs) + len(ACTIVE_LANES))
+        found = [
+            f"{path.name}:{number}: {line.strip()}"
+            for path in files
+            for number, line in enumerate(path.read_text("utf-8").splitlines(), 1)
+            if ROCM_RE.search(line)
+        ]
+        self.assertEqual(found, [])
 
     def test_probes(self) -> None:
         for name, env in self.envs.items():
