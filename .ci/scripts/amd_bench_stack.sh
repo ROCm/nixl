@@ -306,6 +306,10 @@ services:
     command: ["rocm-ernic", "-s", "${ERNIC_SOCK}", "-b", "${ERNIC_BACKEND}", "-m", "${ERNIC_MAC}", "-S", "${ERNIC_STATS}"]
     healthcheck:
       test: ["CMD", "sh", "-c", "test -S ${ERNIC_SOCK}"]
+  # Compose 5.1.3, on the hosted runners, refuses the generated file's
+  # "group_add: []" of this service once any second file is merged with it.
+  ernic-stats-exporter:
+    group_add: !override []
 EOF
   cat "${STACK_DIR}/docker-compose.override.yml"
   cp "${STACK_DIR}/docker-compose.override.yml" "${BENCH_DIAG}/"
