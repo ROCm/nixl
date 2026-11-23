@@ -22,7 +22,8 @@ probe workflow, is in [amd-bench.md](amd-bench.md).
 | `main-amd` | Upstream `main` plus the fork's CI: the workflows, the test scripts and these documents. No change to NIXL itself. The default branch. | Pull requests only. Nothing pushes to it, neither a person nor a workflow. |
 | `for-upstream/<name>` | A change to NIXL itself, based on `main`, until upstream takes it. | Whoever prepares the change for upstream. |
 | `amd-sync/upstream-main` | The head of the pull request that brings new upstream commits into `main-amd`. | The nightly, and a maintainer who has a conflict to resolve. |
-| `gh-pages` | The results site and the pip index of the nightly wheels. | The nightly and the wheel publisher, one commit per run. |
+| `gh-pages` | The results site, the pip index of the nightly wheels, and the bench data and pages. | Three writers, one commit per run: the nightly, the wheel publisher and the bench publisher. |
+| `gh-pages-staging` | A copy of `gh-pages` on which the bench publisher rehearses its push. Not served, and a history of its own. | `AMD Bench Publish` started by hand with `target-branch=gh-pages-staging`. A maintainer deletes it to start over. |
 
 `main-amd` is the default branch because GitHub reads scheduled workflows,
 `workflow_run` workflows and the "Run workflow" button from the default branch
@@ -130,8 +131,10 @@ worked and whether or not the sync pull request has been merged.
 Two workflows follow a nightly run that has completed, each from the run's
 artifacts: `AMD Nightly Wheels` publishes the wheels of the wheels branch, and
 `AMD Nightly Bench` runs nixlbench on every branch that built a nixlbench
-wheel. The bench publishes nothing and cannot change the nightly's result or
-the publication; it is in [amd-bench.md](amd-bench.md#the-bench-workflow).
+wheel. The bench publishes nothing itself; `AMD Bench Publish` follows it and
+puts its records on the site. Neither can change the nightly's result or the
+publication of the wheels. They are in
+[amd-bench.md](amd-bench.md#the-bench-workflow).
 
 The container test runs for each ROCm version. The rocjitsu VM tests cover the
 ROCm 10.1 backend only: the one published guest image carries ROCm 10.1, so
@@ -187,6 +190,7 @@ things are allowed to fail and are only reported:
 | Variable `AMD_NIGHTLY_ENABLED` | `true` | Every job checks it, so a copy of the workflow in another fork does nothing on its schedule. A run started by hand does not need it. |
 | Variable `AMD_NIXLBENCH_WHEEL` | Unset, or `true` | Unset, the nightly builds no nixlbench wheel and a `ROCm Wheels` run started by hand does. `true` builds it in the nightly as well, which can hold each `build` leg for up to 25 minutes more, and `Results` for 2, before the wheels are published. `false` builds it nowhere. See [amd-bench.md](amd-bench.md#the-nixlbench-wheel). |
 | Variable `AMD_NIGHTLY_BENCH` | Unset | `false` stops `AMD Nightly Bench` from following the nightly; a run started by hand still works. |
+| Variable `AMD_BENCH_PUBLISH` | Unset | `false` stops `AMD Bench Publish` from following the bench; a run started by hand still works. See [amd-bench.md](amd-bench.md#publishing). |
 | Secret `AMD_SYNC_TOKEN` | See below | The sync job's pushes and its pull request. |
 | Pages | Deploy from a branch, `gh-pages`, `/` | Serves the results site. The nightly creates the branch on its first run; Pages itself has to be switched on once by an administrator. |
 
@@ -208,8 +212,12 @@ it as the workflow is written: an App's tokens last an hour, and the workflow
 has no step that mints one.
 
 The sync job is the only user of the secret. Everything else runs with the
-workflow's own token: read-only, except in the report job, which has
-`contents: write` to push to `gh-pages`.
+workflow's own token: read-only, except in the jobs that publish. The report
+job and the `publish` job of the wheel publisher have `contents: write` to
+push to `gh-pages`, the latter for its releases as well. The `publish` job of
+`AMD Bench Publish` has it for the same two things: the push and the
+`bench-raw-*` releases. Its `verify` job has `contents: read` and
+`pages: read`, to ask where the site is served, and writes nothing.
 
 A push made with `AMD_SYNC_TOKEN` starts workflows like any other push, so the
 upstream workflows that run on a push to `main` start in this fork each time
@@ -338,8 +346,9 @@ on, whatever `ref` is.
 
 ## Reading the site
 
-The site is `https://<owner>.github.io/<repo>/`, written by
-[`amd_results_site.py`](../scripts/amd_results_site.py) into `gh-pages`:
+The site is `https://<owner>.github.io/<repo>/`, served from `gh-pages`. The
+nightly's report job writes the results part, with
+[`amd_results_site.py`](../scripts/amd_results_site.py):
 
 - `data/nightly/<stamp>/summary.json` is one night's `nightly-summary.json`.
   `<stamp>` is the UTC start of the run, as `YYYYMMDDTHHMMSSZ`.
@@ -349,12 +358,48 @@ The site is `https://<owner>.github.io/<repo>/`, written by
   skip, not run) and the trends: build and test durations, wheel sizes, and
   transfer rates with the transport or storage path each one used.
 
-The nightly and the wheel publisher both push to `gh-pages`, never forced.
-A writer whose push is refused because the other got there first starts again
+`AMD Bench Publish` writes the bench part, with
+[`amd_bench_publish.py`](../scripts/amd_bench_publish.py):
+
+- `bench/index.html` shows the latest bench run of each branch with its failed
+  cases, and every run as a row of lanes; `bench/runs/<shard id>.html` is one
+  run, with its failures, skips and blocked cases.
+- `data/bench/v1/` holds the records behind those pages: `manifest.json`,
+  `latest.json`, the matrix of each run and one directory of gzip NDJSON
+  files per branch of each bench run.
+
+The root page links to `bench/index.html` once a bench run is published; the
+link appears with the next nightly, which is what renders the root page. The
+layout is a contract and is described in
+[amd-bench.md](amd-bench.md#the-layout-on-gh-pages).
+
+Three jobs push to `gh-pages`, never forced: the nightly's report, the wheel
+publisher and the bench publisher. Each stages its own paths only: the root
+page and `data/nightly/`, `wheels/`, and `bench/` with `data/bench/v1/`. The
+first two share the job group `gh-pages`, which runs one job and lets one
+more wait; the bench publisher has a group of its own, `gh-pages-bench`, so
+that it can never take that waiting place from the wheel publisher; a dry run
+of it writes nowhere and is in no group. The groups only keep jobs from piling
+up. What keeps the branch consistent is the push:
+a writer whose push is refused because another got there first starts again
 from a fresh shallow clone after a random pause of 5 to 24 seconds. After five
 attempts it gives up, failing its job and leaving `gh-pages` as it was. The
 wheel publisher has by then uploaded the new wheels to the pre-releases; the
-pip index still lists the previous night's, which are kept.
+pip index still lists the previous night's, which are kept. The bench
+publisher has by then archived the raw records, and publishes them with its
+next run.
+
+The bench publisher then checks, in a job outside its group, that the site
+serves what it pushed and that the root page, `data/nightly/index.json` and
+`wheels/index.html` still answer. That wait, up to 15 minutes, holds up no
+other writer.
+
+The workflows keep their files in pre-releases:
+
+| Release | From | Assets |
+| --- | --- | --- |
+| `nightly-<slug>` | The wheel publisher | The nightly wheels of the wheels branch, replaced each night it passes. |
+| `bench-raw-<YYYY>-<MM>` | The bench publisher | The raw records, logs and matrix of each bench run of that month. Added, never replaced. Public and permanent: see [amd-bench.md](amd-bench.md#the-raw-releases). |
 
 The transfer rates come from emulated devices on shared runners. Each is the
 bytes a check moved divided by the time the whole check took, set-up included.
