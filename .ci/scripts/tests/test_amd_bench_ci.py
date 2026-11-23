@@ -6,10 +6,10 @@
 
 fixtures/bench_ci holds what a finished nightly leaves behind, all synthetic:
 a run, its artifact listing, the manifests of two nixlbench wheels (feat-a
-with every ROCm version, feat-b without the guest's), the nightly's summary,
-and a matrix of the five lanes with env templates. The last two classes read
-the real matrix under .ci/bench instead, with the values the lane jobs set.
-No network, no docker, no ssh.
+with every ROCm version, feat-b without 10.1), the nightly's summary, and a
+matrix of the five lanes with env templates. RealMatrixTest and
+StackRenderTest read the real matrix under .ci/bench instead, with the values
+the lane jobs set. No network, no docker, no ssh.
 """
 
 from __future__ import annotations
@@ -166,21 +166,22 @@ class PlanTest(Scratch):
                 ("feat-b", "10.2.0"),
             ],
         )
-        # feat-b has no backend for the guest's ROCm, so no VM lane.
+        # The guest carries ROCm 10.2, and both wheels have that backend.
         self.assertEqual(
             [(e["slug"], e["lane"], e["rocm"]) for e in outputs["vm"]],
-            [("feat-a", lane, "10.1.0") for lane in VM_LANES],
+            [
+                (slug, lane, "10.2.0")
+                for slug in ("feat-a", "feat-b")
+                for lane in VM_LANES
+            ],
         )
-        self.assertIn("Bench VM lanes not run::feat-b", out)
+        self.assertNotIn("Bench VM lanes not run", out)
+        vm_lanes = "vm1-local=10.2.0 vm2-net=10.2.0 vm1-loop=10.2.0 vm1-fabric=10.2.0"
         self.assertEqual(
             [(e["slug"], e["expect"]) for e in outputs["collect"]],
             [
-                (
-                    "feat-a",
-                    "bench-container=7.14.1,10.1.0,10.2.0 vm1-local=10.1.0 "
-                    "vm2-net=10.1.0 vm1-loop=10.1.0 vm1-fabric=10.1.0",
-                ),
-                ("feat-b", "bench-container=7.14.1,10.2.0"),
+                ("feat-a", f"bench-container=7.14.1,10.1.0,10.2.0 {vm_lanes}"),
+                ("feat-b", f"bench-container=7.14.1,10.2.0 {vm_lanes}"),
             ],
         )
         element = outputs["vm"][0]
@@ -193,8 +194,37 @@ class PlanTest(Scratch):
         self.assertEqual(set(meta) - set(lib.META_KEYS), set())
         self.assertEqual(json.loads(outputs["collect"][0]["meta"]), meta)
 
+    def test_a_wheel_without_the_guests_backend_gets_no_vm_lane(self) -> None:
+        code, outputs, out, _ = self.plan(guest_rocm="10.1")
+        self.assertEqual(code, 0)
+        self.assertEqual(outputs["count"], "2")
+        self.assertEqual(len(outputs["container"]), 5)
+        # feat-b has no backend for a guest with ROCm 10.1, so no VM lane.
+        self.assertEqual(
+            [(e["slug"], e["lane"], e["rocm"]) for e in outputs["vm"]],
+            [("feat-a", lane, "10.1.0") for lane in VM_LANES],
+        )
+        self.assertIn(
+            "Bench VM lanes not run::feat-b: its nixlbench wheel has no ROCm 10.1 "
+            "backend",
+            out,
+        )
+        self.assertEqual(
+            [(e["slug"], e["expect"]) for e in outputs["collect"]],
+            [
+                (
+                    "feat-a",
+                    "bench-container=7.14.1,10.1.0,10.2.0 vm1-local=10.1.0 "
+                    "vm2-net=10.1.0 vm1-loop=10.1.0 vm1-fabric=10.1.0",
+                ),
+                ("feat-b", "bench-container=7.14.1,10.2.0"),
+            ],
+        )
+        self.assertEqual(self.plan(guest_rocm="10")[0], 2)
+
     def test_allow_failure_is_a_json_boolean(self) -> None:
         _, outputs, _, _ = self.plan()
+        self.assertEqual(len(outputs["vm"]), 2 * len(VM_LANES))
         allowed = {e["lane"]: e["allow-failure"] for e in outputs["vm"]}
         self.assertEqual(
             allowed,
@@ -264,7 +294,7 @@ class PlanTest(Scratch):
         self.assertEqual(len(outputs["container"]), 5)
         self.assertEqual(
             outputs["collect"][0]["expect"],
-            "bench-container=7.14.1,10.1.0,10.2.0 vm1-local=10.1.0",
+            "bench-container=7.14.1,10.1.0,10.2.0 vm1-local=10.2.0",
         )
         # vm1-loop has a case in the tier, but a blocked one.
         for lane in ("vm2-net", "vm1-loop", "vm1-fabric"):
@@ -310,10 +340,11 @@ class PlanTest(Scratch):
         self.assertEqual({e["lane"] for e in outputs["vm"]}, {"vm2-net"})
         self.assertEqual(
             outputs["collect"][0]["expect"],
-            "bench-container=7.14.1,10.1.0,10.2.0 vm2-net=10.1.0",
+            "bench-container=7.14.1,10.1.0,10.2.0 vm2-net=10.2.0",
         )
-        # Only VM lanes, and feat-b has none: it gets no collect job either.
-        code, outputs, _, _ = self.plan(lanes="vm1-local")
+        # Only VM lanes, and for a 10.1 guest feat-b has none: it gets no
+        # collect job either.
+        code, outputs, _, _ = self.plan(lanes="vm1-local", guest_rocm="10.1")
         self.assertEqual(outputs["count"], "1")
         self.assertEqual(outputs["container"], [])
         self.assertEqual([e["slug"] for e in outputs["collect"]], ["feat-a"])
@@ -477,7 +508,7 @@ class PlanTest(Scratch):
                 "--event",
                 "workflow_run",
                 "--guest-rocm",
-                "10.1",
+                "10.2",
                 "--max-branches",
                 "4",
                 "--output",
@@ -919,7 +950,7 @@ class StackRenderTest(Scratch):
             "GITHUB_WORKSPACE": str(REPO),
             "BENCH_DIAG": str(self.tmp / "diag"),
             "RUN_META": json.dumps(BASE_META),
-            "ROCM_VERSION": "10.1.0",
+            "ROCM_VERSION": "10.2.0",
             "GITHUB_RUN_ID": "987",
             "GITHUB_RUN_ATTEMPT": "2",
         }
@@ -962,7 +993,7 @@ class StackRenderTest(Scratch):
                 **BASE_META,
                 "bench_run_id": "987",
                 "run_attempt": 2,
-                "rocm_version": "10.1.0",
+                "rocm_version": "10.2.0",
                 "runner_image": "example.invalid/qemu@sha256:" + "0" * 64,
                 "ernic_backend": "mesh",
                 "overlay_sha256": "c" * 64,

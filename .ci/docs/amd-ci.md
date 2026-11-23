@@ -140,6 +140,11 @@ The container test runs for each ROCm version. The rocjitsu VM tests cover the
 ROCm 10.1 backend only: the one published guest image carries ROCm 10.1, so
 for 7.14 and 10.2 the rocjitsu jobs skip their test with a notice and succeed.
 
+The bench VM lanes use a newer guest: they boot the ROCm 10.2 guest of
+qemu-tool v2.1.0 and run the 10.2 backend only; see
+[amd-bench.md](amd-bench.md#lanes). The rocjitsu wheel tests stay on the 10.1
+guest until they move to that one.
+
 Every branch is built for all three ROCm versions. The merge fails for a
 branch whose `contrib/wheel_merge_rocm.py` has no PyTorch pin for one of them,
 so a ROCm version is added to the wheels branch before it is added to the

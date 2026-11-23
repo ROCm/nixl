@@ -138,15 +138,26 @@ there, see [Publishing](#publishing). Neither can change the result of
 | --- | --- | --- | --- | --- |
 | `bench-container` | An `ubuntu:24.04` job container with the ROCm runtime and `seccomp=unconfined`, no GPU. One job per ROCm version in the nixlbench wheel. | `gha-container` | `io_uring`, `redis` | `pr`, `nightly` |
 | `vm1-local` | One rocjitsu guest with two spare NVMe drives ([`fleet-overlay-bench-local.xml`](../rocjitsu/fleet-overlay-bench-local.xml)): ext4 on the first, the second raw. | `gha-kvm-vm1` | `blkdev`, `gpu`, `io_uring` | `pr`, `nightly` |
-| `vm2-net` | Two guests on the rocm-ernic mesh ([`fleet-overlay-2vm.xml`](../rocjitsu/fleet-overlay-2vm.xml)). | `gha-kvm-vm2` | `gpu`, `rdma`, `two_hosts` | `nightly` |
+| `vm2-net` | Two guests on the rocm-ernic mesh ([`fleet-overlay-bench-net.xml`](../rocjitsu/fleet-overlay-bench-net.xml)). | `gha-kvm-vm2` | `gpu`, `rdma`, `two_hosts` | `nightly` |
 | `vm1-loop` | One guest and the rocm-ernic `loopback` backend ([`fleet-overlay-backends.xml`](../rocjitsu/fleet-overlay-backends.xml)). | `gha-kvm-vm1-loopback` | `gpu`, `rdma` | `nightly` |
 | `vm1-fabric` | One guest and the rocm-ernic `nvmeof` backend, the same overlay. | `gha-kvm-vm1-nvmeof` | `blkdev`, `gpu`, `io_uring` | `nightly` |
 
 The container lane is [`amd-bench-container.yml`](../../.github/workflows/amd-bench-container.yml)
 and the four VM lanes are [`amd-bench-vm.yml`](../../.github/workflows/amd-bench-vm.yml).
-The VM lanes run the ROCm 10.1 backend only, which is what the guest image
-carries. The runner, [`amd_bench_run.py`](../scripts/amd_bench_run.py), runs
-in the job container and reaches each guest over SSH.
+The VM lanes run the ROCm 10.2 backend only, which is what the guest image
+of qemu-tool v2.1.0 carries. The runner,
+[`amd_bench_run.py`](../scripts/amd_bench_run.py), runs on the hosted runner
+and reaches each guest over SSH.
+
+The VM jobs boot their guests with
+[qemu-tool-action](https://github.com/sbates130272/qemu-tool-action), pinned
+by commit. Each fleet is qemu-tool's own `rocm-golden.xml` with two overlays
+on top: [`fleet-overlay-common.xml`](../rocjitsu/fleet-overlay-common.xml),
+which pins the QEMU, rocm-ernic, rocjitsu and guest images by digest, and the
+lane's own. The action's pin, `QEMU_MINIMAL_REF` and those four references
+move together. A job fails when the qemu-tool it installed is not
+`QEMU_MINIMAL_REF` or, after the boot, when an image tag in the overlay is not
+the one `rocm-golden.xml` names.
 
 An env template, `.ci/bench/envs/<env class>.toml`, says what a lane's
 environment looks like. The job renders it to the JSON file the runner reads,
@@ -213,7 +224,7 @@ for the branch, or empty for a `ROCm Wheels` run started by hand.
 | Artifact | From | Holds |
 | --- | --- | --- |
 | `bench-records-<lane>-<rocm><suffix>` | Each lane job | `records.ndjson` and `logs/<case>/` with the output of every process. |
-| `bench-diagnostics-<lane>-<rocm><suffix>` | Each lane job | `runner.log`, the preflight output (`nixlbench --version`, `ldd`), the rendered `env.json` and `run-meta.json`, `e1-vram-timing.txt`; for a VM lane also the guests' kernel logs and device state, the NIC server's statistics, the compose logs and the files listed under [The guest's CPU and peer-to-peer DMA](#the-guests-cpu-and-peer-to-peer-dma). |
+| `bench-diagnostics-<lane>-<rocm><suffix>` | Each lane job | `runner.log`, the preflight output (`nixlbench --version`, `ldd`), the rendered `env.json` and `run-meta.json`, `e1-vram-timing.txt`; for a VM lane also the guests' kernel logs and device state, the NIC server's statistics, the compose logs, the fleet files the guests were booted from (`fleet-layers.txt`), the action's own logs (`action-logs/`) and the files listed under [The guest's CPU and peer-to-peer DMA](#the-guests-cpu-and-peer-to-peer-dma). |
 | `bench-collected<suffix>` | `collect` | `bench-<stamp>-<slug>-<run>.a<attempt>.ndjson.gz` (and `.zst`), the logs as `.logs.tar.gz`, `matrix-<sha256>.json`, `collect.json` and `summary.md`. |
 
 ### The fabric lanes
@@ -343,12 +354,12 @@ in `drivers/pci/p2pdma.c`). qemu-tool starts every guest with `-cpu EPYC`,
 which under KVM sets the family and the model name and may leave the vendor
 that of the runner's own CPU, and a hosted runner is not always AMD. No
 setting of the fleet XML changes that CPU string at the pinned qemu-tool
-(v2.0.0): it is fixed in `run_vm.py`, and the only setting that reaches it is
+(v2.1.0): it is fixed in `run_vm.py`, and the only setting that reaches it is
 the integer `vm-cpu-phys-bits`. Making a guest report AuthenticAMD on any
 runner therefore needs a change to qemu-tool, a `vendor=AuthenticAMD` on its
-`-cpu` argument, and a new `QEMU_MINIMAL_REF` here. That is worth doing once
-a run has recorded a guest whose vendor is not AMD; whether such a guest then
-runs these cases is not known until it is tried.
+`-cpu` argument, and a new `QEMU_MINIMAL_REF` here. That change has been
+requested for qemu-tool's next release; whether such a guest then runs these
+cases is not known until it is tried.
 
 In the first run of the lanes `vm1-local` drew an Intel runner. Its two AIS
 `fast-required` cases failed with "No such device", and the guest's kernel
@@ -807,7 +818,7 @@ fails the run.
 
 | Probe | Does | Artifact |
 | --- | --- | --- |
-| `guest-facts` | Boots the smoke test's guest and runs [`amd_bench_probe_guest.py`](../scripts/amd_bench_probe_guest.py) in it: limits, disk, kernel modules, tools, ROCm, NVMe, RDMA, the cost of `apt-get update`. Records the runner's free disk, CPUs and memory before the boot, after it and at the end. | `amd-bench-probe-guest-facts` |
+| `guest-facts` | Boots the guest of the `vm1-local` lane and runs [`amd_bench_probe_guest.py`](../scripts/amd_bench_probe_guest.py) in it: limits, disk, kernel modules, tools, ROCm, NVMe, RDMA, the cost of `apt-get update`. Records the runner's free disk, CPUs and memory before the boot, after it and at the end. | `amd-bench-probe-guest-facts` |
 | `ernic-backend` | One job per backend, `loopback`, `nvmeof` and `s3`; `ernic-backend-<lane>` selects one. Boots one guest with that rocm-ernic backend and uses it from the guest. | `amd-bench-probe-ernic-backend-<lane>` |
 | `container-uring` | Calls `io_uring_setup` in an `ubuntu:24.04` job container, once with the default seccomp profile and once unconfined. Allowed to fail. | `amd-bench-probe-container-uring-<seccomp>` |
 
@@ -821,11 +832,13 @@ and the merged compose configuration.
 
 ## Selecting the rocm-ernic backend
 
-qemu-tool always starts the NIC server on its `tcp` mesh and has no setting for
-anything else; the server takes its backend from its command line only. The
+The pinned qemu-tool (v2.1.0) always starts the NIC server on its `tcp` mesh
+and has no setting for anything else; the server takes its backend from its
+command line only. The
 `ernic-backend` job therefore writes a `docker-compose.override.yml` into the
-stack directory before `quick-start up`. quick-start leaves that file alone and
-runs compose in that directory with no `-f`, so compose merges it. The
+stack directory before the boot. The action and quick-start, `--clean-overlays`
+included, leave that file alone, and quick-start runs compose in that directory
+with no `-f`, so compose merges it. The
 override replaces two things for `ernic-1`: the `command`, to carry the wanted
 `-b <backend>`, and the healthcheck, which otherwise waits for a mesh
 connection that never comes.
@@ -844,14 +857,36 @@ Its limits:
 - Only `quick-start up` and `down` are safe; `test` and `report` assume the
   mesh.
 
-[`fleet-overlay-backends.xml`](../rocjitsu/fleet-overlay-backends.xml) is
-`fleet-overlay.xml` with P4 off, so that the generated file does not claim
-otherwise. The job refuses any overlay that does not set one guest and no TAP,
-and after the boot checks that the server reports the requested backend and
-that its container has no entrypoint.
+[`fleet-overlay-backends.xml`](../rocjitsu/fleet-overlay-backends.xml) sets
+one guest, no TAP and P4 off, the last so that the generated file does not
+claim otherwise. The job refuses any overlay that does not set one guest and
+no TAP, and after the boot checks that the server reports the requested
+backend and that its container has no entrypoint.
 
-A first-class backend setting in qemu-tool's fleet file has been requested.
-Until it exists, a two-guest or TAP stack cannot use these backends.
+A first-class backend setting in qemu-tool's fleet file exists on its main
+branch and is in no release yet. Until the pin can move to one, a two-guest or
+TAP stack cannot use these backends.
+
+What is kept only until something else happens, to be removed then:
+
+- **A qemu-tool release with the backend setting:** the override, the limits
+  above, and the steps of `amd-bench-vm.yml` and of the probe that write it,
+  check how compose merged it and compare what it repeats.
+- **A qemu-tool release that can set the guest's CPU vendor:** nothing is
+  removed. The pin moves, and the section on the guest's CPU is rewritten once
+  a run shows what such a guest does.
+- **A qemu-tool-action release** with a GPU bring-up that reports without
+  failing the boot, host aliases of the caller's choice and the digests of the
+  images it ran: the lanes' own GPU step, the SSH configuration rewritten from
+  the action's manifest, and the comparison of the overlay's tags with
+  qemu-tool's fleet file.
+- **The first run in which all four lanes pass:** what only confirms that the
+  action did as it was asked, namely the comparison of each container's image
+  in `fleet-check` and the retries around the first SSH login.
+- **A decision of our own:** `<vm-nvme-vram>false` in
+  [`fleet-overlay-common.xml`](../rocjitsu/fleet-overlay-common.xml), which
+  keeps the guests' NVMe drives off GPU memory as they were before the pin
+  moved.
 
 ## Two NVMe paths
 

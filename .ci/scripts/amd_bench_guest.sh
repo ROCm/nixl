@@ -90,7 +90,7 @@ cmd_rocm() {
   case "$ver" in
     "$want".*|"$want") ;;
     *)
-      echo "::error::the guest carries ROCm '${ver:-unknown}', not ${want}; the guest image pin and GUEST_ROCM in the workflow disagree"
+      echo "::error::the guest carries ROCm '${ver:-unknown}', not ${want}; the guest image of the pinned qemu-tool, which fleet-overlay-common.xml pins by digest, and GUEST_ROCM in the workflow disagree"
       exit 1
       ;;
   esac

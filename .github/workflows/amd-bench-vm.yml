@@ -7,26 +7,34 @@ name: AMD Bench - VM Lane
 # guest, two spare NVMe drives), vm2-net (two guests on the emulated NICs'
 # mesh), vm1-loop (one guest, the NIC's loopback backend) or vm1-fabric (one
 # guest, the NIC's NVMe-over-Fabrics target). The runner,
-# .ci/scripts/amd_bench_run.py, stays in the job container and reaches the
+# .ci/scripts/amd_bench_run.py, stays on the hosted runner and reaches the
 # guests over ssh. The records and the diagnostics are uploaded as artifacts;
 # nothing is published. See .ci/docs/amd-bench.md.
 #
 # The scripts, the matrix and the fleet overlays are those of the commit this
 # workflow runs at, whatever source the wheels in the artifacts were built
-# from. The steps that boot the stack are .ci/scripts/amd_bench_stack.sh, which
-# does what rocm-wheels-rocjitsu.yml and amd-bench-probe.yml do; change them
-# together.
+# from. The guests are booted and taken down by qemu-tool-action; the steps
+# around it are .ci/scripts/amd_bench_stack.sh. amd-bench-probe.yml boots the
+# same way, from the same pins; change them together.
 #
 # With allow-failure the job carries continue-on-error, so a lane that fails
 # does not fail the run that called it.
 #
 # External dependencies besides the actions pinned below, uv and numpy from
 # PyPI, and the guests' Ubuntu archive when nixlbench lacks a library:
-#   - github.com/sbates130272/qemu-minimal at QEMU_MINIMAL_REF: qemu-tool, the
-#     rocm-golden fleet file and the nonroot-user action.
-#   - The Docker Hub images under docker.io/sbates130272 that the overlays in
-#     .ci/rocjitsu pin by digest (QEMU, the device servers and the guest disk);
-#     the QEMU image is also the job container.
+#   - github.com/sbates130272/qemu-tool-action at the SHA pinned below, which
+#     installs qemu-tool, boots the fleet and takes it down.
+#   - github.com/sbates130272/qemu-minimal at QEMU_MINIMAL_REF, fetched by the
+#     action: qemu-tool and its rocm-golden fleet file.
+#   - PyPI: what the action installs qemu-tool with in a virtual environment
+#     of its own, and setuptools and one dependency each time a qemu container
+#     starts.
+#   - The runner's Ubuntu archive, for a host package the action finds missing,
+#     and github.com/oras-project/oras releases for oras 1.3.4, which the
+#     action checks against its sha256.
+#   - The Docker Hub images under docker.io/sbates130272 that
+#     .ci/rocjitsu/fleet-overlay-common.xml pins by digest: QEMU, the device
+#     servers and the guest disk.
 #   - vm2-net only: docker.io/library/alpine:3.20 and Alpine's package mirror,
 #     from which qemu-tool builds the image that bridges the guests' NICs.
 
@@ -38,7 +46,7 @@ on:
         required: true
         type: string
       rocm-version:
-        description: ROCm version of the backend to exercise, as X.Y.Z. It must be the guest image's.
+        description: ROCm version of the backend to exercise, as X.Y.Z. It must be the one in the guest of the pinned qemu-tool.
         required: true
         type: string
       nixl-artifact:
@@ -89,11 +97,14 @@ permissions:
   actions: read
 
 env:
-  # The ROCm release in the guest image; only its backend can be selected.
-  GUEST_ROCM: '10.1'
-  # Move together with the nonroot-user action pin, the job container image
-  # and the digests in the overlays under .ci/rocjitsu.
-  QEMU_MINIMAL_REF: 45941a379b6afb4306902c1206d8d981565b5a5c # v2.0.0
+  # The ROCm release in the guest of the pinned qemu-tool; only its backend
+  # can be selected.
+  GUEST_ROCM: '10.2'
+  # The qemu-tool the action installs. It moves together with the
+  # qemu-tool-action pin in the steps and the four image refs of
+  # .ci/rocjitsu/fleet-overlay-common.xml: fleet-check fails the job when they
+  # disagree.
+  QEMU_MINIMAL_REF: c32dc74b86f59a27e6cabd77620f8c6fc6e3e8ed # v2.1.0
   UV_VERSION: 0.13.9
   PYTHONDONTWRITEBYTECODE: 1
 
@@ -104,20 +115,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     continue-on-error: ${{ inputs.allow-failure }}
-    container:
-      # <qemu-ref> of the overlays under .ci/rocjitsu.
-      image: docker.io/sbates130272/batesste-ci-images-ubuntu-qemu-libvfio-user-sbates-fork:20261112.gdca6903-qemu.4cb9698-vfu.3719c3a@sha256:f7e61be3f29c82aeac60b8fa3f88ac3c434ab0f19a79bd144cb87ed9054aca03
-      # QEMU runs in sibling containers started through the host's docker
-      # socket: the images directory must be the same path on both sides and
-      # quick-start must see host pids.
-      options: >-
-        --device /dev/kvm
-        --pid=host
-        -v /var/run/docker.sock:/var/run/docker.sock
-        -v /var/lib/qemu-tool:/var/lib/qemu-tool
     defaults:
       run:
-        # A container job defaults to sh, which rejects "set -o pipefail".
+        # Named, so that every step runs under errexit and pipefail; the
+        # runner's default bash has no pipefail.
         shell: bash
     env:
       LANE: ${{ inputs.lane }}
@@ -156,7 +157,7 @@ jobs:
         }
         # The runner reads TOML with the standard library.
         python3 -c 'import tomllib' \
-          || fail "the job container's python3 is older than 3.11, which amd_bench_run.py needs"
+          || fail "the runner's python3 is older than 3.11, which amd_bench_run.py needs"
         # A rejected value is never echoed.
         case "$LANE" in
           vm1-local|vm2-net|vm1-loop|vm1-fabric) ;;
@@ -182,7 +183,7 @@ jobs:
             || fail "only takes case-key globs separated by spaces, none starting with a dash"
         done
         if [ "${ROCM_VERSION%.*}" != "$GUEST_ROCM" ]; then
-          fail "the only published rocjitsu guest image carries ROCm ${GUEST_ROCM}, so the ROCm ${ROCM_VERSION} backend cannot be selected there"
+          fail "the guest of the pinned qemu-tool carries ROCm ${GUEST_ROCM}, so the ROCm ${ROCM_VERSION} backend cannot be selected there"
         fi
 
     - name: Check out code
@@ -190,45 +191,56 @@ jobs:
       with:
         persist-credentials: false
 
-    - name: Check out qemu-minimal
-      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      with:
-        repository: sbates130272/qemu-minimal
-        ref: ${{ env.QEMU_MINIMAL_REF }}
-        path: qemu-minimal
-        persist-credentials: false
-
+    # The device must exist; the action makes it usable by this user.
     - name: Require KVM
       run: |
         set -euo pipefail
-        if [ ! -c /dev/kvm ] || [ ! -w /dev/kvm ]; then
+        if [ ! -c /dev/kvm ]; then
           echo "::error::/dev/kvm is not usable on this runner; the guests cannot boot without it"
           exit 1
         fi
-        df -h / /var/lib/qemu-tool
 
-    # Exports CIUSER_UID and CIUSER_HOME.
-    - name: Run the stack as a non-root user
-      uses: sbates130272/qemu-minimal/.github/actions/nonroot-user@45941a379b6afb4306902c1206d8d981565b5a5c # qemu-minimal v2.0.0
-
+    # Prepares the host as well: /dev/kvm, /var/lib/qemu-tool, oras and the
+    # host packages qemu-tool needs. The boot step repeats qemu-tool-ref and
+    # reuses this install.
     - name: Install qemu-tool
+      id: tool
+      timeout-minutes: 10
+      uses: sbates130272/qemu-tool-action@cbbf816c2c2cb4a9d911f03bc5117767c5536f43 # v2.1.0
+      with:
+        operation: install
+        qemu-tool-ref: ${{ env.QEMU_MINIMAL_REF }}
+
+    # The stack's bind mounts and the overlays' paths are under
+    # /var/lib/qemu-tool; the action falls back to a directory under
+    # RUNNER_TEMP when it cannot have that one.
+    - name: Check the host and the qemu-tool pin
+      env:
+        TOOL_SHA: ${{ steps.tool.outputs.qemu-tool-sha }}
       run: |
         set -euo pipefail
-        # The image ships its own qemu-tool, which would otherwise win on PATH.
-        PIPX_BIN_DIR=/usr/local/bin pipx install --force ./qemu-minimal/qemu
-        resolved=$(readlink -f "$(command -v qemu-tool)")
-        echo "qemu-tool resolves to: ${resolved}"
-        case "$resolved" in
-          /opt/qemu-tool/*)
-            echo "::error::the image's qemu-tool is shadowing the pinned one"
-            exit 1
-            ;;
-        esac
-        qemu-tool quick-start --help >/dev/null
+        fail() {
+          echo "::error::$1"
+          exit 1
+        }
+        ls -l /dev/kvm || true
+        if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+          fail "/dev/kvm is not readable and writable by $(id -un) after the action prepared the host; the guests cannot boot without it"
+        fi
+        if [ "$TOOL_SHA" != "$QEMU_MINIMAL_REF" ]; then
+          fail "the action installed qemu-tool from the commit '${TOOL_SHA}', not from QEMU_MINIMAL_REF ${QEMU_MINIMAL_REF}"
+        fi
+        if [ ! -d /var/lib/qemu-tool ] || [ ! -w /var/lib/qemu-tool ]; then
+          fail "/var/lib/qemu-tool is not a directory $(id -un) can write, so the action works under RUNNER_TEMP, where the lane's stack directory is not"
+        fi
+        for tool in qemu-tool oras docker; do
+          command -v "$tool" || fail "${tool} is not on PATH after the action prepared the host"
+        done
+        docker compose version || fail "docker has no compose plugin on this runner"
+        df -h / /var/lib/qemu-tool
 
     # After the last checkout: a checkout empties a workspace that holds no
-    # repository yet. github.workspace is the runner's path, not the job
-    # container's.
+    # repository yet.
     - name: Prepare the results directories
       run: |
         set -euo pipefail
@@ -238,6 +250,12 @@ jobs:
           echo "BENCH_OUT=$GITHUB_WORKSPACE/bench-out"
           echo "BENCH_DIAG=$GITHUB_WORKSPACE/bench-diagnostics"
         } >> "$GITHUB_ENV"
+
+    # The stack's directory, and the fleet layers the boot step is given: the
+    # common overlay, then the lane's.
+    - name: Name the lane's stack and fleet layers
+      id: lane
+      run: bash .ci/scripts/amd_bench_stack.sh layers
 
     - name: Check the pins and record the runner before the boot
       run: bash .ci/scripts/amd_bench_stack.sh pins
@@ -299,10 +317,11 @@ jobs:
           echo "NIXLBENCH_WHEEL=$GITHUB_WORKSPACE/${bench[0]}"
         } >> "$GITHUB_ENV"
 
-    # qemu-tool always starts the NIC server as a node of its TCP mesh. A
-    # docker-compose.override.yml in the stack directory, which compose merges
-    # by itself, replaces that command and the mesh's health check for the one
-    # NIC server of a one-guest stack with no TAP.
+    # The pinned qemu-tool always starts the NIC server as a node of its TCP
+    # mesh. A docker-compose.override.yml in the stack directory, which the
+    # action and qemu-tool leave alone and compose merges by itself, replaces
+    # that command and the mesh's health check for the one NIC server of a
+    # one-guest stack with no TAP.
     - name: Select the NIC backend
       if: inputs.lane == 'vm1-loop' || inputs.lane == 'vm1-fabric'
       run: bash .ci/scripts/amd_bench_stack.sh override
@@ -311,8 +330,30 @@ jobs:
       if: inputs.lane == 'vm1-loop' || inputs.lane == 'vm1-fabric'
       run: bash .ci/scripts/amd_bench_stack.sh ernic-image
 
+    # Under the lane's layers is the rocm-golden fleet of the pinned
+    # qemu-tool. The GPU is left to the lane's own step, where a failure
+    # withholds 'gpu' and does not fail the boot. The other inputs keep the
+    # action's defaults: fresh guest disks, no metrics stack, guests sized
+    # from the runner, and a teardown when the job ends whatever happens.
     - name: Boot the lane's guests
-      run: bash .ci/scripts/amd_bench_stack.sh up
+      id: fleet
+      timeout-minutes: 25
+      uses: sbates130272/qemu-tool-action@cbbf816c2c2cb4a9d911f03bc5117767c5536f43 # v2.1.0
+      with:
+        qemu-tool-ref: ${{ env.QEMU_MINIMAL_REF }}
+        stack-dir: ${{ steps.lane.outputs.stack-dir }}
+        xml-overlay: ${{ steps.lane.outputs.layers }}
+        gpu: false
+        wait-for: ssh
+        wait-timeout: 900
+
+    # That the fleet which booted is the lane's: the layers, the guests, and
+    # the images the overlay pins against the base file's.
+    - name: Check the fleet that booted
+      env:
+        FLEET_XML: ${{ steps.fleet.outputs.fleet-xml }}
+        VM_COUNT: ${{ steps.fleet.outputs.vm-count }}
+      run: bash .ci/scripts/amd_bench_stack.sh fleet-check
 
     - name: Check how compose merged the override
       if: inputs.lane == 'vm1-loop' || inputs.lane == 'vm1-fabric'
@@ -322,7 +363,11 @@ jobs:
       if: inputs.lane == 'vm1-loop' || inputs.lane == 'vm1-fabric'
       run: bash .ci/scripts/amd_bench_stack.sh backend-check
 
-    - name: Join the stack network and wait for the guests to answer SSH
+    # Under the lanes' own aliases, from what the action reports of each
+    # guest.
+    - name: Write the guests' SSH configuration
+      env:
+        VM_MANIFEST: ${{ steps.fleet.outputs.vm-manifest }}
       run: bash .ci/scripts/amd_bench_stack.sh ssh
 
     - name: Check the guests' ROCm version
@@ -382,6 +427,7 @@ jobs:
       if: always() && inputs.lane == 'vm1-fabric'
       run: bash .ci/scripts/amd_bench_stack.sh fabric-down || true
 
+    # Before the stack is taken down, so that no teardown can cost them.
     - name: Upload the records
       if: always()
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -391,6 +437,27 @@ jobs:
         if-no-files-found: warn
         overwrite: true
 
+    # Five minutes: a guest that does not stop holds the teardown for its
+    # 120 s stop grace, and the step must not outlast the time GitHub gives
+    # always() steps after a cancellation or a job timeout. The action's post
+    # step removes whatever a teardown that was cut off leaves behind.
+    - name: Take the stack down
+      id: down
+      if: always() && steps.fleet.outputs.stack-dir != ''
+      continue-on-error: true
+      timeout-minutes: 5
+      uses: sbates130272/qemu-tool-action@cbbf816c2c2cb4a9d911f03bc5117767c5536f43 # v2.1.0
+      with:
+        operation: down
+
+    # The containers' logs and the guests' kernel logs, as the action wrote
+    # them at the teardown.
+    - name: Keep the action's logs
+      if: always() && steps.down.outputs.logs-dir != ''
+      env:
+        LOGS_DIR: ${{ steps.down.outputs.logs-dir }}
+      run: cp -a "$LOGS_DIR" "${BENCH_DIAG:-bench-diagnostics}/action-logs" || true
+
     - name: Upload diagnostics
       if: always()
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -399,10 +466,6 @@ jobs:
         path: bench-diagnostics/
         if-no-files-found: warn
         overwrite: true
-
-    - name: Take the stack down
-      if: always()
-      run: bash .ci/scripts/amd_bench_stack.sh down || true
 
     - name: Report a lane that is allowed to fail
       if: ${{ failure() && inputs.allow-failure }}
