@@ -8,7 +8,9 @@ SPDX-License-Identifier: Apache-2.0
 This is for maintainers of the AMD fork of NIXL. It covers what the nightly
 nixlbench programme is for, the nixlbench wheel, the `AMD Nightly Bench`
 workflow ([`amd-nightly-bench.yml`](../../.github/workflows/amd-nightly-bench.yml))
-and its lanes, the `AMD Bench Probe` workflow
+and its lanes, the `AMD Bench Publish` workflow
+([`amd-bench-publish.yml`](../../.github/workflows/amd-bench-publish.yml)) that
+puts the records on the site, the `AMD Bench Probe` workflow
 ([`amd-bench-probe.yml`](../../.github/workflows/amd-bench-probe.yml)) that
 answers the questions the programme is designed around, and the answers once
 they exist. The branches, the nightly and the results site are in
@@ -29,7 +31,7 @@ about real hardware.
 | --- | --- |
 | 0 Probe | The branch limit of twelve and the hardened `gh-pages` writers; the probe workflow; an answer recorded below for each Phase 0 experiment. |
 | 1 First lanes | A nixlbench wheel built beside the NIXL wheels; container and one-guest lanes and the two-guest network lane, with records kept as artifacts only. The one-guest fabric lanes (loopback, NVMe-oF, S3) start here as a job that is allowed to fail. |
-| 2 Data and site | The publisher and the bench pages. The Parquet shards live on `gh-pages` of this repository under `data/bench/v1/`, and the query engine beside the site under `perf/`, until their size calls for a repository of their own. |
+| 2 Data and site | The publisher and the bench pages: every bench run, failures included, as gzip NDJSON shards under `data/bench/v1/` on `gh-pages` of this repository and as static pages under `bench/`; see [Publishing](#publishing). The explorer under `perf/` comes next and adds Parquet files beside the NDJSON ones in the same shard directories. The data stays in this repository until its size calls for one of its own. |
 | 3 Suites | The unit and plugin test suites, in containers and in the guest. |
 | 4 Single-guest fabric | The fabric lanes become gating once they have passed for ten nights. |
 | 5 Local PCIe | The SPDK lanes, and the comparison of the same workload on SPDK and on NVMe-oF. |
@@ -122,11 +124,13 @@ built, so it refuses a run of any other workflow or of a fork. Its jobs:
    for every case the matrix expects and no lane reported, and fails when a
    required case did not pass. No case is required yet.
 
-**Nothing is published.** The workflow has read-only tokens, pushes nothing to
-`gh-pages` and uploads nothing to a release; the records exist as artifacts of
-the bench run only. It cannot change the result of `AMD Nightly` or of
-`AMD Nightly Wheels`. No bench job runs on a pull request; `AMD CI Tests`
-checks the matrix and the scripts there (see [amd-ci.md](amd-ci.md)).
+**The bench workflow itself publishes nothing.** It has read-only tokens,
+pushes nothing to `gh-pages` and uploads nothing to a release; it leaves the
+records as artifacts of the bench run. `AMD Bench Publish` takes them from
+there, see [Publishing](#publishing). Neither can change the result of
+`AMD Nightly` or of `AMD Nightly Wheels`. No bench job runs on a pull request;
+`AMD CI Tests` checks the matrix and the scripts there (see
+[amd-ci.md](amd-ci.md)).
 
 ### Lanes
 
@@ -476,6 +480,328 @@ installation every lane job has. The two ud cases add between seconds and 19
 minutes, the latter if both run to their timeout. The nightly runs none of
 these cases; what it gains is the record of the CPU, a few seconds in each VM
 lane.
+
+## Publishing
+
+`AMD Bench Publish`
+([`amd-bench-publish.yml`](../../.github/workflows/amd-bench-publish.yml))
+puts the records of a bench run on the site, failures included, so that a
+case that failed, timed out, was skipped or is blocked can be read the next
+morning without opening an artifact. The publisher is
+[`amd_bench_publish.py`](../scripts/amd_bench_publish.py) and the pages come
+from [`amd_bench_pages.py`](../scripts/amd_bench_pages.py). Its jobs:
+
+1. **plan.** Checks each run id and lists the run's `bench-collected<suffix>`
+   artifacts, one per branch.
+2. **publish.** Downloads the artifacts and checks each one, archives the raw
+   files in a release, and commits the data and the pages to `gh-pages`.
+3. **verify.** Waits until the site serves what was pushed, then checks that
+   the results page and the wheel index still answer. It runs whenever
+   something was pushed, also when the `publish` job then ended red.
+
+What a reader gets, with no script and nothing loaded from elsewhere:
+
+- `bench/index.html`: for each branch the latest run, with its verdict and its
+  failed cases on the page itself, then every run as a row of lanes.
+- `bench/runs/<shard id>.html`: one run. Failed probes and tests, the failures
+  grouped by cause and then case by case with the exit codes, the error
+  excerpt, the command line and where the logs are; the skipped cases; the
+  lanes; what each blocked case waits for; the declared ratios.
+
+The root page links to `bench/index.html` from the first nightly after the
+first publication; until then the page is reached by its address.
+
+### When it runs
+
+It follows a bench run by itself only when all of these hold:
+
+- the variable `AMD_NIGHTLY_ENABLED` is `true` and `AMD_BENCH_PUBLISH` is not
+  `false`;
+- the bench run is one of this repository's default branch that followed a
+  nightly. A bench run started by hand may hold a few lanes or a filter, so it
+  is published by hand only;
+- the bench run did something. A night on which the bench is switched off, or
+  on which no branch built a nixlbench wheel, publishes nothing and is not a
+  failure.
+
+Any result of the bench run is accepted: a run whose lanes failed is the one
+most worth publishing. Setting `AMD_BENCH_PUBLISH` to `false` stops only this
+automatic path.
+
+By hand:
+
+```bash
+gh workflow run amd-bench-publish.yml -f run-id="<bench run id> [<bench run id> ...]" \
+  [-f target-branch=gh-pages-staging] [-f dry-run=true] [-f rerender=true] \
+  [-f max-shard-mib=<n>]
+```
+
+| Input | Default | Meaning |
+| --- | --- | --- |
+| `run-id` | none | One to ten ids of completed `AMD Nightly Bench` runs of this repository, separated by spaces. One job handles them all. |
+| `target-branch` | `gh-pages` | `gh-pages-staging` rehearses the push on a branch that is not served. |
+| `dry-run` | `false` | Builds the data and the pages and keeps them as the artifact `bench-publish-preview` for 7 days. Nothing is pushed or archived. |
+| `rerender` | `false` | Also rebuilds the derived files of every run already published; see [Repairs](#repairs). It still needs a `run-id`. |
+| `max-shard-mib` | `4` | The size limit of one shard, for this run only; see [Size](#size). |
+
+To publish several runs, a backfill for instance, name them all in one
+`run-id`. The `publish` jobs of this workflow run one at a time, with at most
+one more waiting; a third one queued would cancel the one waiting, before it
+archived anything. A dry run is outside that queue: it writes nowhere, so it
+neither waits nor makes another wait.
+
+### Trying it first
+
+```bash
+gh workflow run amd-bench-publish.yml -f run-id=<id> -f dry-run=true
+gh workflow run amd-bench-publish.yml -f run-id=<id> -f target-branch=gh-pages-staging
+gh workflow run amd-bench-publish.yml -f run-id=<id>
+```
+
+| Mode | Proves | Leaves out |
+| --- | --- | --- |
+| Dry run | The download, the check of each artifact, the data and the pages as they would be committed, and the guards on what is staged. The pages can be looked at. | The push, the release, the heal, the served check. |
+| `gh-pages-staging` | The same, and that the branch can be created and pushed to. | The release, the heal, the served check. |
+| `gh-pages` | Everything. | |
+
+To look at the pages of a dry run:
+
+```bash
+gh run download <id of the publish run> --name bench-publish-preview --dir /tmp/preview
+tar -xzf /tmp/preview/bench-publish-preview.tar.gz -C /tmp/preview
+```
+
+and open `/tmp/preview/bench/index.html`. `report.json` and `plan.json` beside
+the tarball say what was published, what was skipped and how many bytes it
+added.
+
+`gh-pages-staging` is a history of its own. The workflow creates it from
+`gh-pages` the first time and never brings it level again, so a rehearsal of a
+run it already holds does nothing. To start over, delete the branch by hand;
+the workflow never deletes a branch.
+
+Without any workflow, from a checkout:
+
+```bash
+gh run download <bench run id> --name bench-collected --dir /tmp/bench-collected
+mkdir -p /tmp/site
+python3 .ci/scripts/amd_bench_publish.py publish --site /tmp/site --input /tmp/bench-collected
+```
+
+and open `/tmp/site/bench/index.html`.
+
+### The layout on `gh-pages`
+
+This layout is a contract: the pages, and the explorer that follows, read it,
+and a published path never changes its meaning. `<shard>` stands for
+`data/bench/v1/<night or weekly>/<stamp>/<slug>/<bench run id>.a<attempt>`.
+
+| Path | Kind | Holds |
+| --- | --- | --- |
+| `data/bench/v1/manifest.json` | Rewritten by every publication | Every shard: its identity, its files with rows, bytes and SHA-256, its lanes with their counts, what it supersedes and what supersedes it. Also `quarantine`, `schema_minor` and `generation`, which grows by one whenever anything under `data/bench/v1/` changes. One line per shard. |
+| `data/bench/v1/latest.json` | Rewritten | Per branch the headline run: lanes, failed cases, declared ratios. Enough for a status page with no other file. |
+| `data/bench/v1/matrix/<sha256>.json` | Written once | The matrix a run was planned from, byte for byte. |
+| `<shard>/{runs,cases,samples,counters,tests}.ndjson.gz` | Written once | The records of one branch of one bench run, one file per record kind, always all five. |
+| `<shard>/index.json` | Derived | The summary the run page is made from: lanes, cases needing attention, blocked cases, ratios, links. |
+| `bench/index.html` | Rewritten | The landing page. |
+| `bench/runs/<shard id>.html` | Derived | The page of one run. |
+
+- **Written once** means never changed and never deleted: the publisher's
+  guard refuses a commit that modifies or removes such a file. **Derived**
+  files can be rebuilt from the written-once ones, and are, by `rerender`
+  only.
+- The tiers `nightly` and `pr` go under `night/`, `weekly` under `weekly/`.
+- A record file is gzip NDJSON. Each line is a record that passed
+  [`schema/v1.json`](../bench/schema/v1.json), with the fields of its kind in
+  a fixed order, so the types are those of the schema and nothing is inferred.
+  Browsers and DuckDB read the files as they are.
+- Parquet comes with the explorer, as more files in the same shard
+  directories, listed in the manifest's `files` with their format. Nothing
+  published before is rewritten for it.
+- A `run_uid` or `case_uid` is unique within a shard only: two branches of one
+  bench run share them. Key by shard id and uid.
+- Reserved and not written yet: `data/bench/v1/annotations.json`,
+  `data/bench/v1/month/`, `*.parquet`, and a `.g<k>` suffix on a shard
+  directory.
+- The publisher stages nothing outside `data/bench/v1/` and `bench/`. The
+  root page, `data/nightly/`, `wheels/` and `perf/` belong to other writers.
+
+### Shards, supersession and the latest run
+
+A **shard** is one branch of one bench run attempt. Its id is
+`<stamp>-<slug>-<bench run id>.a<attempt>`, the name of the collected file
+without `bench-` and `.ndjson.gz`. `<stamp>` is that of the source run, so the
+shards of one night share it. A second branch, a bench started by hand on the
+same night and a re-run each make a shard of their own; none replaces another.
+
+Which shard speaks for a lane is worked out per night (one stamp and one
+branch) and per lane key, `<lane>/<ROCm version>`, and written to the
+manifest as `superseded_by` and `supersedes`:
+
+- A lane that reported beats one recorded as `missing`.
+- Then the higher tier wins: `weekly` over `nightly` over `pr`. A `pr`-tier
+  run started by hand later the same night never replaces the nightly's lanes.
+- Then a run with no `only` filter beats a filtered one.
+- Among equals the latest bench run and attempt wins. A lane that is `blocked`
+  is the exception: the earliest shard with the same matrix keeps it, so a
+  later run of a few lanes does not take the blocked lanes from the full run.
+- A later night never supersedes an earlier one.
+
+A reader loads lane K from shard S when S is `authoritative` and K is not in
+its `superseded_by`.
+
+The **latest run** of a branch, the headline of the landing page, is:
+
+1. the newest night that has a shard of a bench that followed a nightly
+   (`reason` is `nightly`), if there is one;
+2. otherwise the night with no filtered lane, then with the most lanes,
+   then the newest. A lane counts whatever became of it, so a full run in
+   which a lane did not report is still the headline, with that lane shown
+   as missing, while a run of a few lanes holds fewer and is not. The page
+   says the run was started by hand. This holds only until the branch's
+   first automatic bench.
+
+A run started by hand that is newer than the headline is shown as one line,
+"newer manual run", under the headline and never replaces it, so a debugging
+run of two lanes cannot push the nightly's failures off the first screen. A
+branch whose newest run of any kind is more than 14 days older than the
+newest run on the site is folded into "Branches with no recent run", where
+its line still names a run newer than its headline.
+
+### The raw releases
+
+The collected files are kept, as they were collected, as assets of a monthly
+pre-release, `bench-raw-<YYYY>-<MM>` after the shard's stamp:
+
+| Asset | Holds |
+| --- | --- |
+| `bench-<shard id>.ndjson.gz` | The records, byte for byte. Everything on `gh-pages` can be rebuilt from it. |
+| `bench-<shard id>.logs.tar.gz` | The output of every process of every case. A record's `log_ref` is a directory in it. |
+| `bench-<shard id>.collect.json` | The collector's summary. |
+| `matrix-<sha256>.json` | The matrix, shared by the shards planned from it. |
+
+Assets are added and never replaced; one that is already there with other
+contents is reported as a conflict and left alone.
+
+**The release is public and permanent.** In an artifact the logs expire and
+need a login; in a release anyone can read them for good. So:
+
+- **A bench lane may use throwaway credentials only**, such as the keys of an
+  S3 server started for the job. The checks below do not recognise every form
+  of credential.
+- The publisher checks the logs tarball itself before archiving it: regular
+  `.log` files with relative paths only, within size limits, plain text with
+  no line longer than 8 KiB, nothing in the archive beside its members, and
+  no member whose name or text looks like a secret or would be changed by
+  the runner's redaction. A tarball that fails is not archived. The run is
+  published all the same, its page says "no logs archived", and the warning
+  names the member and the rule, never the text. So a lane writes text logs
+  named `*.log` under `logs/` and nothing else there.
+- The records, the matrix and the collect file are archived as they were
+  collected, so each is refused when it says something its parsed form does
+  not: a JSON object with a key twice, or a gzip header with a file name.
+- The `bench-diagnostics-*` artifacts are not archived. They stay with the
+  bench run and expire with it; the run page names them.
+
+### Repairs
+
+- **One bad branch does not stop the others.** Each artifact is checked on its
+  own: every record against the schema and of this repository, no
+  secret-looking string, its matrix present, its size within the limit, its
+  run page renderable. One that fails, or that the publisher trips over, is
+  reported with the reason and fails the job at its end; the valid ones are
+  published first. When none is valid nothing is written anywhere.
+- **A failed archive does not stop the pages.** The job fails at its end, and
+  the pages link to the release by name, so running the job again, or starting
+  the workflow on the same run id, completes the archive with nothing to
+  repair. Publishing a shard that is already published changes nothing.
+- **Heal.** Before it pushes, the job lists the raw assets of this month's and
+  last month's releases and publishes those of the last 14 days that the
+  manifest neither lists nor quarantines, at most 20. That picks up a run that
+  was archived and then lost its push. It is best effort: a failure in it is a
+  warning, an archived run the publisher cannot take is left out, and when
+  the publisher fails with the archived runs the job publishes without them.
+- **`rerender`.** Checks the record files of every published shard against
+  the manifest, rebuilds each `index.json` and every page from them, and
+  works the lanes and the supersession out again. Use it after a change to the
+  pages or to the summary. A normal publication writes `index.json` and the
+  run page of new shards only, and warns when an older `index.json` cannot be
+  read. The workflow cannot be started without a `run-id`: name any bench
+  run whose `bench-collected` artifact has not expired. Naming a run that is
+  already published changes no data.
+- **Quarantine.** To keep a shard from being published, by the heal as well,
+  add `{"id": "<shard id>", "reason": "...", "at": "<UTC time>"}` to
+  `quarantine` in `manifest.json` on `gh-pages`, by hand. Nothing in the
+  workflow adds or removes an entry. A quarantined shard is not archived
+  either, so to take a leaked file out of a release, add the entry first and
+  delete the asset second: without the entry, starting the workflow on that
+  run id again uploads the asset again. When the manifest cannot be read the
+  job archives nothing, publishes the pages and fails at its end.
+- **A refused push.** As for the other writers: the job starts again from a
+  fresh shallow clone after a random pause, five times at most, then fails
+  with `gh-pages` as it was. The raw files may already be in the release, and
+  the heal publishes them with the next run.
+- **A red `verify` job.** The commit is on `gh-pages`; Pages took more than
+  15 minutes to serve it, or a page of another writer did not answer. Nothing
+  is rolled back. Run the job again. When a later publication is served
+  first, the check accepts its landing page and `latest.json` in place of
+  the ones it pushed.
+
+### Size
+
+The data stays in this repository, on a branch that is never rewritten, so
+every byte published is kept for good. Each publication therefore says what it
+cost, in the commit message and on the run's summary page:
+
+- the bytes added to the tree, and the tree's size under `data/bench/v1/` and
+  `bench/`;
+- the bytes the commit stores, before git packs them;
+- the size of the repository as GitHub reports it.
+
+The tree figures are in `report.json` and the stored bytes in `staged.env`,
+which every run that is not a dry run keeps with `plan.json` as the artifact
+`bench-publish-report`. The size of the repository is on the summary page
+only.
+
+One shard, its five record files and `index.json`, may take 4 MiB at most. An
+artifact above that is refused like any other invalid one; above 1 MiB the
+publisher warns. `max-shard-mib` raises the limit for one run started by hand;
+the automatic path always uses 4.
+
+The first run's record files take 65 KB, and do not compress further. With
+`index.json`, the run page and the three files every publication rewrites
+(the manifest, `latest.json` and the landing page), a night costs about 90 KB
+of history per branch once git has compressed it, some 33 MB a year, beside a
+repository of about 30 MiB today. A new matrix version adds about 8 KB once.
+That growth is what to watch, and what decides when the data moves to a
+repository of its own.
+
+`manifest.json` has no bound yet: it grows by about 2.5 KB a shard, is
+rewritten whole by every publication and is read whole by every reader. The
+stored-bytes figure of a publication therefore rises slowly by itself, about
+0.5 KB a night, so the size of the repository is the figure to compare from
+month to month. How the manifest is split, by month for instance, is to be
+settled before the explorer fixes on its shape.
+
+## Blocker codes
+
+A lane or a case whose matrix entry has `status = "blocked"` is not run. The
+collector writes a `blocked` record for each of its cases with the codes it
+waits for, and the run page lists them under "Blocked". A `W` code is a piece
+of work of the programme, an `E` code an [experiment](#experiments), and a
+name stands for a defect.
+
+| Code | Waits for | Blocks |
+| --- | --- | --- |
+| `W4` | The lane's job in the bench workflow: a boot that selects the rocm-ernic `s3` backend with the compose override. | The lane `vm1-s3`. |
+| `W10` | An SPDK vfio-user NVMe controller in the guest's stack. | The lane `vm1-pcie`. |
+| `W11` | The integration build: a bench-only job that merges the listed `for-upstream/` branches in its workspace and builds nixlbench from the result, so that a change not yet on the wheels branch reaches a lane. | Every case that needs such a change: with `W13`, `W14` and `W15` below. |
+| `W13` | The vendor-neutral `NVME_KV` plugin and its nixlbench backend. | The Key Value cases of `vm1-pcie` and `vm1-fabric`. |
+| `W14` | The hipObject engine of the OBJ plugin. | The S3-over-RDMA cases of `vm1-s3`. |
+| `W15` | LIBFABRIC selecting its verbs provider, and a libfabric built with verbs in the guests. | The lane `vm2-lfverbs`. |
+| `E8` | The answer to E8: whether the LIBFABRIC plugin loads in each environment, which libfabric it resolves and which interface it binds. | The LIBFABRIC tcp cases of `bench-container` and `vm2-net`. |
+| `ucx-shm-ep` | A UCX transport list that works for shared memory. With `UCX_TLS=shm`, and with `shm,self` and `posix,sysv,self`, nixlbench fails at endpoint creation with "Destination is unreachable". | The UCX shm cases of `bench-container`. |
+| `nixlbench-redis-read-sweep` | A nixlbench READ sweep that Redis can serve. nixlbench seeds each key once with the largest block, and the plugin fails a GET whose reply is not the size asked for, so every row below the largest block fails. | The REDIS READ cases of the `N` profile in `bench-container`. |
 
 ## The probe workflow
 

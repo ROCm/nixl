@@ -37,6 +37,12 @@ from typing import Any, Optional
 
 STAMP_RE = re.compile(r"\d{8}T\d{6}Z")
 NIGHTLY = pathlib.PurePath("data", "nightly")
+# Written only once the bench publisher has put its landing page on the site,
+# so that the page never links to a file that is not there.
+BENCH_LINK = (
+    '<p><a href="bench/index.html">nixlbench runs: failures, skips and blocked'
+    " lanes of each bench run</a></p>\n"
+)
 
 
 class SiteError(Exception):
@@ -195,7 +201,8 @@ def run_rows(runs: list[dict[str, Any]]) -> str:
 
 def render(site: pathlib.Path) -> None:
     site.mkdir(parents=True, exist_ok=True)
-    page = PAGE.replace("@@RUNS@@", run_rows(scan(site)))
+    bench = BENCH_LINK if (site / "bench" / "index.html").is_file() else ""
+    page = PAGE.replace("@@BENCH@@", bench).replace("@@RUNS@@", run_rows(scan(site)))
     write_text(site / "index.html", page)
 
 
@@ -306,7 +313,7 @@ table { border-collapse: collapse; }
 <p class="muted">Each night the rocm-nixl wheels are built from the branches
 below and tested in a clean container and in QEMU guests with an emulated GPU.
 This page shows how each branch has fared, night by night.</p>
-<p class="note">The transfer rates come from emulated devices on shared GitHub
+@@BENCH@@<p class="note">The transfer rates come from emulated devices on shared GitHub
 runners. Each one is the bytes a check moved divided by the time the whole
 check took, set-up included. They are here to show trends, not to measure
 performance.</p>

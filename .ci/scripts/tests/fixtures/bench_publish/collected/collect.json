@@ -1,0 +1,156 @@
+{
+  "matrix_sha256": "58abeffc0085909e468f9f13ec86fd8460d8d6229627dff1034031523e00f1ae",
+  "outputs": [
+    "bench-20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.logs.tar.gz",
+    "bench-20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.ndjson.gz",
+    "bench-20261120T204631Z-for-upstream-feat-rocm-wheels-44820022442.a1.ndjson.zst",
+    "matrix-58abeffc0085909e468f9f13ec86fd8460d8d6229627dff1034031523e00f1ae.json",
+    "summary.md"
+  ],
+  "rejected": [],
+  "required_failures": [],
+  "runs": [
+    {
+      "counts": {
+        "blocked": 7,
+        "crash": 0,
+        "fail": 0,
+        "not-run": 0,
+        "pass": 26,
+        "skip": 8,
+        "timeout": 0
+      },
+      "lane": "bench-container",
+      "rocm_version": "10.1.0",
+      "status": "complete"
+    },
+    {
+      "counts": {
+        "blocked": 7,
+        "crash": 0,
+        "fail": 0,
+        "not-run": 0,
+        "pass": 26,
+        "skip": 8,
+        "timeout": 0
+      },
+      "lane": "bench-container",
+      "rocm_version": "10.2.0",
+      "status": "complete"
+    },
+    {
+      "counts": {
+        "blocked": 7,
+        "crash": 0,
+        "fail": 0,
+        "not-run": 0,
+        "pass": 26,
+        "skip": 8,
+        "timeout": 0
+      },
+      "lane": "bench-container",
+      "rocm_version": "7.14.1",
+      "status": "complete"
+    },
+    {
+      "counts": {
+        "blocked": 11,
+        "crash": 0,
+        "fail": 4,
+        "not-run": 0,
+        "pass": 24,
+        "skip": 0,
+        "timeout": 0
+      },
+      "lane": "vm1-fabric",
+      "rocm_version": "10.1.0",
+      "status": "complete"
+    },
+    {
+      "counts": {
+        "blocked": 0,
+        "crash": 0,
+        "fail": 2,
+        "not-run": 0,
+        "pass": 38,
+        "skip": 0,
+        "timeout": 0
+      },
+      "lane": "vm1-local",
+      "rocm_version": "10.1.0",
+      "status": "complete"
+    },
+    {
+      "counts": {
+        "blocked": 0,
+        "crash": 0,
+        "fail": 4,
+        "not-run": 0,
+        "pass": 16,
+        "skip": 0,
+        "timeout": 1
+      },
+      "lane": "vm1-loop",
+      "rocm_version": "10.1.0",
+      "status": "complete"
+    },
+    {
+      "counts": {
+        "blocked": 36,
+        "crash": 0,
+        "fail": 0,
+        "not-run": 0,
+        "pass": 0,
+        "skip": 0,
+        "timeout": 0
+      },
+      "lane": "vm1-pcie",
+      "rocm_version": "none",
+      "status": "blocked"
+    },
+    {
+      "counts": {
+        "blocked": 8,
+        "crash": 0,
+        "fail": 0,
+        "not-run": 0,
+        "pass": 0,
+        "skip": 0,
+        "timeout": 0
+      },
+      "lane": "vm1-s3",
+      "rocm_version": "none",
+      "status": "blocked"
+    },
+    {
+      "counts": {
+        "blocked": 4,
+        "crash": 0,
+        "fail": 0,
+        "not-run": 0,
+        "pass": 0,
+        "skip": 0,
+        "timeout": 0
+      },
+      "lane": "vm2-lfverbs",
+      "rocm_version": "none",
+      "status": "blocked"
+    },
+    {
+      "counts": {
+        "blocked": 2,
+        "crash": 0,
+        "fail": 6,
+        "not-run": 0,
+        "pass": 25,
+        "skip": 0,
+        "timeout": 3
+      },
+      "lane": "vm2-net",
+      "rocm_version": "10.1.0",
+      "status": "complete"
+    }
+  ],
+  "schema": 1,
+  "warnings": []
+}
