@@ -180,15 +180,6 @@ jobs:
         fi
         ssh -F "$QEMU_TOOL_SSH_CONFIG" guest true
 
-    - name: Install UCX runtime in the guest
-      run: |
-        ssh -F "$QEMU_TOOL_SSH_CONFIG" guest bash -s <<'GUEST'
-        set -euo pipefail
-        sudo apt-get update -qq
-        sudo apt-get install -y --no-install-recommends libucx0
-        ucx_info -v
-        GUEST
-
     - name: Copy test binaries and runner to the guest
       run: |
         set -euo pipefail
@@ -206,8 +197,9 @@ jobs:
         set -euo pipefail
         cd "$HOME/nixl-unit"
         chmod +x bin/*
-        # Ensure the guest's UCX libs and the bundled nixl libs are found.
-        export LD_LIBRARY_PATH="$HOME/nixl-unit/lib:$HOME/nixl-unit/gtest:${LD_LIBRARY_PATH:-}"
+        # UCX is bundled with the tests; the guest has none installed.
+        export LD_LIBRARY_PATH="$HOME/nixl-unit/lib:$HOME/nixl-unit/lib/plugins:$HOME/nixl-unit/ucx/lib:$HOME/nixl-unit/gtest:${LD_LIBRARY_PATH:-}"
+        ucx/bin/ucx_info -v
         python3 rocm_wheel_unit_test.py \
           --tests-dir "$HOME/nixl-unit" \
           --json-out unit-results.json \
@@ -243,7 +235,7 @@ jobs:
           scp -F "$QEMU_TOOL_SSH_CONFIG" \
             guest:nixl-unit/unit-test.log \
             "$out/" || true
-          g 'ucx_info -v' > "$out/ucx-info.txt" 2>&1 || true
+          g 'LD_LIBRARY_PATH=$HOME/nixl-unit/ucx/lib $HOME/nixl-unit/ucx/bin/ucx_info -v' > "$out/ucx-info.txt" 2>&1 || true
         fi
         if [ -f "$STACK_DIR/docker-compose.yml" ]; then
           qemu-tool compose --stack-dir "$STACK_DIR" logs --no-color --tail 200 \
