@@ -159,7 +159,7 @@ jobs:
         xml-overlay: |
           ${{ github.workspace }}/.ci/rocjitsu/fleet-overlay-common.xml
           ${{ github.workspace }}/.ci/rocjitsu/fleet-overlay.xml
-        gpu: none
+        gpu: 'false'
         ssh-aliases: guest
         wait-for: ssh
         wait-timeout: 600
