@@ -1,0 +1,252 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: ROCm Wheels - rocjitsu Unit Tests
+
+# Runs the C++ unit tests built by contrib/Dockerfile.tests inside a QEMU
+# guest.  No GPU is required: ucx_backend_test, ucx_backend_multi,
+# ucx_worker_test and the UCX-filtered gtests all exercise UCX loopback.
+#
+# External dependencies are the same qemu-tool-action pin and qemu-minimal
+# ref used by rocm-wheels-rocjitsu.yml.
+
+on:
+  workflow_call:
+    inputs:
+      rocm-version:
+        description: ROCm version the tests were built for, as X.Y.Z.
+        required: true
+        type: string
+      artifact-name:
+        description: Name of the artifact holding the test binaries (nixl-unit-tests-X.Y).
+        required: true
+        type: string
+      artifact-suffix:
+        description: Appended to uploaded artifact names for multi-build runs.
+        required: false
+        type: string
+        default: ''
+      allow-failure:
+        description: When true, a test failure does not fail the calling workflow.
+        required: false
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      rocm-version:
+        description: ROCm version the tests were built for, as X.Y.Z.
+        required: true
+        type: string
+        default: '10.2.0'
+      artifact-name:
+        description: Name of the artifact holding the test binaries.
+        required: true
+        type: string
+        default: nixl-unit-tests-10.2
+      run-id:
+        description: Workflow run to download the artifact from.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  GUEST_ROCM: '10.2'
+  QEMU_MINIMAL_REF: 992b812f7391058ff411c2861547de2d57f3d6ba # v3.0.0
+  STACK_DIR: /var/lib/qemu-tool/stacks/nixl-unit
+  UV_VERSION: 0.13.9
+
+jobs:
+
+  gate:
+    name: Check for a matching guest
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      supported: ${{ steps.decide.outputs.supported }}
+      rocm-xy: ${{ steps.decide.outputs.rocm-xy }}
+    steps:
+    - name: Compare the requested ROCm version with the guest's
+      id: decide
+      shell: bash
+      env:
+        ROCM_VERSION: ${{ inputs.rocm-version }}
+      run: |
+        set -euo pipefail
+        if [[ ! "$ROCM_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "::error::rocm-version must be X.Y.Z, got '${ROCM_VERSION}'"
+          exit 1
+        fi
+        xy=${ROCM_VERSION%.*}
+        echo "rocm-xy=${xy}" >> "$GITHUB_OUTPUT"
+        if [ "$xy" = "$GUEST_ROCM" ]; then
+          echo "supported=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        echo "supported=false" >> "$GITHUB_OUTPUT"
+        msg="rocjitsu unit tests skipped for ROCm ${ROCM_VERSION}: the guest of the pinned qemu-tool carries ROCm ${GUEST_ROCM}."
+        echo "::notice title=rocjitsu unit tests skipped::${msg}"
+        echo "${msg}" >> "$GITHUB_STEP_SUMMARY"
+
+  unit-test:
+    name: Unit tests (ROCm ${{ inputs.rocm-version }})
+    needs: gate
+    if: needs.gate.outputs.supported == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # allow-failure wraps the step outcome so the calling workflow can mark
+    # this job continue-on-error without having to know the internal details.
+    continue-on-error: ${{ inputs.allow-failure }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      ROCM_XY: ${{ needs.gate.outputs.rocm-xy }}
+    steps:
+    - name: Check out code
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+        persist-credentials: false
+
+    - name: Require KVM
+      run: |
+        set -euo pipefail
+        if [ ! -c /dev/kvm ]; then
+          echo "::error::/dev/kvm is not usable on this runner"
+          exit 1
+        fi
+
+    - name: Download the test binaries from this run
+      if: ${{ !inputs.run-id }}
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: nixl-tests-artifact
+
+    - name: Download the test binaries from run ${{ inputs.run-id }}
+      if: ${{ inputs.run-id }}
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: nixl-tests-artifact
+        run-id: ${{ inputs.run-id }}
+        github-token: ${{ github.token }}
+
+    - name: Check the artifact has the expected test binaries
+      run: |
+        set -euo pipefail
+        ls -lR nixl-tests-artifact
+        for b in ucx_backend_test ucx_backend_multi ucx_worker_test gtest; do
+          if [ ! -f "nixl-tests-artifact/bin/$b" ]; then
+            echo "::error::nixl-tests-artifact/bin/$b is missing"
+            exit 1
+          fi
+        done
+        test -f .ci/scripts/rocm_wheel_unit_test.py
+
+    # No GPU is requested: unit tests run UCX in loopback; the guest image
+    # does not need to present a GPU. The spare NVMe is not needed either, so
+    # the fleet overlay keeps the same NIC backend as the other rocjitsu jobs.
+    - name: Boot one guest
+      id: fleet
+      timeout-minutes: 20
+      uses: sbates130272/qemu-tool-action@a7468c9e32d6f8f8a323d1e6861a136b8a6fa44c # v2.2.0
+      with:
+        qemu-tool-ref: ${{ env.QEMU_MINIMAL_REF }}
+        stack-dir: ${{ env.STACK_DIR }}
+        xml-overlay: |
+          ${{ github.workspace }}/.ci/rocjitsu/fleet-overlay-common.xml
+          ${{ github.workspace }}/.ci/rocjitsu/fleet-overlay.xml
+        gpu: 'false'
+        ssh-aliases: guest
+        wait-for: ssh
+        wait-timeout: 600
+
+    - name: Check the qemu-tool pin
+      env:
+        TOOL_SHA: ${{ steps.fleet.outputs.qemu-tool-sha }}
+        VM_COUNT: ${{ steps.fleet.outputs.vm-count }}
+      run: |
+        set -euo pipefail
+        if [ "$TOOL_SHA" != "$QEMU_MINIMAL_REF" ]; then
+          echo "::error::the action installed qemu-tool from '${TOOL_SHA}', not QEMU_MINIMAL_REF ${QEMU_MINIMAL_REF}"
+          exit 1
+        fi
+        if [ "$VM_COUNT" != 1 ]; then
+          echo "::error::expected 1 guest, got ${VM_COUNT}"
+          exit 1
+        fi
+        ssh -F "$QEMU_TOOL_SSH_CONFIG" guest true
+
+    - name: Copy test binaries and runner to the guest
+      run: |
+        set -euo pipefail
+        ssh -F "$QEMU_TOOL_SSH_CONFIG" guest 'rm -rf "$HOME/nixl-unit" && mkdir -p "$HOME/nixl-unit"'
+        # tar preserves execute bits; scp -r would too but tar is one round-trip.
+        tar -cC nixl-tests-artifact . \
+          | ssh -F "$QEMU_TOOL_SSH_CONFIG" guest 'tar -xC "$HOME/nixl-unit"'
+        scp -F "$QEMU_TOOL_SSH_CONFIG" \
+          .ci/scripts/rocm_wheel_unit_test.py \
+          guest:nixl-unit/
+
+    - name: Run the unit tests
+      run: |
+        ssh -F "$QEMU_TOOL_SSH_CONFIG" guest bash -s <<'GUEST'
+        set -euo pipefail
+        cd "$HOME/nixl-unit"
+        # Artifact upload drops the execute bits.
+        chmod +x bin/* ucx/bin/*
+        # UCX is bundled with the tests; the guest has none installed.
+        export LD_LIBRARY_PATH="$HOME/nixl-unit/lib:$HOME/nixl-unit/lib/plugins:$HOME/nixl-unit/ucx/lib:$HOME/nixl-unit/gtest:${LD_LIBRARY_PATH:-}"
+        ucx/bin/ucx_info -v
+        python3 rocm_wheel_unit_test.py \
+          --tests-dir "$HOME/nixl-unit" \
+          --json-out unit-results.json \
+          2>&1 | tee unit-test.log
+        GUEST
+
+    - name: Collect the test results
+      if: always()
+      run: |
+        mkdir -p "$GITHUB_WORKSPACE/unit-results"
+        if [ -n "${QEMU_TOOL_SSH_CONFIG:-}" ]; then
+          scp -F "$QEMU_TOOL_SSH_CONFIG" \
+            guest:nixl-unit/unit-results.json \
+            "$GITHUB_WORKSPACE/unit-results/" || true
+        fi
+
+    - name: Upload the test results
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: rocm-check-results-unit-${{ inputs.rocm-version }}${{ inputs.artifact-suffix }}
+        path: unit-results/*.json
+        if-no-files-found: ignore
+
+    - name: Collect diagnostics
+      if: always()
+      run: |
+        out="$GITHUB_WORKSPACE/unit-diagnostics"
+        mkdir -p "$out"
+        if [ -n "${QEMU_TOOL_SSH_CONFIG:-}" ]; then
+          g() { ssh -F "$QEMU_TOOL_SSH_CONFIG" guest "$@"; }
+          g 'sudo -n dmesg' > "$out/dmesg.txt" 2>&1 || true
+          scp -F "$QEMU_TOOL_SSH_CONFIG" \
+            guest:nixl-unit/unit-test.log \
+            "$out/" || true
+          g 'LD_LIBRARY_PATH=$HOME/nixl-unit/ucx/lib $HOME/nixl-unit/ucx/bin/ucx_info -v' > "$out/ucx-info.txt" 2>&1 || true
+        fi
+        if [ -f "$STACK_DIR/docker-compose.yml" ]; then
+          qemu-tool compose --stack-dir "$STACK_DIR" logs --no-color --tail 200 \
+            > "$out/compose-logs.txt" 2>&1 || true
+        fi
+
+    - name: Upload diagnostics
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: rocjitsu-unit-${{ inputs.rocm-version }}${{ inputs.artifact-suffix }}
+        path: unit-diagnostics/
+        if-no-files-found: warn
