@@ -19,8 +19,7 @@
 # 24.04 packages (it uses UCS_MEMORY_TYPE_ZE_DEVICE and UCS_BIT_GET).
 #
 # Build usage:
-#   docker build --build-arg ROCM_VERSION=10.2 -t nixl-tests \
-#       -f contrib/Dockerfile.tests .
+#   docker build -t nixl-tests -f contrib/Dockerfile.tests .
 #   docker run --rm nixl-tests tar -cC /nixl-tests . | tar -xC local-tests-dir/
 
 # ---------------------------------------------------------------------------

@@ -631,19 +631,16 @@ jobs:
     - name: Build test image
       run: |
         set -euo pipefail
-        ROCM_XY="${{ matrix.rocm-version }}"
-        ROCM_XY="${ROCM_XY%.*}"
         docker build \
-          --build-arg ROCM_XY="$ROCM_XY" \
           --target package \
-          -t nixl-tests:"$ROCM_XY" \
+          -t nixl-tests:local \
           -f contrib/Dockerfile.tests .
 
     - name: Extract test binaries
       run: |
         set -euo pipefail
         mkdir -p dist-tests
-        docker run --rm nixl-tests:"${{ matrix.rocm-version }}" \
+        docker run --rm nixl-tests:local \
             tar -cC /nixl-tests . \
           | tar -xC dist-tests
         ls -lR dist-tests
