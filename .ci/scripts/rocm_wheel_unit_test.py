@@ -17,7 +17,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import time
 from typing import Any, Callable, Optional
 
@@ -140,15 +139,21 @@ def run_binary(
 
 
 def check_ucx_backend_test(tests_dir: str, timeout: int) -> str:
-    return run_binary(os.path.join(tests_dir, "bin", "ucx_backend_test"), timeout=timeout)
+    return run_binary(
+        os.path.join(tests_dir, "bin", "ucx_backend_test"), timeout=timeout
+    )
 
 
 def check_ucx_backend_multi(tests_dir: str, timeout: int) -> str:
-    return run_binary(os.path.join(tests_dir, "bin", "ucx_backend_multi"), timeout=timeout)
+    return run_binary(
+        os.path.join(tests_dir, "bin", "ucx_backend_multi"), timeout=timeout
+    )
 
 
 def check_ucx_worker_test(tests_dir: str, timeout: int) -> str:
-    return run_binary(os.path.join(tests_dir, "bin", "ucx_worker_test"), timeout=timeout)
+    return run_binary(
+        os.path.join(tests_dir, "bin", "ucx_worker_test"), timeout=timeout
+    )
 
 
 def check_gtest_ucx(tests_dir: str, timeout: int) -> str:
@@ -163,12 +168,22 @@ def check_gtest_ucx(tests_dir: str, timeout: int) -> str:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--tests-dir", required=True,
-                   help="Directory produced by contrib/Dockerfile.tests (contains bin/ and lib/).")
-    p.add_argument("--json-out", metavar="FILE",
-                   help="Write JSON results here (updated after each check).")
-    p.add_argument("--timeout", type=int, default=120,
-                   help="Per-binary timeout in seconds (default: 120).")
+    p.add_argument(
+        "--tests-dir",
+        required=True,
+        help="Directory produced by contrib/Dockerfile.tests (contains bin/ and lib/).",
+    )
+    p.add_argument(
+        "--json-out",
+        metavar="FILE",
+        help="Write JSON results here (updated after each check).",
+    )
+    p.add_argument(
+        "--timeout",
+        type=int,
+        default=120,
+        help="Per-binary timeout in seconds (default: 120).",
+    )
     return p.parse_args()
 
 
