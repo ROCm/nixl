@@ -15,6 +15,9 @@ on:
       - .github/workflows/rocm-wheels.yml
       - .github/workflows/rocm-wheels-rocjitsu.yml
       - .github/workflows/rocm-wheels-rocjitsu-2vm.yml
+      - .ci/scripts/rocm_wheel_unit_test.py
+      - .github/workflows/rocm-wheels-rocjitsu-unit.yml
+      - contrib/Dockerfile.tests
   push:
     tags:
       - v*
@@ -606,6 +609,52 @@ jobs:
           fi
           exit 0
 
+  build-unit-tests:
+    name: Build unit tests (${{ matrix.rocm-version }})
+    needs: plan
+    if: needs.plan.outputs.supported == 'true' && needs.plan.outputs.run-vm-tests == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        rocm-version: ${{ fromJSON(needs.plan.outputs.rocm-versions) }}
+    permissions:
+      contents: read
+    steps:
+    - name: Check out code
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+        ref: ${{ needs.plan.outputs.sha }}
+        persist-credentials: false
+
+    - name: Build test image
+      run: |
+        set -euo pipefail
+        ROCM_XY="${{ matrix.rocm-version }}"
+        ROCM_XY="${ROCM_XY%.*}"
+        docker build \
+          --build-arg ROCM_XY="$ROCM_XY" \
+          --target package \
+          -t nixl-tests:"$ROCM_XY" \
+          -f contrib/Dockerfile.tests .
+
+    - name: Extract test binaries
+      run: |
+        set -euo pipefail
+        mkdir -p dist-tests
+        docker run --rm nixl-tests:"${{ matrix.rocm-version }}" \
+            tar -cC /nixl-tests . \
+          | tar -xC dist-tests
+        ls -lR dist-tests
+
+    - name: Upload test binaries
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: nixl-unit-tests-${{ matrix.rocm-version }}${{ inputs.artifact-suffix }}
+        path: dist-tests/
+        if-no-files-found: error
+
   merge:
     name: Merge
     needs: [plan, build]
@@ -887,6 +936,25 @@ jobs:
       artifact-suffix: ${{ inputs.artifact-suffix }}
 
   # Not required: no job that gates the wheels needs this one, and a failure
+  # allow-failure: unit tests are still experimental.
+  unit:
+    name: unit (${{ matrix.rocm-version }})
+    needs: [plan, build-unit-tests]
+    if: needs.plan.outputs.supported == 'true' && needs.plan.outputs.run-vm-tests == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        rocm-version: ${{ fromJSON(needs.plan.outputs.rocm-versions) }}
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/rocm-wheels-rocjitsu-unit.yml
+    with:
+      rocm-version: ${{ matrix.rocm-version }}
+      artifact-name: nixl-unit-tests-${{ matrix.rocm-version }}${{ inputs.artifact-suffix }}
+      allow-failure: true
+      artifact-suffix: ${{ inputs.artifact-suffix }}
+
   # here is a warning on the run, not a failed job. It merges the nixlbench
   # backend wheels the build job uploaded into one rocm-nixlbench wheel, after
   # checking each of them again against the NIXL backend wheels of this
@@ -1175,7 +1243,7 @@ jobs:
   # wheels, so that a caller always finds one results.json per ref.
   results:
     name: Results
-    needs: [plan, build, merge, test, rocjitsu, rocjitsu-2vm, nixlbench]
+    needs: [plan, build, build-unit-tests, merge, test, rocjitsu, rocjitsu-2vm, unit, nixlbench]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -1237,6 +1305,7 @@ jobs:
               "test": "Test (",
               "rocjitsu": "rocjitsu (",
               "rocjitsu-2vm": "rocjitsu two guests (",
+              "unit": "unit (",
           }
           OWN_NAME = "Results"
 
@@ -1319,7 +1388,7 @@ jobs:
               )
 
           tests = []
-          for job in ("test", "rocjitsu", "rocjitsu-2vm"):
+          for job in ("test", "rocjitsu", "rocjitsu-2vm", "unit"):
               for version in rocm_versions:
                   directory = pathlib.Path("check-results") / f"rocm-check-results-{job}-{version}{suffix}"
                   for path in sorted(directory.glob("*.json")):

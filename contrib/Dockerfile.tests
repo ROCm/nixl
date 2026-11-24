@@ -1,0 +1,107 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Builds the nixl C++ unit-test suite on Ubuntu 24.04 so the binaries are
+# ABI-compatible with the rocjitsu QEMU guests (which also run Ubuntu 24.04).
+#
+# Only CPU-safe tests are included; GPU, DOCA, Mooncake and Redis paths are
+# excluded by not setting rocm_path/cuda paths and by restricting plugins.
+#
+# The build produces /nixl-tests/ with:
+#   bin/   — test executables (ucx_backend_test, ucx_backend_multi,
+#             ucx_worker_test, gtest)
+#   lib/   — nixl + nixl-plugin-ucx + nixl-plugin-posix shared libs
+#   gtest/ — libgtest.so and libgmock.so built from source
+#
+# The workflow extracts /nixl-tests/, scps it to the guest and runs the tests
+# there. UCX runtime libs are installed in the guest separately via apt.
+#
+# Build usage:
+#   docker build --build-arg ROCM_VERSION=10.2 -t nixl-tests \
+#       -f contrib/Dockerfile.tests .
+#   docker run --rm nixl-tests tar -cC /nixl-tests . | tar -xC local-tests-dir/
+
+# ---------------------------------------------------------------------------
+# stage: gtest-build — build googletest as .so from source
+# ---------------------------------------------------------------------------
+FROM ubuntu:24.04 AS gtest-build
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake libgtest-dev \
+    && cmake -S /usr/src/googletest -B /tmp/gtest-build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_SHARED_LIBS=ON \
+        -DCMAKE_INSTALL_PREFIX=/gtest-install \
+    && cmake --build /tmp/gtest-build --parallel "$(nproc)" \
+    && cmake --install /tmp/gtest-build \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# stage: deps — UCX development packages + meson
+# ---------------------------------------------------------------------------
+FROM ubuntu:24.04 AS deps
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential pkg-config ninja-build \
+        python3 python3-pip python3-venv \
+        libucx-dev ucx \
+        libaio-dev \
+        patchelf \
+    && pip3 install --break-system-packages meson meson-python pybind11 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=gtest-build /gtest-install /usr/local
+
+# ---------------------------------------------------------------------------
+# stage: build — nixl source → test binaries
+# ---------------------------------------------------------------------------
+FROM deps AS build
+
+WORKDIR /src
+COPY . .
+
+# --buildtype=debug is required: ucx_worker_test is conditionally built only
+# for non-release builds (see test/unit/plugins/ucx/meson.build).
+# PKG_CONFIG_PATH lets meson find the shared-lib gtest we just installed.
+RUN PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-} \
+    meson setup build \
+        --buildtype=debug \
+        --prefix=/nixl-tests \
+        -Dbuild_tests=true \
+        -Dbuild_examples=false \
+        -Denable_plugins=UCX,POSIX \
+        -Dbuild_docs=false \
+        -Drust=false \
+        -Dwith_trace=false \
+    && meson compile -C build test/unit/plugins/ucx/ucx_backend_test \
+                                test/unit/plugins/ucx/ucx_backend_multi \
+                                test/unit/plugins/ucx/ucx_worker_test \
+                                test/gtest/gtest
+
+# Collect everything under /nixl-tests/
+RUN mkdir -p /nixl-tests/bin /nixl-tests/lib /nixl-tests/gtest \
+    && cp build/test/unit/plugins/ucx/ucx_backend_test \
+          build/test/unit/plugins/ucx/ucx_backend_multi \
+          build/test/unit/plugins/ucx/ucx_worker_test \
+          build/test/gtest/gtest \
+          /nixl-tests/bin/ \
+    && find build -name 'libnixl*.so*' -exec cp -a {} /nixl-tests/lib/ \; \
+    && cp -a /usr/local/lib/libgtest*.so* /usr/local/lib/libgmock*.so* \
+             /nixl-tests/gtest/ \
+    && patchelf --set-rpath '$ORIGIN/../lib:$ORIGIN/../gtest' /nixl-tests/bin/gtest \
+    && for b in ucx_backend_test ucx_backend_multi ucx_worker_test; do \
+         patchelf --set-rpath '$ORIGIN/../lib' "/nixl-tests/bin/$b"; \
+       done
+
+# ---------------------------------------------------------------------------
+# stage: package — final image that only holds /nixl-tests/
+# ---------------------------------------------------------------------------
+FROM ubuntu:24.04 AS package
+
+COPY --from=build /nixl-tests /nixl-tests
+
+RUN apt-get update && apt-get install -y --no-install-recommends binutils \
+    && find /nixl-tests/bin -type f -executable -exec strip --strip-debug {} + \
+    && rm -rf /var/lib/apt/lists/*
