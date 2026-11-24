@@ -196,7 +196,8 @@ jobs:
         ssh -F "$QEMU_TOOL_SSH_CONFIG" guest bash -s <<'GUEST'
         set -euo pipefail
         cd "$HOME/nixl-unit"
-        chmod +x bin/*
+        # Artifact upload drops the execute bits.
+        chmod +x bin/* ucx/bin/*
         # UCX is bundled with the tests; the guest has none installed.
         export LD_LIBRARY_PATH="$HOME/nixl-unit/lib:$HOME/nixl-unit/lib/plugins:$HOME/nixl-unit/ucx/lib:$HOME/nixl-unit/gtest:${LD_LIBRARY_PATH:-}"
         ucx/bin/ucx_info -v
