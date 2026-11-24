@@ -185,7 +185,7 @@ jobs:
         ssh -F "$QEMU_TOOL_SSH_CONFIG" guest bash -s <<'GUEST'
         set -euo pipefail
         sudo apt-get update -qq
-        sudo apt-get install -y --no-install-recommends ucx
+        sudo apt-get install -y --no-install-recommends libucx0
         ucx_info -v
         GUEST
 
