@@ -632,6 +632,7 @@ jobs:
       run: |
         set -euo pipefail
         docker build \
+          --build-arg ROCM_VERSION="${{ matrix.rocm-version }}" \
           --target package \
           -t nixl-tests:local \
           -f contrib/Dockerfile.tests .
