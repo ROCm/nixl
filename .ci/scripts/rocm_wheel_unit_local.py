@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Run the rocjitsu unit-test lane on this machine, from the workflow files.
+"""Run a rocjitsu lane on this machine, from the workflow files.
 
 The steps of three jobs are read from the workflows and run as written, in a
 copy of the working tree (uncommitted changes included):
@@ -9,17 +9,21 @@ copy of the working tree (uncommitted changes included):
   rocm-wheels.yml                build-unit-tests
   rocm-wheels-rocjitsu-unit.yml  gate, unit-test
 
-Only the steps that need GitHub are replaced. Checkout is skipped. Artifact
-upload and download become a copy under the work directory that drops file
-modes and symlinks, as the real ones do. qemu-tool-action is fetched at the
-pinned commit and run directly, with two of its inputs changed: work-dir
-points under the work directory and setup-host is false, so nothing is
-installed on this machine with sudo.
+or, with --lane smoke, the wheel smoke lane on wheels given by --wheels-dir:
+
+  rocm-wheels-rocjitsu.yml       gate, smoke-test
+
+Only the steps that need GitHub are replaced. Checkout is skipped, or for a
+checkout of another commit into a subdirectory, taken from this repository.
+Artifact upload and download become a copy under the work directory that
+drops file modes and symlinks, as the real ones do. qemu-tool-action is
+fetched at the pinned commit and run directly, with two of its inputs
+changed: work-dir points under the work directory and setup-host is false, so
+nothing is installed on this machine with sudo.
 
 Needs docker, /dev/kvm, git, python3 with PyYAML, and what qemu-tool needs
 on PATH (qemu-img, zstd, oras, ssh). Behind a TLS-intercepting proxy, pass
---ca-bundle for the image build and export VM_CA_CERT_FILE, which qemu-tool
-reads, for the guest.
+--ca-bundle for the image build and --guest-ca for what the guests download.
 """
 
 import argparse
@@ -35,6 +39,7 @@ import yaml
 REPO = Path(__file__).resolve().parents[2]
 WHEELS = ".github/workflows/rocm-wheels.yml"
 UNIT = ".github/workflows/rocm-wheels-rocjitsu-unit.yml"
+SMOKE = ".github/workflows/rocm-wheels-rocjitsu.yml"
 ACTION = "sbates130272/qemu-tool-action"
 CA_NAME = "local-ca-bundle.crt"
 EXPR = re.compile(r"\$\{\{(.*?)\}\}", re.S)
@@ -111,10 +116,11 @@ def wanted(condition, ctx: dict, failed: bool) -> bool:
     return result if STATUS.search(expr) else result and not failed
 
 
-def read_commands(path: Path) -> dict:
+def read_commands(path: Path, clear: bool = True) -> dict:
     """The key=value and key<<delimiter records of a GITHUB_OUTPUT-style file."""
     found, lines = {}, path.read_text().splitlines() if path.exists() else []
-    path.write_text("")
+    if clear:
+        path.write_text("")
     while lines:
         line = lines.pop(0)
         if "<<" in line.split("=", 1)[0]:
@@ -156,6 +162,8 @@ class Runner:
     # ── Setting up ───────────────────────────────────────────────────────
 
     def prepare(self) -> None:
+        if self.args.lane == "smoke" and not self.args.wheels_dir:
+            raise Stop("--lane smoke needs --wheels-dir")
         tests_dir = self.args.tests_dir
         if tests_dir and self.work in Path(tests_dir).expanduser().resolve().parents:
             raise Stop(
@@ -290,7 +298,33 @@ class Runner:
         self.post.append(
             (script, dict(inputs, **{f"STATE_{k}": v for k, v in state.items()}))
         )
+        if ok and self.args.guest_ca:
+            ok = self.trust_ca_in_guests(Path(self.args.guest_ca).expanduser())
         return ok
+
+    def trust_ca_in_guests(self, cert: Path) -> bool:
+        """Make every guest trust a proxy's CA, for pip and uv as well as curl."""
+        # Not finish_step(): the step's outputs are still to be collected.
+        exported = read_commands(self.files / "env", clear=False)
+        config = exported.get("QEMU_TOOL_SSH_CONFIG", "")
+        hosts = re.findall(r"(?m)^Host (\S+)", Path(config).read_text())
+        bundle = "/etc/ssl/certs/ca-certificates.crt"
+        names = "PIP_CERT SSL_CERT_FILE REQUESTS_CA_BUNDLE"
+        remote = (
+            "sudo -n tee /usr/local/share/ca-certificates/local-proxy.crt >/dev/null"
+            " && sudo -n update-ca-certificates >/dev/null"
+            f' && for n in {names}; do echo "$n={bundle}"; done'
+            " | sudo -n tee -a /etc/environment >/dev/null"
+            " && echo UV_NATIVE_TLS=1 | sudo -n tee -a /etc/environment >/dev/null"
+        )
+        for host in hosts:
+            with cert.open("rb") as handle:
+                done = subprocess.run(["ssh", "-F", config, host, remote], stdin=handle)
+            if done.returncode != 0:
+                print(f"::error::could not add the CA certificate to {host}")
+                return False
+            print(f"{host} trusts {cert}")
+        return True
 
     def run_step(self, step: dict, ctx: dict) -> bool:
         uses = step.get("uses", "")
@@ -315,8 +349,18 @@ class Runner:
             flat_copy(source, self.workspace / given["path"])
             return True
         if uses.startswith("actions/checkout@"):
-            print("skipped: the workspace is a copy of the working tree")
-            return True
+            if not given.get("path"):
+                print("skipped: the workspace is a copy of the working tree")
+                return True
+            # Another commit beside the workspace: from this repository's
+            # objects, so the commit has to have been fetched.
+            target = self.workspace / given["path"]
+            target.mkdir(parents=True)
+            archive = subprocess.Popen(
+                ["git", "archive", given["ref"]], cwd=REPO, stdout=subprocess.PIPE
+            )
+            unpacked = subprocess.run(["tar", "-xC", str(target)], stdin=archive.stdout)
+            return archive.wait() == 0 and unpacked.returncode == 0
         raise Stop(f"this runner does not know the action {uses}")
 
     # ── Jobs ─────────────────────────────────────────────────────────────
@@ -360,11 +404,57 @@ class Runner:
         outputs = {k: fill(v, ctx) for k, v in job.get("outputs", {}).items()}
         return not failed, outputs
 
+    def smoke(self, wheels: dict, github: dict) -> bool:
+        """The wheel smoke lane, on wheels that were built elsewhere."""
+        source = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{self.args.source_ref}^{{commit}}"],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+        )
+        if source.returncode != 0:
+            raise Stop(f"--source-ref {self.args.source_ref} is not a commit here")
+        ctx = {
+            "github": github,
+            "matrix": {"rocm-version": self.args.rocm_version},
+            "inputs": {"artifact-suffix": ""},
+            "needs": {
+                "plan": {
+                    "outputs": {
+                        "wheels-artifact": "rocm-nixl-wheels",
+                        "test-python": self.args.python_version,
+                        "sha": source.stdout.strip(),
+                    }
+                }
+            },
+        }
+        called = {
+            k: fill(v, ctx) for k, v in wheels["jobs"]["rocjitsu"]["with"].items()
+        }
+        flat_copy(
+            Path(self.args.wheels_dir).expanduser(),
+            self.artifacts / called["artifact-name"],
+        )
+        workflow = self.load(SMOKE)
+        ctx = {"github": github, "inputs": dict(called, **{"run-id": ""})}
+        ok, outputs = self.run_job(workflow, "gate", ctx)
+        if not ok:
+            return False
+        ctx["needs"] = {"gate": {"outputs": outputs}}
+        return self.run_job(workflow, "smoke-test", ctx)[0]
+
     def main(self) -> int:
         self.prepare()
         version = self.args.rocm_version
         wheels, unit = self.load(WHEELS), self.load(UNIT)
         github = {"workspace": str(self.workspace), "token": "", "sha": "local"}
+        if self.args.lane == "smoke":
+            ok = self.smoke(wheels, github)
+            for name in ("rocjitsu-results", "rocjitsu-diagnostics"):
+                if (self.workspace / name).is_dir():
+                    print(f"{name}: {self.workspace / name}")
+            say("PASSED" if ok else "FAILED")
+            return 0 if ok else 1
         ctx = {
             "github": github,
             "matrix": {"rocm-version": version},
@@ -399,6 +489,36 @@ class Runner:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    p.add_argument(
+        "--lane",
+        choices=["unit", "smoke"],
+        default="unit",
+        help="unit: build the C++ unit tests and run them (default). smoke: "
+        "the wheel smoke lane, which needs --wheels-dir.",
+    )
+    p.add_argument(
+        "--wheels-dir",
+        metavar="DIR",
+        help="smoke: directory holding the merged rocm_nixl wheel, such as a "
+        "downloaded rocm-nixl-wheels artifact.",
+    )
+    p.add_argument(
+        "--source-ref",
+        default="rocm/for-upstream/feat/rocm-wheels",
+        help="smoke: commit the wheels were built from, already fetched "
+        "(default: %(default)s).",
+    )
+    p.add_argument(
+        "--python-version",
+        default="3.12",
+        help="smoke: Python version of the wheel to install (default: 3.12).",
+    )
+    p.add_argument(
+        "--guest-ca",
+        metavar="FILE",
+        help="CA certificate every guest must trust, for a TLS-intercepting "
+        "proxy between the guests and PyPI.",
     )
     p.add_argument(
         "--rocm-version",
