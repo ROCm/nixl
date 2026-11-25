@@ -44,6 +44,11 @@ on:
         required: false
         type: string
         default: ''
+      source-ref:
+        description: Commit the wheels were built from. Its Python tests and examples are run; empty skips them.
+        required: false
+        type: string
+        default: ''
   workflow_dispatch:
     inputs:
       rocm-version:
@@ -65,6 +70,11 @@ on:
         description: Workflow run to download the artifact from.
         required: true
         type: string
+      source-ref:
+        description: Commit the wheels were built from. Its Python tests and examples are run; empty skips them.
+        required: false
+        type: string
+        default: ''
 
 # actions: read is for the workflow_dispatch path only, which downloads the
 # artifact from another run.
@@ -84,6 +94,10 @@ env:
   # Under the directory the action creates for the runner's user.
   STACK_DIR: /var/lib/qemu-tool/stacks/nixl-rocjitsu
   NVME_MOUNT: /mnt/nixl-nvme
+  # The architecture of the guest's emulated GPU. AMD's PyTorch needs its
+  # device package for it: without one, torch reports the GPU and then fails
+  # its first operation with hipErrorInvalidKernelFile.
+  GUEST_GPU_ARCH: gfx1250
   UV_VERSION: 0.13.9
 
 jobs:
@@ -128,7 +142,7 @@ jobs:
     needs: gate
     if: needs.gate.outputs.supported == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     defaults:
       run:
         # Named, so that every step runs under errexit and pipefail; the
@@ -349,12 +363,81 @@ jobs:
           --ais-dir "$2" --allow-ais-compat --json-out smoke.json 2>&1 | tee smoke-test.log
         GUEST
 
+    # The tests have to match the wheel, so they come from the commit it was
+    # built from and not from this workflow's.
+    - name: Check out the wheels' source
+      if: ${{ inputs.source-ref != '' }}
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+        ref: ${{ inputs.source-ref }}
+        path: nixl-source
+        persist-credentials: false
+
+    # A second environment, as a user makes it: the wheel with its
+    # rocm<X>.<Y> extra, which brings AMD's PyTorch from AMD's index, and that
+    # PyTorch's device package for the guest's GPU. The first environment
+    # stays without torch and only gains pytest.
+    - name: Install the Python tests in the guest
+      if: ${{ inputs.source-ref != '' }}
+      run: |
+        set -euo pipefail
+        ssh -F "$QEMU_TOOL_SSH_CONFIG" guest 'mkdir -p "$HOME/nixl-smoke/source"'
+        tar -cC nixl-source --exclude=.git . \
+          | ssh -F "$QEMU_TOOL_SSH_CONFIG" guest 'tar -xC "$HOME/nixl-smoke/source"'
+        scp -F "$QEMU_TOOL_SSH_CONFIG" \
+          .ci/scripts/rocm_wheel_python_test.py .ci/scripts/rocm_wheel_unit_test.py \
+          guest:nixl-smoke/
+
+        ssh -F "$QEMU_TOOL_SSH_CONFIG" guest bash -s -- "$PYTHON_VERSION" "$ROCM_XY" "$GUEST_GPU_ARCH" <<'GUEST'
+        set -euo pipefail
+        shopt -s nullglob
+        py=$1
+        rocm_xy=$2
+        arch=$3
+        work="$HOME/nixl-smoke"
+        uv="$work/uv-bootstrap/bin/uv"
+
+        "$uv" pip install --python "$work/venv/bin/python" pytest pytest-timeout
+
+        # The PyTorch the extra pins and the index it is on, from the table
+        # the wheel's extras were generated from.
+        read -r torch index < <(cd "$work/source/contrib" && "$work/venv/bin/python" -c '
+        import sys
+        from wheel_merge_rocm import ROCM_PYTORCH
+        entry = ROCM_PYTORCH[sys.argv[1]]
+        print(entry.torch, entry.index_url)' "$rocm_xy")
+        echo "rocm${rocm_xy} extra: torch==${torch} from ${index}"
+
+        wheel=("$work"/wheels/rocm_nixl-*.whl)
+        "$uv" venv --python "$py" "$work/venv-torch"
+        "$uv" pip install --python "$work/venv-torch/bin/python" \
+          --extra-index-url "$index" --index-strategy unsafe-best-match \
+          "${wheel[0]}[rocm${rocm_xy}]" "torch[device-${arch}]==${torch}" \
+          pytest pytest-timeout
+        "$uv" pip list --python "$work/venv-torch/bin/python" | tee "$work/pip-list-torch.txt"
+        GUEST
+
+    - name: Run the Python tests
+      if: ${{ inputs.source-ref != '' }}
+      run: |
+        ssh -F "$QEMU_TOOL_SSH_CONFIG" guest bash -s <<'GUEST'
+        set -euo pipefail
+        cd "$HOME/nixl-smoke"
+        venv-torch/bin/python rocm_wheel_python_test.py \
+          --source-dir source \
+          --python venv/bin/python \
+          --torch-python venv-torch/bin/python \
+          --json-out python.json 2>&1 | tee python-test.log
+        GUEST
+
     - name: Collect the test results
       if: always()
       run: |
         mkdir -p "$GITHUB_WORKSPACE/rocjitsu-results"
         if [ -n "${QEMU_TOOL_SSH_CONFIG:-}" ]; then
-          scp -F "$QEMU_TOOL_SSH_CONFIG" guest:nixl-smoke/smoke.json "$GITHUB_WORKSPACE/rocjitsu-results/" || true
+          for f in smoke.json python.json; do
+            scp -F "$QEMU_TOOL_SSH_CONFIG" "guest:nixl-smoke/$f" "$GITHUB_WORKSPACE/rocjitsu-results/" || true
+          done
         fi
 
     - name: Upload the test results
@@ -393,7 +476,9 @@ jobs:
         echo "--- ROCm"
         cat /opt/rocm/core-*/.info/version /etc/rocjitsu-guest.json 2>&1
         GUEST
-          scp -F "$QEMU_TOOL_SSH_CONFIG" guest:nixl-smoke/smoke-test.log guest:nixl-smoke/pip-list.txt "$out/" || true
+          for f in smoke-test.log pip-list.txt python-test.log pip-list-torch.txt; do
+            scp -F "$QEMU_TOOL_SSH_CONFIG" "guest:nixl-smoke/$f" "$out/" || true
+          done
         fi
         if [ -f "$STACK_DIR/docker-compose.yml" ]; then
           qemu-tool compose --stack-dir "$STACK_DIR" logs --no-color --tail 500 \
