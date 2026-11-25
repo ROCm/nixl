@@ -8,6 +8,7 @@ on:
     paths:
       - .ci/rocjitsu/**
       - .ci/scripts/amd_wheels_branch.py
+      - .ci/scripts/rocm_wheel_python_test.py
       - .ci/scripts/rocm_wheel_smoke_test.py
       - .ci/scripts/rocm_wheel_two_node_test.py
       - .ci/scripts/stamp_wheel_version.py
@@ -912,6 +913,7 @@ jobs:
       artifact-name: ${{ needs.plan.outputs.wheels-artifact }}
       python-version: ${{ needs.plan.outputs.test-python }}
       artifact-suffix: ${{ inputs.artifact-suffix }}
+      source-ref: ${{ needs.plan.outputs.sha }}
 
   # allow-failure: a failure here is a warning on the run, not a failed job.
   rocjitsu-2vm:
