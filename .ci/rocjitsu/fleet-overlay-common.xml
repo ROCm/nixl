@@ -20,6 +20,14 @@ rocm-wheels-rocjitsu.yml and rocm-wheels-rocjitsu-2vm.yml.
   <ernic-ref>docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-ernic-sbates-fork:20261112.gdca6903-ernic.90434a2-vfu.3719c3a@sha256:7473e631b3237707cc0d0ce635b5dff5e601dc175591f2ceafa84a3c5a85df16</ernic-ref>
   <rocjitsu-ref>docker.io/sbates130272/batesste-ci-images-ubuntu-rocm-rocjitsu:20261112.gdca6903-rocjitsu.50be05a@sha256:1e005700d1a3d030581969489fe42adbffedb461b7f2a4e44cc2b973c3bad3d6</rocjitsu-ref>
   <backing-ref>docker.io/sbates130272/qemu-tool-rocm-golden:20261119.g2aea67d@sha256:14b3785bee88a224f3930be1b091c1a8e594c53c90954ad83fbeaf119a103396</backing-ref>
+  <!-- Above the emulated GPU's own address range: its VRAM is 432 GB, and
+       with the default 40 bits the guest's upper RAM and the GPU's 256 GB BAR
+       sit at guest-physical addresses inside that range. The C++ unit tests
+       then fail on the GPU: UCX cannot register host memory and transfers
+       time out. With 42 bits and this window, RAM above 4 GB moves to 1 TiB
+       and the BAR above it, and they pass. Raise the two together. -->
+  <vm-cpu-phys-bits>42</vm-cpu-phys-bits>
+  <vm-pci-hole64-size>1024G</vm-pci-hole64-size>
   <!-- No job uses an SDXI device, so its server image is not pulled. -->
   <sdxi-per-vm>0</sdxi-per-vm>
   <!-- The base file points every NVMe at the GPU's memory. Off, so the jobs

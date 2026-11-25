@@ -156,6 +156,11 @@ class Runner:
     # ── Setting up ───────────────────────────────────────────────────────
 
     def prepare(self) -> None:
+        tests_dir = self.args.tests_dir
+        if tests_dir and self.work in Path(tests_dir).expanduser().resolve().parents:
+            raise Stop(
+                f"--tests-dir {tests_dir} is under the work directory, which is cleared"
+            )
         for path in (self.workspace, self.artifacts, self.files):
             if path.exists():
                 shutil.rmtree(path)

@@ -4,8 +4,11 @@
 # Builds the nixl C++ unit-test suite on Ubuntu 24.04 so the binaries are
 # ABI-compatible with the rocjitsu QEMU guests (which also run Ubuntu 24.04).
 #
-# Only CPU-safe tests are included; GPU, DOCA, Mooncake and Redis paths are
-# excluded by not setting rocm_path/cuda paths and by restricting plugins.
+# DOCA, Mooncake and Redis paths are excluded by restricting plugins. Without
+# ROCM_VERSION the build is CPU-only. With it, ROCm X.Y.Z is installed, UCX
+# and nixl are built against it, and the tests that take a memory type also
+# run on GPU memory; the guest then has to carry the same ROCm release, which
+# is not bundled.
 #
 # The build produces /nixl-tests/, the meson install tree that upstream's
 # .gitlab/test_cpp.sh runs from, plus what the tests need beside it:
@@ -24,7 +27,8 @@
 # 24.04 packages (it uses UCS_MEMORY_TYPE_ZE_DEVICE and UCS_BIT_GET).
 #
 # Build usage:
-#   docker build -t nixl-tests -f contrib/Dockerfile.tests .
+#   docker build [--build-arg ROCM_VERSION=10.2.0] -t nixl-tests \
+#       -f contrib/Dockerfile.tests .
 #   docker run --rm nixl-tests tar -cC /nixl-tests . | tar -xC local-tests-dir/
 
 # ---------------------------------------------------------------------------
@@ -61,6 +65,45 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && pip3 install --break-system-packages meson meson-python pybind11 \
     && rm -rf /var/lib/apt/lists/*
 
+COPY --from=gtest-build /gtest-install /usr/local
+
+# ROCm, when asked for: the same packages and the same /opt/rocm layout as the
+# wheel build in contrib/Dockerfile.manylinux, from the apt repository.
+# amdrocm-runtime-dev (HIP and HSA headers) is unpacked without its dependency
+# amdrocm-llvm-dev, which is 2 GB and unused.
+ARG ROCM_VERSION=""
+RUN if [ -z "$ROCM_VERSION" ]; then exit 0; fi \
+    && mm="$(echo "$ROCM_VERSION" | cut -d. -f1,2)" \
+    && case "$mm" in \
+         7.14) repo=https://repo.amd.com/rocm/packages-multi-arch/ubuntu2404 \
+               key=https://repo.amd.com/rocm/packages-multi-arch/gpg/rocm.gpg ;; \
+         1[0-9].*) repo=https://stable.repo.amd.com/rocm/core/packages/ubuntu2404 \
+               key=https://stable.repo.amd.com/rocm/gpg/packages.gpg ;; \
+         *) echo "ROCm $ROCM_VERSION is not supported: needs 7.14, or 10.0 and newer" >&2; exit 1 ;; \
+       esac \
+    && apt-get update && apt-get install -y --no-install-recommends curl gpg \
+    && curl -fsSL "$key" | gpg --dearmor -o /usr/share/keyrings/amdrocm.gpg \
+    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/amdrocm.gpg] $repo stable main" \
+        > /etc/apt/sources.list.d/amdrocm.list \
+    && apt-get update \
+    && pkgs="" \
+    && for p in base sysdeps llvm runtime hipify; do \
+         pkgs="$pkgs amdrocm-$p$mm=$ROCM_VERSION-*"; \
+       done \
+    && apt-get install -y --no-install-recommends $pkgs \
+    && cd /tmp && apt-get download "amdrocm-runtime-dev$mm=$ROCM_VERSION-*" \
+    && dpkg -i --force-depends /tmp/amdrocm-runtime-dev*.deb \
+    && rm -rf /tmp/amdrocm-runtime-dev*.deb /var/lib/apt/lists/* \
+    && core="/opt/rocm/core-$mm" \
+    && for e in bin include lib .info; do \
+         [ -e "/opt/rocm/$e" ] || ln -s "$core/$e" "/opt/rocm/$e"; \
+       done \
+    && for f in lib/libamdhip64.so include/hip/hip_runtime.h bin/hipify-perl \
+                lib/libhsa-runtime64.so include/hsa/hsa.h; do \
+         test -e "/opt/rocm/$f" || { echo "ROCm $ROCM_VERSION install is missing /opt/rocm/$f" >&2; exit 1; }; \
+       done
+ENV PATH=/opt/rocm/bin:${PATH}
+
 RUN git clone --depth 1 --branch "$UCX_REF" "$UCX_REPO" /tmp/ucx \
     && cd /tmp/ucx \
     && ./autogen.sh \
@@ -74,19 +117,18 @@ RUN git clone --depth 1 --branch "$UCX_REF" "$UCX_REPO" /tmp/ucx \
         --enable-cma \
         --enable-devel-headers \
         --without-cuda \
-        --without-rocm \
+        $([ -n "$ROCM_VERSION" ] && echo --with-rocm=/opt/rocm || echo --without-rocm) \
         --without-verbs \
     && make -j"$(nproc)" \
     && make -j"$(nproc)" install-strip \
     && rm -rf /tmp/ucx
-
-COPY --from=gtest-build /gtest-install /usr/local
 
 # ---------------------------------------------------------------------------
 # stage: build — nixl source → test binaries
 # ---------------------------------------------------------------------------
 FROM deps AS build
 
+ARG ROCM_VERSION=""
 WORKDIR /src
 COPY . .
 
@@ -105,12 +147,13 @@ RUN PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-} \
         -Dbuild_docs=false \
         -Drust=false \
         -Dwith_trace=false \
+        ${ROCM_VERSION:+-Drocm_path=/opt/rocm} \
     && meson compile -C build \
     && meson install -C build
 
 # Add what the install tree does not carry, and drop what no test uses.
-# deps/ gets every shared library the tests load that is not glibc or
-# libstdc++, so the guest needs nothing installed.
+# deps/ gets every shared library the tests load that is not glibc,
+# libstdc++ or ROCm, so the guest needs nothing installed but ROCm.
 RUN mkdir -p /nixl-tests/deps /nixl-tests/ucx/bin \
     && cp -a /opt/ucx/lib /nixl-tests/ucx/lib \
     && cp /opt/ucx/bin/ucx_info /nixl-tests/ucx/bin/ \
@@ -121,13 +164,14 @@ RUN mkdir -p /nixl-tests/deps /nixl-tests/ucx/bin \
 # ldd exits non-zero for the files that are not ELF; what matters is that
 # every library it was asked about resolved.
 RUN find /nixl-tests/bin /nixl-tests/lib -type f \
-        | LD_LIBRARY_PATH=/nixl-tests/lib:/nixl-tests/lib/plugins:/opt/ucx/lib:/usr/local/lib \
+        | LD_LIBRARY_PATH=/nixl-tests/lib:/nixl-tests/lib/plugins:/opt/ucx/lib:/usr/local/lib:/opt/rocm/lib \
           xargs ldd > /tmp/ldd.txt 2>/dev/null || true; \
     if grep 'not found' /tmp/ldd.txt; then exit 1; fi; \
     awk '$2 == "=>" && $3 ~ /^\// { print $3 }' /tmp/ldd.txt | sort -u \
-        | grep -Ev '^/(nixl-tests|opt/ucx)/|/(libc|libm|libdl|librt|libpthread|libgcc_s|libstdc\+\+)\.so' \
+        | grep -Ev '^/(nixl-tests|opt/ucx|opt/rocm)/|/(libc|libm|libdl|librt|libpthread|libgcc_s|libstdc\+\+)\.so' \
         | xargs cp -L -t /nixl-tests/deps \
-    && echo /src/build > /nixl-tests/build-dir
+    && echo /src/build > /nixl-tests/build-dir \
+    && echo "$ROCM_VERSION" > /nixl-tests/rocm-version
 
 # ---------------------------------------------------------------------------
 # stage: package — final image that only holds /nixl-tests/

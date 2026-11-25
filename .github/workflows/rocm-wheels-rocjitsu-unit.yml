@@ -4,9 +4,11 @@
 name: ROCm Wheels - rocjitsu Unit Tests
 
 # Runs the C++ unit tests built by contrib/Dockerfile.tests inside a QEMU
-# guest: the CPU-only subset of upstream's .gitlab/test_cpp.sh, listed in
-# .ci/scripts/rocm_wheel_unit_test.py.  No GPU is required; the UCX tests
-# run in loopback and the POSIX tests on the guest's own disk.
+# guest: the subset of upstream's .gitlab/test_cpp.sh listed in
+# .ci/scripts/rocm_wheel_unit_test.py.  The tests are built against the
+# guest's ROCm release, so those that take a memory type also run on the
+# emulated GPU's memory.  The UCX tests run in loopback and the POSIX tests
+# on the guest's own disk.
 #
 # External dependencies are the same qemu-tool-action pin and qemu-minimal
 # ref used by rocm-wheels-rocjitsu.yml.
@@ -149,9 +151,7 @@ jobs:
         done
         test -f .ci/scripts/rocm_wheel_unit_test.py
 
-    # No GPU is requested: unit tests run UCX in loopback; the guest image
-    # does not need to present a GPU. The spare NVMe is not needed either, so
-    # the fleet overlay keeps the same NIC backend as the other rocjitsu jobs.
+    # The fleet of the other rocjitsu jobs. The spare NVMe is not used.
     - name: Boot one guest
       id: fleet
       timeout-minutes: 20
@@ -162,7 +162,7 @@ jobs:
         xml-overlay: |
           ${{ github.workspace }}/.ci/rocjitsu/fleet-overlay-common.xml
           ${{ github.workspace }}/.ci/rocjitsu/fleet-overlay.xml
-        gpu: 'false'
+        gpu: required
         ssh-aliases: guest
         wait-for: ssh
         wait-timeout: 600
