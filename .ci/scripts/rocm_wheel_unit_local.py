@@ -83,8 +83,12 @@ def evaluate(expr: str, ctx: dict, failed: bool):
     if expr.startswith("!"):
         return not truthy(evaluate(expr[1:], ctx, failed))
     if expr in ("always()", "cancelled()", "success()", "failure()"):
-        return {"always()": True, "cancelled()": False,
-                "success()": not failed, "failure()": failed}[expr]
+        return {
+            "always()": True,
+            "cancelled()": False,
+            "success()": not failed,
+            "failure()": failed,
+        }[expr]
     if len(expr) > 1 and expr[0] == expr[-1] == "'":
         return expr[1:-1]
     if re.fullmatch(r"[A-Za-z_][\w.-]*", expr):
@@ -158,7 +162,10 @@ class Runner:
             path.mkdir(parents=True)
         listed = subprocess.run(
             ["git", "ls-files", "-co", "--exclude-standard", "-z"],
-            cwd=REPO, check=True, capture_output=True).stdout
+            cwd=REPO,
+            check=True,
+            capture_output=True,
+        ).stdout
         for name in filter(None, listed.decode().split("\0")):
             source = REPO / name
             if source.is_file() or source.is_symlink():
@@ -168,8 +175,12 @@ class Runner:
         if self.args.reuse_subprojects:
             for entry in (REPO / "subprojects").iterdir():
                 if entry.is_dir():
-                    shutil.copytree(entry, self.workspace / "subprojects" / entry.name,
-                                    symlinks=True, dirs_exist_ok=True)
+                    shutil.copytree(
+                        entry,
+                        self.workspace / "subprojects" / entry.name,
+                        symlinks=True,
+                        dirs_exist_ok=True,
+                    )
         if self.args.ca_bundle:
             self.trust_ca(Path(self.args.ca_bundle).expanduser())
 
@@ -177,11 +188,14 @@ class Runner:
         """Make the copy of Dockerfile.tests trust a proxy's CA. Not the repo's."""
         shutil.copyfile(bundle, self.workspace / CA_NAME)
         dockerfile = self.workspace / "contrib/Dockerfile.tests"
-        trust = (f"COPY {CA_NAME} /{CA_NAME}\n"
-                 f"ENV GIT_SSL_CAINFO=/{CA_NAME} PIP_CERT=/{CA_NAME} "
-                 f"SSL_CERT_FILE=/{CA_NAME} REQUESTS_CA_BUNDLE=/{CA_NAME}\n")
-        dockerfile.write_text(re.sub(r"(?m)^(FROM .*\n)", r"\1" + trust,
-                                     dockerfile.read_text()))
+        trust = (
+            f"COPY {CA_NAME} /{CA_NAME}\n"
+            f"ENV GIT_SSL_CAINFO=/{CA_NAME} PIP_CERT=/{CA_NAME} "
+            f"SSL_CERT_FILE=/{CA_NAME} REQUESTS_CA_BUNDLE=/{CA_NAME}\n"
+        )
+        dockerfile.write_text(
+            re.sub(r"(?m)^(FROM .*\n)", r"\1" + trust, dockerfile.read_text())
+        )
 
     def load(self, name: str) -> dict:
         return yaml.safe_load((self.workspace / name).read_text())
@@ -191,13 +205,15 @@ class Runner:
     def step_env(self, extra: dict) -> dict:
         env = dict(os.environ, **self.env, **extra)
         env.update(
-            GITHUB_WORKSPACE=str(self.workspace), RUNNER_TEMP=str(self.files),
+            GITHUB_WORKSPACE=str(self.workspace),
+            RUNNER_TEMP=str(self.files),
             GITHUB_OUTPUT=str(self.files / "output"),
             GITHUB_ENV=str(self.files / "env"),
             GITHUB_PATH=str(self.files / "path"),
             GITHUB_STATE=str(self.files / "state"),
             GITHUB_STEP_SUMMARY=str(self.files / "summary.md"),
-            PATH=os.pathsep.join(self.paths + [os.environ["PATH"]]))
+            PATH=os.pathsep.join(self.paths + [os.environ["PATH"]]),
+        )
         return env
 
     def finish_step(self) -> dict:
@@ -210,8 +226,12 @@ class Runner:
 
     def execute(self, argv: list, env: dict, minutes) -> bool:
         try:
-            done = subprocess.run(argv, cwd=self.workspace, env=env,
-                                  timeout=60 * minutes if minutes else None)
+            done = subprocess.run(
+                argv,
+                cwd=self.workspace,
+                env=env,
+                timeout=60 * minutes if minutes else None,
+            )
         except subprocess.TimeoutExpired:
             print(f"timed out after {minutes} minutes", flush=True)
             return False
@@ -222,18 +242,28 @@ class Runner:
         script.write_text(fill(step["run"], ctx))
         extra = {k: fill(v, ctx) for k, v in step.get("env", {}).items()}
         # What `shell: bash` means on a runner.
-        return self.execute(["bash", "--noprofile", "--norc", "-eo", "pipefail",
-                             str(script)], self.step_env(extra),
-                            step.get("timeout-minutes"))
+        return self.execute(
+            ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script)],
+            self.step_env(extra),
+            step.get("timeout-minutes"),
+        )
 
     def run_action(self, step: dict, ctx: dict, sha: str) -> bool:
         checkout = self.work / "actions" / sha
         if not (checkout / "action.yml").is_file():
             checkout.mkdir(parents=True, exist_ok=True)
-            for cmd in (["init", "-q"],
-                        ["fetch", "-q", "--depth", "1",
-                         f"https://github.com/{ACTION}.git", sha],
-                        ["checkout", "-q", "FETCH_HEAD"]):
+            for cmd in (
+                ["init", "-q"],
+                [
+                    "fetch",
+                    "-q",
+                    "--depth",
+                    "1",
+                    f"https://github.com/{ACTION}.git",
+                    sha,
+                ],
+                ["checkout", "-q", "FETCH_HEAD"],
+            ):
                 subprocess.run(["git", *cmd], cwd=checkout, check=True)
         declared = yaml.safe_load((checkout / "action.yml").read_text())["inputs"]
         given = {k: fill(v, ctx) for k, v in step.get("with", {}).items()}
@@ -248,11 +278,13 @@ class Runner:
         inputs = {f"INPUT_{k.upper()}": v for k, v in values.items() if v}
         env = self.step_env(dict(inputs, PYTHONUNBUFFERED="1"))
         script = checkout / "qemu_tool_action.py"
-        ok = self.execute([sys.executable, str(script), "main"], env,
-                          step.get("timeout-minutes"))
+        ok = self.execute(
+            [sys.executable, str(script), "main"], env, step.get("timeout-minutes")
+        )
         state = read_commands(self.files / "state")
-        self.post.append((script, dict(inputs, **{f"STATE_{k}": v
-                                                  for k, v in state.items()})))
+        self.post.append(
+            (script, dict(inputs, **{f"STATE_{k}": v for k, v in state.items()}))
+        )
         return ok
 
     def run_step(self, step: dict, ctx: dict) -> bool:
@@ -317,8 +349,9 @@ class Runner:
                     print("--keep: the guest is left up; qemu-tool down removes it")
                 else:
                     say(f"{job_id} / post")
-                    self.execute([sys.executable, str(script), "post"],
-                                 self.step_env(env), 10)
+                    self.execute(
+                        [sys.executable, str(script), "post"], self.step_env(env), 10
+                    )
         outputs = {k: fill(v, ctx) for k, v in job.get("outputs", {}).items()}
         return not failed, outputs
 
@@ -327,16 +360,22 @@ class Runner:
         version = self.args.rocm_version
         wheels, unit = self.load(WHEELS), self.load(UNIT)
         github = {"workspace": str(self.workspace), "token": "", "sha": "local"}
-        ctx = {"github": github, "matrix": {"rocm-version": version},
-               "inputs": {"artifact-suffix": ""},
-               "needs": {"plan": {"outputs": {"supported": "true",
-                                              "run-vm-tests": "true"}}}}
+        ctx = {
+            "github": github,
+            "matrix": {"rocm-version": version},
+            "inputs": {"artifact-suffix": ""},
+            "needs": {
+                "plan": {"outputs": {"supported": "true", "run-vm-tests": "true"}}
+            },
+        }
         # The inputs the calling job hands to the unit-test workflow.
         called = {k: fill(v, ctx) for k, v in wheels["jobs"]["unit"]["with"].items()}
         if self.args.tests_dir:
             say(f"build-unit-tests: skipped, using {self.args.tests_dir}")
-            flat_copy(Path(self.args.tests_dir).expanduser(),
-                      self.artifacts / called["artifact-name"])
+            flat_copy(
+                Path(self.args.tests_dir).expanduser(),
+                self.artifacts / called["artifact-name"],
+            )
         elif not self.run_job(wheels, "build-unit-tests", ctx)[0]:
             return 1
         ctx = {"github": github, "inputs": dict(called, **{"run-id": ""})}
@@ -353,25 +392,42 @@ class Runner:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--rocm-version", default="10.2.0",
-                   help="ROCm version of the matrix entry to run (default: 10.2.0).")
-    p.add_argument("--work-dir", default="~/.cache/nixl-unit-local",
-                   help="Where the workspace copy, artifacts, guest images and "
-                        "qemu-tool go (default: %(default)s).")
-    p.add_argument("--ca-bundle", metavar="FILE",
-                   help="CA bundle the image build must trust, for a TLS-"
-                        "intercepting proxy. Only the workspace copy is changed.")
-    p.add_argument("--reuse-subprojects", action="store_true",
-                   help="Copy the meson subprojects this checkout has already "
-                        "downloaded into the workspace, so the image build "
-                        "does not fetch them.")
-    p.add_argument("--tests-dir", metavar="DIR",
-                   help="Skip the image build and use this test tree, such as "
-                        "a downloaded nixl-unit-tests artifact.")
-    p.add_argument("--keep", action="store_true",
-                   help="Leave the guest running at the end.")
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    p.add_argument(
+        "--rocm-version",
+        default="10.2.0",
+        help="ROCm version of the matrix entry to run (default: 10.2.0).",
+    )
+    p.add_argument(
+        "--work-dir",
+        default="~/.cache/nixl-unit-local",
+        help="Where the workspace copy, artifacts, guest images and "
+        "qemu-tool go (default: %(default)s).",
+    )
+    p.add_argument(
+        "--ca-bundle",
+        metavar="FILE",
+        help="CA bundle the image build must trust, for a TLS-"
+        "intercepting proxy. Only the workspace copy is changed.",
+    )
+    p.add_argument(
+        "--reuse-subprojects",
+        action="store_true",
+        help="Copy the meson subprojects this checkout has already "
+        "downloaded into the workspace, so the image build "
+        "does not fetch them.",
+    )
+    p.add_argument(
+        "--tests-dir",
+        metavar="DIR",
+        help="Skip the image build and use this test tree, such as "
+        "a downloaded nixl-unit-tests artifact.",
+    )
+    p.add_argument(
+        "--keep", action="store_true", help="Leave the guest running at the end."
+    )
     return p.parse_args()
 
 

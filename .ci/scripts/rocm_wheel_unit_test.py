@@ -13,6 +13,7 @@ rocm-wheels results pipeline picks them up without changes.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import subprocess
@@ -232,7 +233,7 @@ def main() -> int:
     )
 
     checks: list[tuple[str, Callable[[], str]]] = [
-        (name, lambda command=command: check_binary(tests_dir, command, args.timeout))
+        (name, functools.partial(check_binary, tests_dir, command, args.timeout))
         for name, command in BINARIES
     ]
     checks.append(("nixl_test", lambda: check_nixl_test(tests_dir, args.timeout)))
