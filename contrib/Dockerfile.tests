@@ -13,7 +13,8 @@
 #   lib/       — nixl shared libs, with the plugins and the gtest mock
 #                plugins under lib/plugins/
 #   ucx/       — UCX built from source (lib/ with its modules, bin/ucx_info)
-#   gtest/     — libgtest.so and libgmock.so built from source
+#   deps/      — the other shared libraries the tests load (gtest, libaio,
+#                ...), so the guest needs nothing installed
 #   build-dir  — the build directory compiled into some gtests as BUILD_DIR;
 #                they look for plugins under it, so the guest links it back
 #                to lib/plugins
@@ -99,7 +100,7 @@ RUN PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-} \
         --libdir=lib \
         -Ducx_path=/opt/ucx \
         -Dbuild_tests=true \
-        -Dbuild_examples=false \
+        -Dbuild_examples=true \
         -Denable_plugins=UCX,POSIX \
         -Dbuild_docs=false \
         -Drust=false \
@@ -108,14 +109,24 @@ RUN PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-} \
     && meson install -C build
 
 # Add what the install tree does not carry, and drop what no test uses.
-RUN mkdir -p /nixl-tests/gtest /nixl-tests/ucx/bin \
+# deps/ gets every shared library the tests load that is not glibc or
+# libstdc++, so the guest needs nothing installed.
+RUN mkdir -p /nixl-tests/deps /nixl-tests/ucx/bin \
     && cp -a /opt/ucx/lib /nixl-tests/ucx/lib \
     && cp /opt/ucx/bin/ucx_info /nixl-tests/ucx/bin/ \
-    && cp -a /usr/local/lib/libgtest*.so* /usr/local/lib/libgmock*.so* \
-             /nixl-tests/gtest/ \
     && rm -rf /nixl-tests/ucx/lib/pkgconfig /nixl-tests/ucx/lib/cmake \
               /nixl-tests/include /nixl-tests/lib/pkgconfig \
-              /nixl-tests/lib/python3* \
+              /nixl-tests/lib/python3*
+
+# ldd exits non-zero for the files that are not ELF; what matters is that
+# every library it was asked about resolved.
+RUN find /nixl-tests/bin /nixl-tests/lib -type f \
+        | LD_LIBRARY_PATH=/nixl-tests/lib:/nixl-tests/lib/plugins:/opt/ucx/lib:/usr/local/lib \
+          xargs ldd > /tmp/ldd.txt 2>/dev/null || true; \
+    if grep 'not found' /tmp/ldd.txt; then exit 1; fi; \
+    awk '$2 == "=>" && $3 ~ /^\// { print $3 }' /tmp/ldd.txt | sort -u \
+        | grep -Ev '^/(nixl-tests|opt/ucx)/|/(libc|libm|libdl|librt|libpthread|libgcc_s|libstdc\+\+)\.so' \
+        | xargs cp -L -t /nixl-tests/deps \
     && echo /src/build > /nixl-tests/build-dir
 
 # ---------------------------------------------------------------------------

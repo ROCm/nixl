@@ -202,7 +202,7 @@ jobs:
         # Artifact upload drops the execute bits.
         chmod +x bin/* ucx/bin/*
         # UCX is bundled with the tests; the guest has none installed.
-        export LD_LIBRARY_PATH="$HOME/nixl-unit/lib:$HOME/nixl-unit/lib/plugins:$HOME/nixl-unit/ucx/lib:$HOME/nixl-unit/gtest:${LD_LIBRARY_PATH:-}"
+        export LD_LIBRARY_PATH="$HOME/nixl-unit/lib:$HOME/nixl-unit/lib/plugins:$HOME/nixl-unit/ucx/lib:$HOME/nixl-unit/deps:${LD_LIBRARY_PATH:-}"
         export NIXL_PLUGIN_DIR="$HOME/nixl-unit/lib/plugins"
         # Some gtests look for the UCX plugin under the build directory that
         # was compiled into them; give them the installed plugins there.

@@ -151,6 +151,7 @@ GTEST_EXCLUDED = "MetadataExchangeTestFixture.SocketSendLocalAndInvalidateLocal"
 BINARIES: list[tuple[str, list[str]]] = [
     ("desc_example", ["desc_example"]),
     ("agent_example", ["agent_example"]),
+    ("nixl_example", ["nixl_example"]),
     ("ucx_backend_test", ["ucx_backend_test"]),
     ("nixl_posix_test", ["nixl_posix_test", "-n", "128", "-s", "1048576"]),
     ("nixl_posix_aio_test", ["nixl_posix_aio_test"]),
@@ -238,7 +239,6 @@ def main() -> int:
 
     for name, fn in checks:
         reporter.run(name, fn)
-
     return 1 if reporter.failed else 0
 
 
