@@ -4,8 +4,9 @@
 name: ROCm Wheels - rocjitsu Unit Tests
 
 # Runs the C++ unit tests built by contrib/Dockerfile.tests inside a QEMU
-# guest.  No GPU is required: ucx_backend_test, ucx_backend_multi,
-# ucx_worker_test and the UCX-filtered gtests all exercise UCX loopback.
+# guest: the CPU-only subset of upstream's .gitlab/test_cpp.sh, listed in
+# .ci/scripts/rocm_wheel_unit_test.py.  No GPU is required; the UCX tests
+# run in loopback and the POSIX tests on the guest's own disk.
 #
 # External dependencies are the same qemu-tool-action pin and qemu-minimal
 # ref used by rocm-wheels-rocjitsu.yml.
@@ -138,9 +139,11 @@ jobs:
       run: |
         set -euo pipefail
         ls -lR nixl-tests-artifact
-        for b in ucx_backend_test ucx_backend_multi ucx_worker_test gtest; do
-          if [ ! -f "nixl-tests-artifact/bin/$b" ]; then
-            echo "::error::nixl-tests-artifact/bin/$b is missing"
+        for f in bin/ucx_backend_test bin/gtest bin/unit bin/nixl_test \
+                 lib/plugins/libplugin_UCX.so lib/plugins/libplugin_POSIX.so \
+                 ucx/bin/ucx_info build-dir; do
+          if [ ! -f "nixl-tests-artifact/$f" ]; then
+            echo "::error::nixl-tests-artifact/$f is missing"
             exit 1
           fi
         done
@@ -199,7 +202,13 @@ jobs:
         # Artifact upload drops the execute bits.
         chmod +x bin/* ucx/bin/*
         # UCX is bundled with the tests; the guest has none installed.
-        export LD_LIBRARY_PATH="$HOME/nixl-unit/lib:$HOME/nixl-unit/lib/plugins:$HOME/nixl-unit/ucx/lib:$HOME/nixl-unit/gtest:${LD_LIBRARY_PATH:-}"
+        export LD_LIBRARY_PATH="$HOME/nixl-unit/lib:$HOME/nixl-unit/lib/plugins:$HOME/nixl-unit/ucx/lib:$HOME/nixl-unit/deps:${LD_LIBRARY_PATH:-}"
+        export NIXL_PLUGIN_DIR="$HOME/nixl-unit/lib/plugins"
+        # Some gtests look for the UCX plugin under the build directory that
+        # was compiled into them; give them the installed plugins there.
+        build_dir=$(cat build-dir)
+        sudo -n mkdir -p "$build_dir/src/plugins"
+        sudo -n ln -sfn "$NIXL_PLUGIN_DIR" "$build_dir/src/plugins/ucx"
         ucx/bin/ucx_info -v
         python3 rocm_wheel_unit_test.py \
           --tests-dir "$HOME/nixl-unit" \

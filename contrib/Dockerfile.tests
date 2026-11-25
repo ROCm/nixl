@@ -7,12 +7,17 @@
 # Only CPU-safe tests are included; GPU, DOCA, Mooncake and Redis paths are
 # excluded by not setting rocm_path/cuda paths and by restricting plugins.
 #
-# The build produces /nixl-tests/ with:
-#   bin/   — test executables (ucx_backend_test, ucx_backend_multi,
-#             ucx_worker_test, gtest)
-#   lib/   — nixl shared libs, with the UCX plugin under lib/plugins/
-#   ucx/   — UCX built from source (lib/ with its modules, bin/ucx_info)
-#   gtest/ — libgtest.so and libgmock.so built from source
+# The build produces /nixl-tests/, the meson install tree that upstream's
+# .gitlab/test_cpp.sh runs from, plus what the tests need beside it:
+#   bin/       — every test and example executable meson installs
+#   lib/       — nixl shared libs, with the plugins and the gtest mock
+#                plugins under lib/plugins/
+#   ucx/       — UCX built from source (lib/ with its modules, bin/ucx_info)
+#   deps/      — the other shared libraries the tests load (gtest, libaio,
+#                ...), so the guest needs nothing installed
+#   build-dir  — the build directory compiled into some gtests as BUILD_DIR;
+#                they look for plugins under it, so the guest links it back
+#                to lib/plugins
 #
 # The workflow extracts /nixl-tests/, scps it to the guest and runs the tests
 # there. UCX is bundled because the UCX plugin needs a newer UCX than Ubuntu
@@ -53,7 +58,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         autoconf automake libtool \
         python3 python3-dev python3-pip python3-venv \
         libaio-dev \
-        patchelf \
     && pip3 install --break-system-packages meson meson-python pybind11 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -93,43 +97,37 @@ RUN PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-} \
     meson setup build \
         --buildtype=debug \
         --prefix=/nixl-tests \
+        --libdir=lib \
         -Ducx_path=/opt/ucx \
         -Dbuild_tests=true \
-        -Dbuild_examples=false \
+        -Dbuild_examples=true \
         -Denable_plugins=UCX,POSIX \
         -Dbuild_docs=false \
         -Drust=false \
         -Dwith_trace=false \
-    && meson compile -C build test/unit/plugins/ucx/ucx_backend_test \
-                                test/unit/plugins/ucx/ucx_backend_multi \
-                                test/unit/plugins/ucx/ucx_worker_test \
-                                test/gtest/gtest
+    && meson compile -C build \
+    && meson install -C build
 
-# Collect everything under /nixl-tests/
-RUN mkdir -p /nixl-tests/bin /nixl-tests/lib/plugins /nixl-tests/gtest \
-             /nixl-tests/ucx/bin \
-    && cp build/test/unit/plugins/ucx/ucx_backend_test \
-          build/test/unit/plugins/ucx/ucx_backend_multi \
-          build/test/unit/plugins/ucx/ucx_worker_test \
-          build/test/gtest/gtest \
-          /nixl-tests/bin/ \
-    && find build/src \( -type f -o -type l \) -name '*.so*' \
-            ! -name '*.symbols' ! -name 'libplugin_*' \
-            -exec cp -a {} /nixl-tests/lib/ \; \
-    && find build/src/plugins \( -type f -o -type l \) -name 'libplugin_*.so*' \
-            ! -name '*.symbols' \
-            -exec cp -a {} /nixl-tests/lib/plugins/ \; \
+# Add what the install tree does not carry, and drop what no test uses.
+# deps/ gets every shared library the tests load that is not glibc or
+# libstdc++, so the guest needs nothing installed.
+RUN mkdir -p /nixl-tests/deps /nixl-tests/ucx/bin \
     && cp -a /opt/ucx/lib /nixl-tests/ucx/lib \
     && cp /opt/ucx/bin/ucx_info /nixl-tests/ucx/bin/ \
-    && cp -a /usr/local/lib/libgtest*.so* /usr/local/lib/libgmock*.so* \
-             /nixl-tests/gtest/ \
     && rm -rf /nixl-tests/ucx/lib/pkgconfig /nixl-tests/ucx/lib/cmake \
-    && patchelf --set-rpath '$ORIGIN/../lib:$ORIGIN/../lib/plugins:$ORIGIN/../ucx/lib:$ORIGIN/../gtest' \
-                /nixl-tests/bin/gtest \
-    && for b in ucx_backend_test ucx_backend_multi ucx_worker_test; do \
-         patchelf --set-rpath '$ORIGIN/../lib:$ORIGIN/../lib/plugins:$ORIGIN/../ucx/lib' \
-                  "/nixl-tests/bin/$b"; \
-       done
+              /nixl-tests/include /nixl-tests/lib/pkgconfig \
+              /nixl-tests/lib/python3*
+
+# ldd exits non-zero for the files that are not ELF; what matters is that
+# every library it was asked about resolved.
+RUN find /nixl-tests/bin /nixl-tests/lib -type f \
+        | LD_LIBRARY_PATH=/nixl-tests/lib:/nixl-tests/lib/plugins:/opt/ucx/lib:/usr/local/lib \
+          xargs ldd > /tmp/ldd.txt 2>/dev/null || true; \
+    if grep 'not found' /tmp/ldd.txt; then exit 1; fi; \
+    awk '$2 == "=>" && $3 ~ /^\// { print $3 }' /tmp/ldd.txt | sort -u \
+        | grep -Ev '^/(nixl-tests|opt/ucx)/|/(libc|libm|libdl|librt|libpthread|libgcc_s|libstdc\+\+)\.so' \
+        | xargs cp -L -t /nixl-tests/deps \
+    && echo /src/build > /nixl-tests/build-dir
 
 # ---------------------------------------------------------------------------
 # stage: package — final image that only holds /nixl-tests/
