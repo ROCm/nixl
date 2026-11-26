@@ -2,6 +2,53 @@
  "schema": 1,
  "runs": [
   {
+   "stamp": "20261126T204159Z",
+   "run_id": 45892856681,
+   "upstream_main_sha": "9b6e8edfc8140e1a3cda6611e3b90b673dfebb5a",
+   "branches": [
+    {
+     "branch": "main",
+     "slug": "main",
+     "passed": false,
+     "supported": false,
+     "version": "1.6.0",
+     "sha": "9b6e8edfc8140e1a3cda6611e3b90b673dfebb5a"
+    },
+    {
+     "branch": "for-upstream/ci/rocm-image",
+     "slug": "for-upstream-ci-rocm-image",
+     "passed": false,
+     "supported": false,
+     "version": "1.6.0",
+     "sha": "2368dfac7caa8f3390de776c2db918d5c0940508"
+    },
+    {
+     "branch": "for-upstream/feat/rocm-wheels",
+     "slug": "for-upstream-feat-rocm-wheels",
+     "passed": true,
+     "supported": true,
+     "version": "1.6.0.dev20261126",
+     "sha": "0ee8a91b08c5cf516428964fbf01fed070cae42c"
+    },
+    {
+     "branch": "for-upstream/fix/nixlbench-consistency-detail",
+     "slug": "for-upstream-fix-nixlbench-consistency-detail",
+     "passed": false,
+     "supported": false,
+     "version": "1.6.0",
+     "sha": "76c4c9ca8a03cd29b52b02a5dcde1d8470fab84f"
+    },
+    {
+     "branch": "for-upstream/fix/nixlbench-vram-fill",
+     "slug": "for-upstream-fix-nixlbench-vram-fill",
+     "passed": false,
+     "supported": false,
+     "version": "1.6.0",
+     "sha": "4c07f036fbb8dc4564842aa8697db6b5c08bc2c6"
+    }
+   ]
+  },
+  {
    "stamp": "20261126T033000Z",
    "run_id": 45749225675,
    "upstream_main_sha": "6fe13993a9d19d01c06f7188d17525a076e0f028",
