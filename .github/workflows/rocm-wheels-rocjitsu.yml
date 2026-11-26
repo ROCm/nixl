@@ -31,7 +31,7 @@ on:
         required: true
         type: string
       artifact-name:
-        description: Name of the artifact holding the merged rocm-nixl wheels.
+        description: Name of the artifact holding the merged nixl-rocm wheels.
         required: true
         type: string
       python-version:
@@ -57,10 +57,10 @@ on:
         type: string
         default: '10.2.0'
       artifact-name:
-        description: Name of the artifact holding the merged rocm-nixl wheels.
+        description: Name of the artifact holding the merged nixl-rocm wheels.
         required: true
         type: string
-        default: rocm-nixl-wheels
+        default: nixl-rocm-wheels
       python-version:
         description: Python version to install the wheel for, as X.Y.
         required: false
@@ -133,7 +133,7 @@ jobs:
           exit 0
         fi
         echo "supported=false" >> "$GITHUB_OUTPUT"
-        msg="rocjitsu smoke test skipped for ROCm ${ROCM_VERSION}: the guest of the pinned qemu-tool carries ROCm ${GUEST_ROCM}, so the rocm-nixl wheel's ROCm ${xy} backend cannot be selected there."
+        msg="rocjitsu smoke test skipped for ROCm ${ROCM_VERSION}: the guest of the pinned qemu-tool carries ROCm ${GUEST_ROCM}, so the nixl-rocm wheel's ROCm ${xy} backend cannot be selected there."
         echo "::notice title=rocjitsu smoke test skipped::${msg}"
         echo "${msg}" >> "$GITHUB_STEP_SUMMARY"
 
@@ -188,9 +188,9 @@ jobs:
         shopt -s nullglob
         ls -l wheels
         tag="cp${PYTHON_VERSION/./}"
-        wheel=(wheels/rocm_nixl-*-"${tag}"-"${tag}"-*.whl)
+        wheel=(wheels/nixl_rocm-*-"${tag}"-"${tag}"-*.whl)
         if [ "${#wheel[@]}" -ne 1 ]; then
-          echo "::error::expected exactly one rocm_nixl wheel for ${tag} in the artifact, found ${#wheel[@]}"
+          echo "::error::expected exactly one nixl_rocm wheel for ${tag} in the artifact, found ${#wheel[@]}"
           exit 1
         fi
         backend="nixl_rocm${ROCM_XY/./_}"
@@ -340,12 +340,12 @@ jobs:
         # package taken from an index. The wheel is installed from the copied
         # file with no index, so it can pull nothing else in.
         "$uv" pip install --python "$venv/bin/python" numpy
-        wheel=("$work"/wheels/rocm_nixl-*.whl)
+        wheel=("$work"/wheels/nixl_rocm-*.whl)
         "$uv" pip install --python "$venv/bin/python" --no-index "${wheel[@]}"
         "$uv" pip list --python "$venv/bin/python" | tee "$work/pip-list.txt"
 
         if ! "$venv/bin/python" -c 'import importlib.util, sys; sys.exit(0 if importlib.util.find_spec("torch") is None else 1)'; then
-          echo "::error::torch is installed in the guest environment; rocm-nixl must not bring it in"
+          echo "::error::torch is installed in the guest environment; nixl-rocm must not bring it in"
           exit 1
         fi
         echo "torch is not installed"
@@ -408,7 +408,7 @@ jobs:
         print(entry.torch, entry.index_url)' "$rocm_xy")
         echo "rocm${rocm_xy} extra: torch==${torch} from ${index}"
 
-        wheel=("$work"/wheels/rocm_nixl-*.whl)
+        wheel=("$work"/wheels/nixl_rocm-*.whl)
         "$uv" venv --python "$py" "$work/venv-torch"
         "$uv" pip install --python "$work/venv-torch/bin/python" \
           --extra-index-url "$index" --index-strategy unsafe-best-match \

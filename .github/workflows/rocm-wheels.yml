@@ -86,8 +86,8 @@ on:
         description: The wheel version built.
         value: ${{ jobs.plan.outputs.version }}
       wheels-artifact:
-        description: Name of the artifact holding the merged rocm-nixl wheels.
-        value: rocm-nixl-wheels${{ inputs.artifact-suffix }}
+        description: Name of the artifact holding the merged nixl-rocm wheels.
+        value: nixl-rocm-wheels${{ inputs.artifact-suffix }}
       results-artifact:
         description: Name of the artifact holding results.json.
         value: rocm-results${{ inputs.artifact-suffix }}
@@ -148,7 +148,7 @@ jobs:
           if [ "$RUN_VM_TESTS" = "false" ]; then vm=false; fi
           {
             echo "run-vm-tests=${vm}"
-            echo "wheels-artifact=rocm-nixl-wheels${ARTIFACT_SUFFIX}"
+            echo "wheels-artifact=nixl-rocm-wheels${ARTIFACT_SUFFIX}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Select ROCm and Python versions
@@ -573,7 +573,7 @@ jobs:
         timeout-minutes: 2
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: rocm-nixlbench-backend-${{ matrix.rocm-version }}${{ inputs.artifact-suffix }}
+          name: nixlbench-rocm-backend-${{ matrix.rocm-version }}${{ inputs.artifact-suffix }}
           path: ${{ runner.temp }}/nixlbench-upload/
           if-no-files-found: error
           overwrite: true
@@ -698,7 +698,7 @@ jobs:
             mv "${wheels[@]}" backends/
           done
 
-      # One rocm_nixl wheel per Python tag, holding the backend of every ROCm
+      # One nixl_rocm wheel per Python tag, holding the backend of every ROCm
       # version this run built.
       - name: Merge the backends
         env:
@@ -725,15 +725,15 @@ jobs:
             python3 contrib/wheel_merge_rocm.py --output-dir dist-merged "${group[@]}"
           done
           ls -l dist-merged
-          merged=(dist-merged/rocm_nixl-*.whl)
+          merged=(dist-merged/nixl_rocm-*.whl)
           if [ "${#merged[@]}" -ne "$(wc -w <<< "$tags")" ]; then
-            echo "::error::expected one rocm_nixl wheel per Python tag (${tags//$'\n'/ }), found ${#merged[@]}"
+            echo "::error::expected one nixl_rocm wheel per Python tag (${tags//$'\n'/ }), found ${#merged[@]}"
             exit 1
           fi
           if [ -n "$STAMPED_VERSION" ]; then
             for wheel in "${merged[@]}"; do
               case "${wheel##*/}" in
-                "rocm_nixl-${STAMPED_VERSION}-"*) ;;
+                "nixl_rocm-${STAMPED_VERSION}-"*) ;;
                 *)
                   echo "::error::${wheel} does not carry the stamped version ${STAMPED_VERSION}"
                   exit 1
@@ -742,12 +742,12 @@ jobs:
             done
           fi
 
-      # The extras are what keep pip from pairing rocm-nixl with PyPI's CUDA
+      # The extras are what keep pip from pairing nixl-rocm with PyPI's CUDA
       # torch. Read from the metadata; torch itself is never downloaded.
       - name: Check the merged wheels' requirements
         run: |
           set -euo pipefail
-          python3 -I - dist-merged/rocm_nixl-*.whl <<'EOF'
+          python3 -I - dist-merged/nixl_rocm-*.whl <<'EOF'
           import email
           import re
           import sys
@@ -758,7 +758,7 @@ jobs:
               with zipfile.ZipFile(path) as wheel:
                   names = wheel.namelist()
                   (metadata_name,) = [
-                      n for n in names if re.fullmatch(r"rocm_nixl-[^/]+\.dist-info/METADATA", n)
+                      n for n in names if re.fullmatch(r"nixl_rocm-[^/]+\.dist-info/METADATA", n)
                   ]
                   metadata = email.message_from_bytes(wheel.read(metadata_name))
               rocm = sorted(
@@ -774,7 +774,7 @@ jobs:
                   else:
                       unconditional.append(spec)
               problems = []
-              if metadata["Name"] != "rocm-nixl":
+              if metadata["Name"] != "nixl-rocm":
                   problems.append(f"Name is {metadata['Name']}")
               if [re.split(r"[^A-Za-z0-9._-]", spec)[0].lower() for spec in unconditional] != ["numpy"]:
                   problems.append(f"unconditional requirements are {unconditional}, expected numpy only")
@@ -797,7 +797,7 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ needs.plan.outputs.wheels-artifact }}
-          path: dist-merged/rocm_nixl-*.whl
+          path: dist-merged/nixl_rocm-*.whl
           if-no-files-found: error
 
   test:
@@ -872,13 +872,13 @@ jobs:
           ls -l wheelhouse
           python3 -m venv venv
           venv/bin/python -m pip install numpy
-          venv/bin/python -m pip install --no-index --find-links wheelhouse rocm-nixl
+          venv/bin/python -m pip install --no-index --find-links wheelhouse nixl-rocm
 
       - name: Check that torch is not installed
         run: |
           venv/bin/python -m pip list
           if venv/bin/python -m pip show torch > /dev/null 2>&1; then
-            echo "::error::torch was installed with rocm-nixl"
+            echo "::error::torch was installed with nixl-rocm"
             exit 1
           fi
 
@@ -956,7 +956,7 @@ jobs:
       artifact-suffix: ${{ inputs.artifact-suffix }}
 
   # here is a warning on the run, not a failed job. It merges the nixlbench
-  # backend wheels the build job uploaded into one rocm-nixlbench wheel, after
+  # backend wheels the build job uploaded into one nixlbench-rocm wheel, after
   # checking each of them again against the NIXL backend wheels of this
   # attempt: a backend left by an earlier attempt of the run, built against
   # other NIXL wheels, is dropped. Every step after the checkout is
@@ -989,7 +989,7 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: rocm-nixlbench-backend-*${{ inputs.artifact-suffix }}
+          pattern: nixlbench-rocm-backend-*${{ inputs.artifact-suffix }}
           path: ${{ runner.temp }}/nixlbench-artifacts
 
       - name: Download the backend wheels
@@ -1037,7 +1037,7 @@ jobs:
 
           def verify(rocm):
               xy = "_".join(rocm.split(".")[:2])
-              artifact = f"rocm-nixlbench-backend-{rocm}{suffix}"
+              artifact = f"nixlbench-rocm-backend-{rocm}{suffix}"
               directory = bench_root / artifact
               lone = False
               if not directory.is_dir():
@@ -1128,7 +1128,7 @@ jobs:
               stream.write(f"count={len(verified)}\n")
           EOF
 
-      # One rocm_nixlbench wheel, holding the backend of every ROCm version
+      # One nixlbench_rocm wheel, holding the backend of every ROCm version
       # that was verified.
       - name: Merge the nixlbench backends
         id: merge
@@ -1142,8 +1142,8 @@ jobs:
           python3 contrib/wheel_nixlbench.py merge --output-dir "$out" "${backends[@]}"
           ls -l "$out"
           merged=("$out"/*.whl)
-          if [ "${#merged[@]}" -ne 1 ] || [[ "${merged[0]##*/}" != "rocm_nixlbench-${VERSION}-py3-none-"*.whl ]]; then
-            echo "::warning title=nixlbench wheel not built::expected one rocm_nixlbench wheel of version ${VERSION}, found: ${merged[*]##*/}"
+          if [ "${#merged[@]}" -ne 1 ] || [[ "${merged[0]##*/}" != "nixlbench_rocm-${VERSION}-py3-none-"*.whl ]]; then
+            echo "::warning title=nixlbench wheel not built::expected one nixlbench_rocm wheel of version ${VERSION}, found: ${merged[*]##*/}"
             exit 1
           fi
 
@@ -1200,7 +1200,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: rocm-nixlbench-wheel${{ inputs.artifact-suffix }}
+          name: nixlbench-rocm-wheel${{ inputs.artifact-suffix }}
           path: ${{ runner.temp }}/dist-nixlbench/
           if-no-files-found: error
           overwrite: true
@@ -1226,14 +1226,14 @@ jobs:
             if [ "${pair#*=}" = "failure" ]; then failed+=" ${pair%%=*}"; fi
           done
           if [ -n "$failed" ]; then
-            msg="The rocm-nixlbench wheel was not built: these steps failed:${failed}. It is not required, so this does not fail the job."
+            msg="The nixlbench-rocm wheel was not built: these steps failed:${failed}. It is not required, so this does not fail the job."
             echo "::warning title=nixlbench wheel not built::${msg}"
           elif [ "$UPLOAD_OUTCOME" = "success" ]; then
-            msg="The rocm-nixlbench wheel (not required) was built from ${COUNT} verified backend(s) and uploaded as rocm-nixlbench-wheel${ARTIFACT_SUFFIX}."
+            msg="The nixlbench-rocm wheel (not required) was built from ${COUNT} verified backend(s) and uploaded as nixlbench-rocm-wheel${ARTIFACT_SUFFIX}."
             echo "${msg}"
           else
             # The verify step has already warned, with the cause.
-            msg="The rocm-nixlbench wheel (not required) was not built: no nixlbench backend passed verification."
+            msg="The nixlbench-rocm wheel (not required) was not built: no nixlbench backend passed verification."
             echo "${msg}"
           fi
           echo "${msg}" >> "$GITHUB_STEP_SUMMARY"
@@ -1435,7 +1435,7 @@ jobs:
         timeout-minutes: 1
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: rocm-nixlbench-wheel${{ inputs.artifact-suffix }}
+          name: nixlbench-rocm-wheel${{ inputs.artifact-suffix }}
           path: nixlbench
 
       # Adds the top-level key "nixlbench" and nothing else. The file is
@@ -1448,7 +1448,7 @@ jobs:
           NIXLBENCH_PRESENT: ${{ needs.plan.outputs.nixlbench-present }}
           NIXLBENCH_ENABLED: ${{ needs.plan.outputs.nixlbench }}
           NIXLBENCH_RESULT: ${{ needs.nixlbench.result }}
-          NIXLBENCH_ARTIFACT: rocm-nixlbench-wheel${{ inputs.artifact-suffix }}
+          NIXLBENCH_ARTIFACT: nixlbench-rocm-wheel${{ inputs.artifact-suffix }}
         run: |
           set -euo pipefail
           python3 -I - <<'EOF'
@@ -1466,7 +1466,7 @@ jobs:
           directory = pathlib.Path("nixlbench")
           wheel = None
           rocm = []
-          found = sorted(directory.glob("rocm_nixlbench-*.whl"))
+          found = sorted(directory.glob("nixlbench_rocm-*.whl"))
           if len(found) == 1:
               digest = hashlib.sha256()
               with open(found[0], "rb") as stream:

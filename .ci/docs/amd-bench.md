@@ -45,8 +45,8 @@ source will be under `.ci/site/`.
 
 ## The nixlbench wheel
 
-nixlbench ships as a wheel of its own, `rocm-nixlbench`, which installs the
-`nixlbench` command and requires `rocm-nixl` at exactly its own version. A
+nixlbench ships as a wheel of its own, `nixlbench-rocm`, which installs the
+`nixlbench` command and requires `nixl-rocm` at exactly its own version. A
 branch can build it when it has the nixlbench wheel scripts; today that is
 `for-upstream/feat/rocm-wheels`, whose `contrib/README.md` describes the
 wheel
@@ -65,12 +65,12 @@ builds it in two places, neither of which is a required job or step:
 
 | Where | Does | Artifact |
 | --- | --- | --- |
-| The last steps of `build`, one leg per ROCm version | Builds `nixlbench_rocm<X>_<Y>` after the NIXL backend wheels have been uploaded, from the same build cache, so that it links against that same NIXL build. Checks that the NIXL wheels it was linked against are the uploaded ones, by hash, and uploads nothing otherwise. | `rocm-nixlbench-backend-<rocm><suffix>` |
-| The `nixlbench wheel` job, after `merge` | Checks each backend again against the NIXL backend wheels of this run, drops one that does not match, and merges the rest into `rocm_nixlbench-<version>-py3-none-manylinux_2_28_x86_64.whl`. | `rocm-nixlbench-wheel<suffix>`, with `nixlbench-build.json` |
+| The last steps of `build`, one leg per ROCm version | Builds `nixlbench_rocm<X>_<Y>` after the NIXL backend wheels have been uploaded, from the same build cache, so that it links against that same NIXL build. Checks that the NIXL wheels it was linked against are the uploaded ones, by hash, and uploads nothing otherwise. | `nixlbench-rocm-backend-<rocm><suffix>` |
+| The `nixlbench wheel` job, after `merge` | Checks each backend again against the NIXL backend wheels of this run, drops one that does not match, and merges the rest into `nixlbench_rocm-<version>-py3-none-manylinux_2_28_x86_64.whl`. | `nixlbench-rocm-wheel<suffix>`, with `nixlbench-build.json` |
 
 Each of those steps is allowed to fail, and so is the job: a nixlbench failure
 is a warning on the run and a `nixlbench` entry in `results.json`, never a
-failed `build` or a missing `rocm-nixl` wheel. The build is stopped after
+failed `build` or a missing `nixl-rocm` wheel. The build is stopped after
 `NIXLBENCH_CAP_S` (1080 seconds), and not started at all when the runner has
 less than `NIXLBENCH_MIN_FREE_GB` (8 GB) of disk free.
 
@@ -115,8 +115,8 @@ the id of an `AMD Nightly` or `ROCm Wheels` run. It runs the wheels that run
 built, so it refuses a run of any other workflow or of a fork. Its jobs:
 
 1. **plan.** Lists the run's artifacts. A branch is benchmarked when the run
-   holds both its `rocm-nixl-wheels<suffix>` and its
-   `rocm-nixlbench-wheel<suffix>`, at most four branches in one run. The lanes
+   holds both its `nixl-rocm-wheels<suffix>` and its
+   `nixlbench-rocm-wheel<suffix>`, at most four branches in one run. The lanes
    and their cases come from the matrix under [`.ci/bench`](../bench).
 2. **container** and **vm.** One job per branch and lane, below.
 3. **collect.** One job per branch. It merges the lanes' records with

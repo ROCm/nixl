@@ -15,7 +15,7 @@ function pythonRange(python) {
 
 export default function InstallWheels({ target, repository, go }) {
   const [copied, setCopied] = useState(false);
-  const command = installCommand(siteUrl(`wheels/${target.slug}/simple/`));
+  const command = installCommand(siteUrl(`wheels/${target.slug}/simple/`), target.project);
   const copy = () => {
     navigator.clipboard.writeText(command).then(
       () => setCopied(true),
@@ -41,7 +41,9 @@ export default function InstallWheels({ target, repository, go }) {
       }
     >
       <Typography variant="body2" sx={{ mb: 1 }} data-install="summary">
-        <Mono>rocm-nixl {target.version}</Mono>
+        <Mono>
+          {target.project} {target.version}
+        </Mono>
         {built && ` built ${built}`} from <strong>{target.branch}</strong>
         {target.sha && ' at '}
         <Commit repository={repository} sha={target.sha} />
@@ -77,7 +79,7 @@ export default function InstallWheels({ target, repository, go }) {
           <>
             : the{' '}
             <Link href={readme} target="_blank" rel="noreferrer">
-              rocm-nixl README
+              {target.project} README
             </Link>{' '}
             lists the supported ROCm versions and how <Mono>import nixl</Mono> finds one.
           </>

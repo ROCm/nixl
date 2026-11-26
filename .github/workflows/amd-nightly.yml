@@ -358,7 +358,7 @@ jobs:
                   "sha": item["sha"],
                   "passed": False,
                   "reason": None,
-                  "wheels_artifact": f"rocm-nixl-wheels-{slug}",
+                  "wheels_artifact": f"nixl-rocm-wheels-{slug}",
                   "results": None,
               }
               path = pathlib.Path("results") / f"rocm-results-{slug}" / "results.json"

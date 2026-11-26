@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Two-node UCX transfer test for an installed rocm-nixl wheel.
+"""Two-node UCX transfer test for an installed nixl-rocm wheel.
 
 Run once per node. The target registers a buffer and serves it; the initiator
 writes a known pattern into it and reads it back. The initiator fetches the

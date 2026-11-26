@@ -3,7 +3,7 @@
 
 name: AMD Bench - Container Lane
 
-# Runs the bench-container lane of .ci/bench: nixlbench from the rocm-nixlbench
+# Runs the bench-container lane of .ci/bench: nixlbench from the nixlbench-rocm
 # wheel in an ubuntu:24.04 job container with the ROCm runtime and no GPU.
 # The job starts a Redis server and, with seccomp unconfined, offers io_uring.
 # It starts no S3 server and no etcd, so the cases that need one end as
@@ -28,11 +28,11 @@ on:
         required: true
         type: string
       nixl-artifact:
-        description: Name of the artifact holding the merged rocm-nixl wheels.
+        description: Name of the artifact holding the merged nixl-rocm wheels.
         required: true
         type: string
       nixlbench-artifact:
-        description: Name of the artifact holding the merged rocm-nixlbench wheel.
+        description: Name of the artifact holding the merged nixlbench-rocm wheel.
         required: true
         type: string
       run-meta:
@@ -222,9 +222,9 @@ jobs:
         set -euo pipefail
         shopt -s nullglob
         ls -l wheelhouse
-        bench=(wheelhouse/rocm_nixlbench-*.whl)
+        bench=(wheelhouse/nixlbench_rocm-*.whl)
         if [ "${#bench[@]}" -ne 1 ]; then
-          echo "::error::expected exactly one rocm_nixlbench wheel in the artifact, found ${#bench[@]}"
+          echo "::error::expected exactly one nixlbench_rocm wheel in the artifact, found ${#bench[@]}"
           exit 1
         fi
         want=$(python3 -I -c 'import json, os; print(json.loads(os.environ["RUN_META"]).get("nixlbench_sha256") or "")')
@@ -246,7 +246,7 @@ jobs:
         fi
         python3 -m venv "$VENV"
         "$VENV/bin/python" -m pip install numpy
-        "$VENV/bin/python" -m pip install --no-index --find-links wheelhouse rocm-nixl rocm-nixlbench
+        "$VENV/bin/python" -m pip install --no-index --find-links wheelhouse nixl-rocm nixlbench-rocm
         "$VENV/bin/python" -m pip list | tee "$BENCH_DIAG/pip-list.txt"
 
     # 'nixlbench --version' must run: nothing else can if it does not. Where

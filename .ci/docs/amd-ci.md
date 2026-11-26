@@ -117,7 +117,7 @@ Neither workflow does anything before its file is on `main-amd`.
    test and the rocjitsu VM tests. The source is the branch's; the test
    scripts and the VM definitions are those of the commit the nightly itself
    runs at. For a branch that has the nixlbench wheel scripts the same call
-   can also build the `rocm-nixlbench` wheel, in steps at the end of `build`
+   can also build the `nixlbench-rocm` wheel, in steps at the end of `build`
    and in a `nixlbench wheel` job. Neither is required, and the nightly builds
    it only once the variable `AMD_NIXLBENCH_WHEEL` is `true`; see
    [amd-bench.md](amd-bench.md#the-nixlbench-wheel).
@@ -168,7 +168,7 @@ things are allowed to fail and are only reported:
 - the two-guest job, `rocjitsu-2vm`;
 - everything about the nixlbench wheel: its steps in `build`, which cannot
   fail that job, and the `nixlbench wheel` job. A branch whose nixlbench wheel
-  did not build passes as if it had none, and the `rocm-nixl` wheels are
+  did not build passes as if it had none, and the `nixl-rocm` wheels are
   published as they would have been.
 
 ### The sync pull request

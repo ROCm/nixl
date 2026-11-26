@@ -6,6 +6,7 @@ import { Link, Stack, Table, TableBody, TableCell, TableHead, TableRow, Typograp
 import { bytes, when } from '../data/format';
 import { branchHistory, branchNames } from '../data/nightly';
 import { siteUrl } from '../data/load';
+import { installCommand, projectOf } from '../data/wheels';
 import { Commit, Empty, FilterBar, Mono, Pick, ScrollTable, Section } from '../components/shared';
 
 export default function Wheels({ site, params, patch }) {
@@ -45,7 +46,7 @@ export default function Wheels({ site, params, patch }) {
           Development builds, tested against emulated devices only. A branch has a pip index only if it is published; <Link href="wheels/index.html">the wheel index page</Link> lists the ones that are.
         </Typography>
         <Mono sx={{ display: 'block', p: 1.5, border: 1, borderColor: 'divider', borderRadius: 1, overflowX: 'auto', whiteSpace: 'nowrap' }}>
-          pip install --pre --index-url {index} --extra-index-url https://pypi.org/simple rocm-nixl
+          {installCommand(index, projectOf(data.wheels[0].file))}
         </Mono>
       </Section>
 

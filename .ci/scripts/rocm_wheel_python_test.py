@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Run NIXL's Python tests and examples against an installed rocm-nixl wheel.
+"""Run NIXL's Python tests and examples against an installed nixl-rocm wheel.
 
 The Python part of upstream's .gitlab/test_python.sh, without its etcd cases.
 The tests and examples come from the source tree the wheel was built from.

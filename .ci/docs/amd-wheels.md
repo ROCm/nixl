@@ -3,9 +3,9 @@ SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All righ
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Nightly rocm-nixl wheels
+# Nightly nixl-rocm wheels
 
-The fork builds `rocm-nixl` wheels every night and publishes those of one
+The fork builds `nixl-rocm` wheels every night and publishes those of one
 branch, the wheels branch, when it passed. They are development builds for
 people who want to try a change before it is released. They are **not PyPI
 releases**: nothing in this flow uploads to PyPI, and the wheels have only been
@@ -17,7 +17,7 @@ tested against emulated devices on hosted runners, never on hardware.
 pip install --pre \
     --index-url https://rocm.github.io/nixl/wheels/for-upstream-feat-rocm-wheels/simple/ \
     --extra-index-url https://pypi.org/simple \
-    rocm-nixl
+    nixl-rocm
 ```
 
 The index path is `https://<owner>.github.io/<repo>/wheels/<slug>/simple/`.
@@ -28,14 +28,14 @@ with each `/` replaced by `-`: `for-upstream-feat-rocm-wheels` for
 All three options matter:
 
 - `--index-url` replaces PyPI rather than adding to it, and the nightly index
-  holds `rocm-nixl` only. Without `--extra-index-url https://pypi.org/simple`
-  pip cannot find `numpy`, which `rocm-nixl` depends on.
+  holds `nixl-rocm` only. Without `--extra-index-url https://pypi.org/simple`
+  pip cannot find `numpy`, which `nixl-rocm` depends on.
 - `--pre` is there because every nightly is a development release
   (`X.Y.Z.devN`), which pip ignores by default whenever a final release of the
   project is on offer.
 - pip has no index priority. It pools the candidates from both indexes and
   takes the highest version, and `X.Y.Z.devN` sorts *below* `X.Y.Z`. As soon as
-  a final `rocm-nixl X.Y.Z` is on PyPI, the command above installs that
+  a final `nixl-rocm X.Y.Z` is on PyPI, the command above installs that
   instead of the nightly, with or without `--pre`.
 
 To get one exact nightly whatever else is published, pin the version. A pin on
@@ -46,7 +46,7 @@ choosing pre-releases of the dependencies:
 pip install --no-cache-dir \
     --index-url https://<owner>.github.io/<repo>/wheels/<slug>/simple/ \
     --extra-index-url https://pypi.org/simple \
-    rocm-nixl==<version>
+    nixl-rocm==<version>
 ```
 
 The version currently published is the `version` field of

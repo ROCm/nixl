@@ -50,11 +50,11 @@ on:
         required: true
         type: string
       nixl-artifact:
-        description: Name of the artifact holding the merged rocm-nixl wheels.
+        description: Name of the artifact holding the merged nixl-rocm wheels.
         required: true
         type: string
       nixlbench-artifact:
-        description: Name of the artifact holding the merged rocm-nixlbench wheel.
+        description: Name of the artifact holding the merged nixlbench-rocm wheel.
         required: true
         type: string
       run-meta:
@@ -288,18 +288,18 @@ jobs:
         has() {
           python3 -I -c 'import sys, zipfile; sys.exit(0 if sys.argv[2] in zipfile.ZipFile(sys.argv[1]).namelist() else 1)' "$1" "$2"
         }
-        wheel=(wheelhouse/rocm_nixl-*-"${tag}"-"${tag}"-*.whl)
+        wheel=(wheelhouse/nixl_rocm-*-"${tag}"-"${tag}"-*.whl)
         if [ "${#wheel[@]}" -ne 1 ]; then
-          echo "::error::expected exactly one rocm_nixl wheel for ${tag} in the artifact, found ${#wheel[@]}"
+          echo "::error::expected exactly one nixl_rocm wheel for ${tag} in the artifact, found ${#wheel[@]}"
           exit 1
         fi
         if ! has "${wheel[0]}" "nixl_${backend}/__init__.py"; then
           echo "::error::${wheel[0]} does not contain the nixl_${backend} backend"
           exit 1
         fi
-        bench=(wheelhouse/rocm_nixlbench-*.whl)
+        bench=(wheelhouse/nixlbench_rocm-*.whl)
         if [ "${#bench[@]}" -ne 1 ]; then
-          echo "::error::expected exactly one rocm_nixlbench wheel in the artifact, found ${#bench[@]}"
+          echo "::error::expected exactly one nixlbench_rocm wheel in the artifact, found ${#bench[@]}"
           exit 1
         fi
         if ! has "${bench[0]}" "nixlbench_${backend}/__init__.py"; then
