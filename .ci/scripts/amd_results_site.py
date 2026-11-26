@@ -322,7 +322,7 @@ table { border-collapse: collapse; }
 </head>
 <body>
 <h1>NIXL on ROCm: nightly results</h1>
-<p class="muted">Each night the rocm-nixl wheels are built from the branches
+<p class="muted">Each night the nixl-rocm wheels are built from the branches
 below and tested in a clean container and in QEMU guests with an emulated GPU.
 This page shows how each branch has fared, night by night.</p>
 @@BENCH@@<p class="note">The transfer rates come from emulated devices on shared GitHub

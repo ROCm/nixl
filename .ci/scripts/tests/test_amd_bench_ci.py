@@ -37,7 +37,7 @@ REPO = SCRIPTS.parents[1]
 FIXTURES = pathlib.Path(__file__).resolve().parent / "fixtures" / "bench_ci"
 MATRIX = FIXTURES / "matrix"
 REAL_MATRIX = SCRIPTS.parent / "bench"
-WHEEL_A = "rocm-nixlbench-wheel-feat-a"
+WHEEL_A = "nixlbench-rocm-wheel-feat-a"
 VM_LANES = ["vm1-local", "vm2-net", "vm1-loop", "vm1-fabric"]
 # What the lane jobs set in each env template: amd_bench_stack.sh, and
 # nothing for the container lane.
@@ -187,7 +187,7 @@ class PlanTest(Scratch):
         element = outputs["vm"][0]
         self.assertEqual(element["suffix"], "-feat-a")
         self.assertEqual(element["branch"], "for-upstream/feat/a")
-        self.assertEqual(element["nixl-artifact"], "rocm-nixl-wheels-feat-a")
+        self.assertEqual(element["nixl-artifact"], "nixl-rocm-wheels-feat-a")
         self.assertEqual(element["nixlbench-artifact"], WHEEL_A)
         meta = json.loads(element["meta"])
         self.assertEqual(meta, {**BASE_META, "upstream_main_sha": "a" * 40})
@@ -269,7 +269,7 @@ class PlanTest(Scratch):
             "".join(
                 json.dumps({"total_count": 2, "artifacts": [entry]})
                 for entry in (
-                    {"id": 110, "name": "rocm-nixl-wheels-feat-a", "expired": False},
+                    {"id": 110, "name": "nixl-rocm-wheels-feat-a", "expired": False},
                     {"id": 111, "name": WHEEL_A, "expired": False},
                 )
             )
@@ -387,7 +387,7 @@ class PlanTest(Scratch):
             ({"sha256": "abc"}, "no usable 'sha256'"),
             ({"rocm": []}, "lists no ROCm version"),
             ({"ref": "a/../b"}, "no usable 'ref'"),
-            ({"nixl_wheels_artifact": "rocm-nixl-wheels-main"}, "another NIXL wheel"),
+            ({"nixl_wheels_artifact": "nixl-rocm-wheels-main"}, "another NIXL wheel"),
         ):
             code, outputs, out, _ = self.plan(manifests=self.manifests_with(**change))
             self.assertEqual(code, 0, change)
@@ -400,12 +400,12 @@ class PlanTest(Scratch):
     def test_a_wheel_without_its_nixl_wheels_is_not_planned(self) -> None:
         lines = (FIXTURES / "artifacts.jsonl").read_text().splitlines()
         listing = self.tmp / "artifacts.jsonl"
-        kept = [line for line in lines if '"rocm-nixl-wheels-feat-a"' not in line]
+        kept = [line for line in lines if '"nixl-rocm-wheels-feat-a"' not in line]
         listing.write_text("\n".join(kept) + "\n", encoding="utf-8")
         code, outputs, out, _ = self.plan(artifacts=listing)
         self.assertEqual(code, 0)
         self.assertEqual([e["slug"] for e in outputs["collect"]], ["feat-b"])
-        self.assertIn("the run has no artifact rocm-nixl-wheels-feat-a", out)
+        self.assertIn("the run has no artifact nixl-rocm-wheels-feat-a", out)
 
     def test_a_lone_artifact_extracted_without_its_directory(self) -> None:
         lone = self.tmp / "lone"
@@ -422,19 +422,19 @@ class PlanTest(Scratch):
         # With both wheels listed, the lone file serves only the one it names.
         code, outputs, out, _ = self.plan(manifests=lone)
         self.assertEqual([e["slug"] for e in outputs["collect"]], ["feat-a"])
-        self.assertIn("rocm-nixlbench-wheel-feat-b: its manifest was written", out)
+        self.assertIn("nixlbench-rocm-wheel-feat-b: its manifest was written", out)
 
     def test_a_dispatched_wheels_run_has_no_suffix_and_no_summary(self) -> None:
         manifests = self.tmp / "manifests" / ci.NIXLBENCH_ARTIFACT
         manifests.mkdir(parents=True)
         manifest = self.read_json(FIXTURES / "manifests" / WHEEL_A / ci.MANIFEST)
-        manifest.update(artifact_suffix="", nixl_wheels_artifact="rocm-nixl-wheels")
+        manifest.update(artifact_suffix="", nixl_wheels_artifact="nixl-rocm-wheels")
         (manifests / ci.MANIFEST).write_text(json.dumps(manifest))
         listing = self.tmp / "artifacts.jsonl"
         listing.write_text(
-            '{"id":1,"name":"rocm-nixl-wheels","expired":false}\n'
-            '{"id":2,"name":"rocm-nixlbench-wheel","expired":false}\n'
-            '{"id":3,"name":"rocm-nixlbench-backend-10.1.0","expired":false}\n'
+            '{"id":1,"name":"nixl-rocm-wheels","expired":false}\n'
+            '{"id":2,"name":"nixlbench-rocm-wheel","expired":false}\n'
+            '{"id":3,"name":"nixlbench-rocm-backend-10.1.0","expired":false}\n'
         )
         code, outputs, _, _ = self.plan(
             artifacts=listing,
@@ -447,7 +447,7 @@ class PlanTest(Scratch):
         element = outputs["vm"][0]
         self.assertEqual(element["suffix"], "")
         self.assertEqual(element["slug"], "for-upstream-feat-a")
-        self.assertEqual(element["nixlbench-artifact"], "rocm-nixlbench-wheel")
+        self.assertEqual(element["nixlbench-artifact"], "nixlbench-rocm-wheel")
         meta = json.loads(element["meta"])
         # The stamp is the time the source run was created.
         self.assertEqual(meta["stamp"], "20261119T032345Z")
@@ -476,7 +476,7 @@ class PlanTest(Scratch):
     def test_a_run_with_no_nixlbench_wheel_plans_nothing(self) -> None:
         listing = self.tmp / "artifacts.jsonl"
         listing.write_text(
-            '{"id":130,"name":"rocm-nixl-wheels-main","expired":false}\n'
+            '{"id":130,"name":"nixl-rocm-wheels-main","expired":false}\n'
         )
         code, outputs, out, _ = self.plan(
             artifacts=listing, manifests=self.tmp / "absent"

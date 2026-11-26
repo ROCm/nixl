@@ -13,18 +13,18 @@ SPDX-License-Identifier: Apache-2.0
 [![Nightly results](https://img.shields.io/badge/nightly-results-informational?style=flat-square)](https://rocm.github.io/nixl/)
 [![Last commit](https://img.shields.io/github/last-commit/ROCm/nixl/main-amd?label=last%20commit&style=flat-square)](https://github.com/ROCm/nixl/commits/main-amd)
 
-<!-- Nightly rocm-nixl wheels -->
-[![Nightly wheel version](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Frocm.github.io%2Fnixl%2Fwheels%2Ffor-upstream-feat-rocm-wheels%2Findex.json&query=%24.version&label=rocm-nixl%20nightly&color=blue&style=flat-square)](https://rocm.github.io/nixl/wheels/for-upstream-feat-rocm-wheels/simple/rocm-nixl/)
+<!-- Nightly nixl-rocm wheels -->
+[![Nightly wheel version](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Frocm.github.io%2Fnixl%2Fwheels%2Ffor-upstream-feat-rocm-wheels%2Findex.json&query=%24.version&label=nixl-rocm%20nightly&color=blue&style=flat-square)](https://rocm.github.io/nixl/wheels/for-upstream-feat-rocm-wheels/simple/nixl-rocm/)
 [![Nightly wheel date](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Frocm.github.io%2Fnixl%2Fwheels%2Ffor-upstream-feat-rocm-wheels%2Findex.json&query=%24.date&label=published&color=informational&style=flat-square)](https://github.com/ROCm/nixl/releases/tag/nightly-for-upstream-feat-rocm-wheels)
 [![Wheel index](https://img.shields.io/badge/pip%20index-wheels-blue?style=flat-square)](https://rocm.github.io/nixl/wheels/)
-[![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue?style=flat-square&logo=python&logoColor=white)](https://rocm.github.io/nixl/wheels/for-upstream-feat-rocm-wheels/simple/rocm-nixl/)
+[![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue?style=flat-square&logo=python&logoColor=white)](https://rocm.github.io/nixl/wheels/for-upstream-feat-rocm-wheels/simple/nixl-rocm/)
 [![ROCm](https://img.shields.io/badge/ROCm-7.14%20%7C%2010.1%20%7C%2010.2-ED1C24?style=flat-square)](https://rocm.docs.amd.com/)
-[![Platform](https://img.shields.io/badge/platform-manylinux__2__28%20x86__64-lightgrey?style=flat-square)](https://rocm.github.io/nixl/wheels/for-upstream-feat-rocm-wheels/simple/rocm-nixl/)
+[![Platform](https://img.shields.io/badge/platform-manylinux__2__28%20x86__64-lightgrey?style=flat-square)](https://rocm.github.io/nixl/wheels/for-upstream-feat-rocm-wheels/simple/nixl-rocm/)
 
 This repository is AMD's fork of [NIXL](https://github.com/ai-dynamo/nixl),
 the NVIDIA Inference Xfer Library. You are reading the `main-amd` branch, which
 is upstream NIXL plus the CI that AMD runs on this fork. AMD's changes to NIXL
-itself, such as the `rocm-nixl` wheel build, are not on this branch: each
+itself, such as the `nixl-rocm` wheel build, are not on this branch: each
 lives on a `for-upstream/` branch until upstream takes it.
 
 NIXL itself is described in the [project README](../README.md): what it is,
@@ -47,7 +47,7 @@ GitHub shows this file instead of the project README because it lives in
 AMD's work is kept in two places:
 
 - **Changes meant for upstream** are on `for-upstream/` branches. That is ROCm
-  support in NIXL itself, such as the `rocm-nixl` wheel build under `contrib/`
+  support in NIXL itself, such as the `nixl-rocm` wheel build under `contrib/`
   on `for-upstream/feat/rocm-wheels`. Each branch is based on `main`, so it
   holds nothing but upstream and that one change.
 - **Files that stay in the fork** are on `main-amd`, and are all that
@@ -103,7 +103,7 @@ gh workflow run rocm-wheels.yml -f ref=<branch with the change>
 
 ## Nightly tests and wheels
 
-Each night `AMD Nightly` builds the `rocm-nixl` wheels from `main` and from
+Each night `AMD Nightly` builds the `nixl-rocm` wheels from `main` and from
 every `for-upstream/` branch, tests them in a container and in the
 emulated-GPU guests, and adds the results to the site at
 `https://rocm.github.io/nixl/`. A branch that cannot build ROCm wheels yet is
@@ -123,7 +123,7 @@ only.
 pip install --pre \
     --index-url https://rocm.github.io/nixl/wheels/for-upstream-feat-rocm-wheels/simple/ \
     --extra-index-url https://pypi.org/simple \
-    rocm-nixl
+    nixl-rocm
 ```
 
 The extras `rocm7.14`, `rocm10.1` and `rocm10.2` add AMD's PyTorch for that
@@ -141,7 +141,7 @@ More detail:
 
 - [AMD CI on the ROCm fork](../.ci/docs/amd-ci.md): the nightly, the sync, the
   repository settings and the results site.
-- [Nightly rocm-nixl wheels](../.ci/docs/amd-wheels.md): installing a nightly
+- [Nightly nixl-rocm wheels](../.ci/docs/amd-wheels.md): installing a nightly
   and what the versions mean.
 - [Building the wheels](https://github.com/ROCm/nixl/blob/for-upstream/feat/rocm-wheels/contrib/README.md#build-rocm-wheels),
   on the wheels branch.

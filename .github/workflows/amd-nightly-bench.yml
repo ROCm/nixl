@@ -5,7 +5,7 @@ name: AMD Nightly Bench
 
 # Runs the nixlbench lanes of .ci/bench on the wheels a finished "AMD Nightly"
 # run left as artifacts, one set of lane jobs for each branch that built a
-# rocm-nixlbench wheel, and collects their records into one artifact per
+# nixlbench-rocm wheel, and collects their records into one artifact per
 # branch. It publishes nothing and writes to no branch or release. Started by
 # hand, it takes the run id of an "AMD Nightly" or a "ROCm Wheels" run. See
 # .ci/docs/amd-bench.md.
@@ -149,7 +149,7 @@ jobs:
       continue-on-error: true
       uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
-        pattern: rocm-nixlbench-wheel*
+        pattern: nixlbench-rocm-wheel*
         path: ${{ runner.temp }}/amd-bench/manifests
         run-id: ${{ steps.run.outputs.run-id }}
         github-token: ${{ github.token }}

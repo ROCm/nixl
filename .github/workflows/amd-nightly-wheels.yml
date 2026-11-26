@@ -157,9 +157,9 @@ jobs:
           local branch=$1 slug=$2 sha=$3 version=$4 artifact=$5
           local dir="$work/wheels/$slug" index="$work/stage/wheels/$slug/index.json"
           gh run download "$RUN_ID" --name "$artifact" --dir "$dir" || return 1
-          local wheels=("$dir"/rocm_nixl-*.whl)
+          local wheels=("$dir"/nixl_rocm-*.whl)
           if [ "${#wheels[@]}" -eq 0 ]; then
-            echo "artifact ${artifact} holds no rocm_nixl wheel"
+            echo "artifact ${artifact} holds no nixl_rocm wheel"
             return 1
           fi
           python3 .ci/scripts/amd_wheel_index.py update --site "$work/stage" \
@@ -198,9 +198,9 @@ jobs:
         upload() {
           local branch=$1 slug=$2 sha=$3 version=$4
           local tag="nightly-$slug" index="$work/stage/wheels/$slug/index.json"
-          local notes="$work/notes-$slug.md" title="rocm-nixl nightly (${branch})"
+          local notes="$work/notes-$slug.md" title="nixl-rocm nightly (${branch})"
           {
-            echo "Nightly development build of rocm-nixl from the \`${branch}\` branch. Not a PyPI release."
+            echo "Nightly development build of nixl-rocm from the \`${branch}\` branch. Not a PyPI release."
             echo
             echo "- Branch: \`${branch}\`"
             echo "- Commit: \`${sha}\`"
@@ -212,7 +212,7 @@ jobs:
             echo "The assets are replaced each night the branch passes. The tag is never moved, so the commit above, not the tag, identifies the source."
             echo
             echo '```'
-            echo "pip install --pre --index-url https://${owner}.github.io/${GITHUB_REPOSITORY#*/}/wheels/${slug}/simple/ --extra-index-url https://pypi.org/simple rocm-nixl"
+            echo "pip install --pre --index-url https://${owner}.github.io/${GITHUB_REPOSITORY#*/}/wheels/${slug}/simple/ --extra-index-url https://pypi.org/simple nixl-rocm"
             echo '```'
           } > "$notes"
 
@@ -292,7 +292,7 @@ jobs:
             python3 .ci/scripts/amd_wheel_index.py update --site "$site" \
               --branch "$slug" --ref "$branch" --sha "$sha" --date "$(cat "$work/date")" \
               --base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/nightly-${slug}" \
-              "$work/wheels/$slug"/rocm_nixl-*.whl
+              "$work/wheels/$slug"/nixl_rocm-*.whl
           done < "$work/uploaded.tsv"
           git -C "$site" add wheels
           if git -C "$site" diff --cached --quiet; then
@@ -331,7 +331,7 @@ jobs:
           jq -r '.files[].file' "$work/stage/wheels/$slug/index.json" > "$work/keep-$slug.txt"
           [ -s "$work/keep-$slug.txt" ]
           gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" --jq '.assets[].name' |
-            { grep -E '^rocm_nixl-.*\.whl$' || true; } |
+            { grep -E '^nixl_rocm-.*\.whl$' || true; } |
             { grep -vxFf "$work/keep-$slug.txt" || true; } > "$work/stale-$slug.txt"
           while read -r name; do
             echo "removing ${name} from ${tag}"

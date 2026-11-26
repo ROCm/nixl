@@ -4,6 +4,16 @@
 import { stampDate } from './format';
 import { branchesOf } from './nightly';
 
+// The project the wheels are published as. An index from before it was
+// renamed says rocm-nixl, and the install command follows the index.
+export const PROJECT = 'nixl-rocm';
+
+// "rocm_nixl-1.6.0-cp312-...whl" -> "rocm-nixl": the project a wheel file is of.
+export function projectOf(file) {
+  const m = /^([A-Za-z0-9_.]+?)-\d/.exec(String(file || ''));
+  return m ? m[1].replace(/[_.]+/g, '-').toLowerCase() : PROJECT;
+}
+
 // "cp312" -> "3.12"; "3.12" stays.
 export function pythonVersion(tag) {
   const m = /^cp(\d)(\d+)$/.exec(String(tag || ''));
@@ -25,6 +35,7 @@ export function installTarget(listing, runs) {
   if (current) {
     return {
       slug: current.slug,
+      project: current.project || PROJECT,
       branch: current.branch || current.slug,
       version: current.version || '',
       sha: current.sha || '',
@@ -38,6 +49,7 @@ export function installTarget(listing, runs) {
     if (entry) {
       return {
         slug: entry.slug,
+        project: projectOf(entry.wheels[0].file),
         branch: entry.branch,
         version: entry.version,
         sha: entry.sha,
@@ -49,6 +61,6 @@ export function installTarget(listing, runs) {
   return null;
 }
 
-export function installCommand(indexUrl) {
-  return `pip install --pre --index-url ${indexUrl} --extra-index-url https://pypi.org/simple rocm-nixl`;
+export function installCommand(indexUrl, project = PROJECT) {
+  return `pip install --pre --index-url ${indexUrl} --extra-index-url https://pypi.org/simple ${project}`;
 }

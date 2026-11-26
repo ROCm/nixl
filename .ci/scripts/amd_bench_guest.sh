@@ -670,12 +670,12 @@ cmd_install() {
   "$work/uv-bootstrap/bin/pip" install --quiet "uv==${uv_version}"
   uv="$work/uv-bootstrap/bin/uv"
   "$uv" venv --python "$py" "$venv"
-  # numpy is rocm-nixl's only unconditional dependency and the only package
+  # numpy is nixl-rocm's only unconditional dependency and the only package
   # taken from an index. The wheels are resolved with no index, so they can
   # pull nothing else in.
   "$uv" pip install --python "$venv/bin/python" numpy
   "$uv" pip install --python "$venv/bin/python" --no-index \
-    --find-links "$work/wheels" rocm-nixl rocm-nixlbench
+    --find-links "$work/wheels" nixl-rocm nixlbench-rocm
   "$uv" pip list --python "$venv/bin/python" | tee "$work/pip-list.txt"
   test -x "$venv/bin/nixlbench"
 }

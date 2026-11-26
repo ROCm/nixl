@@ -85,7 +85,7 @@ def check(
 def wheel(version: str, python: str) -> dict[str, Any]:
     tag = "cp" + python.replace(".", "")
     return {
-        "file": f"rocm_nixl-{version}-{tag}-{tag}-manylinux_2_28_x86_64.whl",
+        "file": f"nixl_rocm-{version}-{tag}-{tag}-manylinux_2_28_x86_64.whl",
         "bytes": 74_000_000 + 250_000 * int(version[-2:]) + int(python[-2:]),
         "sha256": sha(f"wheel-{version}-{python}") + sha(python)[:24],
         "python": python,
@@ -112,7 +112,7 @@ def built(night: int) -> dict[str, Any]:
             "script": "rocm_wheel_smoke_test.py",
             "checks": [
                 check("import", detail="'import nixl' selected the ROCm build"),
-                check("no-torch", detail="rocm-nixl has no torch requirement"),
+                check("no-torch", detail="nixl-rocm has no torch requirement"),
                 check("agent", duration=0.4 + night / 10),
             ],
         }
@@ -157,9 +157,9 @@ def built(night: int) -> dict[str, Any]:
             "supported": True,
             "enabled": True,
             "result": "success",
-            "artifact": f"rocm-nixlbench-wheel-{WHEELS_SLUG}",
+            "artifact": f"nixlbench-rocm-wheel-{WHEELS_SLUG}",
             "wheel": {
-                "file": f"rocm_nixlbench-{version}-py3-none-manylinux_2_28_x86_64.whl",
+                "file": f"nixlbench_rocm-{version}-py3-none-manylinux_2_28_x86_64.whl",
                 "bytes": 1_811_490,
                 "sha256": sha(f"bench-{version}") + sha("bench")[:24],
             },
@@ -204,7 +204,7 @@ def branch(
         "sha": results["sha"],
         "passed": reason is None,
         "reason": reason,
-        "wheels_artifact": f"rocm-nixl-wheels-{slug}",
+        "wheels_artifact": f"nixl-rocm-wheels-{slug}",
         "results": results,
     }
 
@@ -248,10 +248,10 @@ def publish_wheels(site: pathlib.Path, ref: str, slug: str, night: int) -> None:
                 # A fixed date: the index records the digest of the file.
                 archive.writestr(
                     zipfile.ZipInfo(
-                        f"rocm_nixl-{version}.dist-info/METADATA",
+                        f"nixl_rocm-{version}.dist-info/METADATA",
                         (2026, 11, 16, 0, 0, 0),
                     ),
-                    "Metadata-Version: 2.4\nName: rocm-nixl\n"
+                    "Metadata-Version: 2.4\nName: nixl-rocm\n"
                     f"Version: {version}\nRequires-Python: >=3.10\n",
                 )
             files.append(str(path))

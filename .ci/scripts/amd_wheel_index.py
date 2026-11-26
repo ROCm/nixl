@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Pip index for the nightly rocm-nixl wheels published as release assets.
+"""Pip index for the nightly nixl-rocm wheels published as release assets.
 
     amd_wheel_index.py select --summary nightly-summary.json --branch NAME...
     amd_wheel_index.py update --site DIR --branch SLUG --base-url URL
@@ -41,7 +41,7 @@ import urllib.parse
 import zipfile
 from typing import Any, Optional
 
-PROJECT = "rocm-nixl"
+PROJECT = "nixl-rocm"
 SLUG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")
 BRANCH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}")
 ARTIFACT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}")
@@ -190,6 +190,7 @@ def published(wheels_dir: pathlib.Path) -> list[dict[str, Any]]:
         found.append(
             {
                 "slug": index.parent.name,
+                "project": str(data.get("project") or PROJECT),
                 "branch": str(data.get("branch") or ""),
                 "version": str(data.get("version") or ""),
                 "sha": str(data.get("sha") or ""),
@@ -391,7 +392,7 @@ def select(args: argparse.Namespace) -> int:
         slug = lookup(entry, "slug") or branch
         version = lookup(entry, "version")
         sha = lookup(entry, "sha")
-        artifact = lookup(entry, "wheels_artifact") or f"rocm-nixl-wheels-{slug}"
+        artifact = lookup(entry, "wheels_artifact") or f"nixl-rocm-wheels-{slug}"
         if not is_dev_version(version):
             notice(
                 "warning", branch, f"{version!r} is not a PEP 440 development version"

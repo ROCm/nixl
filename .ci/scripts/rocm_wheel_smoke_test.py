@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Smoke test for an installed rocm-nixl wheel.
+"""Smoke test for an installed nixl-rocm wheel.
 
 The wheel carries one nixl_rocm<X>_<Y> backend per supported ROCm version;
 every check looks at the backend for --expect-rocm. Needs only the standard
@@ -258,14 +258,15 @@ def check_no_torch() -> str:
     wheels = []
     for dist in importlib.metadata.distributions():
         name = normalise(dist.metadata["Name"] or "")
-        if name != "rocm-nixl" and not name.startswith("nixl-rocm"):
+        # The merged wheel, or a nixl-rocm<X>.<Y> backend wheel.
+        if not name.startswith("nixl-rocm"):
             continue
         wheels.append(name)
         for requirement in dist.requires or []:
             if unconditional_requirement(requirement) == "torch":
                 raise CheckFailed(f"{name} depends on torch ({requirement})")
     if not wheels:
-        raise CheckFailed("no rocm-nixl distribution is installed")
+        raise CheckFailed("no nixl-rocm distribution is installed")
     if "torch" in sys.modules:
         raise CheckFailed("importing nixl imported torch")
     try:

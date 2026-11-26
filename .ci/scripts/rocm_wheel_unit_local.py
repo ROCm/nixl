@@ -421,7 +421,7 @@ class Runner:
             "needs": {
                 "plan": {
                     "outputs": {
-                        "wheels-artifact": "rocm-nixl-wheels",
+                        "wheels-artifact": "nixl-rocm-wheels",
                         "test-python": self.args.python_version,
                         "sha": source.stdout.strip(),
                     }
@@ -500,8 +500,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--wheels-dir",
         metavar="DIR",
-        help="smoke: directory holding the merged rocm_nixl wheel, such as a "
-        "downloaded rocm-nixl-wheels artifact.",
+        help="smoke: directory holding the merged nixl_rocm wheel, such as a "
+        "downloaded nixl-rocm-wheels artifact.",
     )
     p.add_argument(
         "--source-ref",

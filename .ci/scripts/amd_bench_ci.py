@@ -72,8 +72,8 @@ HARD_LANES = ("bench-container", "vm1-local")
 # The nightly runs 'nightly'; the others are started by hand.
 PLAN_TIERS = lib.TIERS
 JOB_VALUE = "@job"
-NIXL_ARTIFACT = "rocm-nixl-wheels"
-NIXLBENCH_ARTIFACT = "rocm-nixlbench-wheel"
+NIXL_ARTIFACT = "nixl-rocm-wheels"
+NIXLBENCH_ARTIFACT = "nixlbench-rocm-wheel"
 MANIFEST = "nixlbench-build.json"
 ARTIFACTS_FORMAT = (
     "one JSON object per line with 'id', 'name' and 'expired', as written by "
@@ -91,7 +91,7 @@ ROCM_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 ROCM_XY_RE = re.compile(r"[0-9]+\.[0-9]+")
 ARTIFACT_RE = re.compile(r"[A-Za-z0-9._-]+")
 REPO_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
-WHEEL_RE = re.compile(r"rocm_nixlbench-[A-Za-z0-9.+!_]+-py3-none-[A-Za-z0-9._]+\.whl")
+WHEEL_RE = re.compile(r"nixlbench_rocm-[A-Za-z0-9.+!_]+-py3-none-[A-Za-z0-9._]+\.whl")
 STAMP_RE = re.compile(r"\d{8}T\d{6}Z")
 CREATED_RE = re.compile(r"(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)(?:\.\d+)?Z")
 # No case key starts with a dash, and the runner would take such a glob for an

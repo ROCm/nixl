@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { bytes, day, seconds, stampDate, when } from './format';
 import { branchHistory, branchNames, branchesOf, gridRows, latestNight, nightStatus, overall, testKey, trendSeries } from './nightly';
 import { attentionTotal, benchBranches, laneRows, ratioRows, runHref, statusOrder } from './bench';
-import { installCommand, installTarget, pythonVersion } from './wheels';
+import { installCommand, installTarget, projectOf, pythonVersion } from './wheels';
 import { assignSlots, formatHash, parseHash } from '../state';
 
 const check = (name, status, extra = {}) => ({ name, status, detail: '', duration_s: 1, bytes: null, path: null, ...extra });
@@ -225,6 +225,15 @@ describe('the wheels to install', () => {
     expect(installTarget({ indexes: [] }, nights)).toBeNull();
   });
 
+  it('are of the project their index holds', () => {
+    const index = { slug: 'feat-wheels', current: true };
+    expect(installTarget({ indexes: [{ ...index, project: 'rocm-nixl' }] }, nights).project).toBe('rocm-nixl');
+    expect(installTarget({ indexes: [index] }, nights).project).toBe('nixl-rocm');
+    expect(projectOf('rocm_nixl-1.6.0.dev20261125-cp312-cp312-manylinux_2_28_x86_64.whl')).toBe('rocm-nixl');
+    expect(projectOf('nixl_rocm-1.6.0-cp312-cp312-manylinux_2_28_x86_64.whl')).toBe('nixl-rocm');
+    expect(projectOf('')).toBe('nixl-rocm');
+  });
+
   it('come from the last night a branch passed when nothing is listed', () => {
     expect(installTarget(null, nights)).toMatchObject({ slug: 'feat-wheels', version: '1.6.0.dev20261124', python: ['3.10'] });
     expect(installTarget(null, [nights[1]])).toBeNull();
@@ -232,8 +241,9 @@ describe('the wheels to install', () => {
 
   it('are installed from the index of their branch', () => {
     expect(installCommand('https://x.test/wheels/feat-wheels/simple/')).toBe(
-      'pip install --pre --index-url https://x.test/wheels/feat-wheels/simple/ --extra-index-url https://pypi.org/simple rocm-nixl',
+      'pip install --pre --index-url https://x.test/wheels/feat-wheels/simple/ --extra-index-url https://pypi.org/simple nixl-rocm',
     );
+    expect(installCommand('https://x.test/i/', 'rocm-nixl')).toMatch(/ rocm-nixl$/);
     expect(pythonVersion('cp312')).toBe('3.12');
     expect(pythonVersion('3.12')).toBe('3.12');
   });
