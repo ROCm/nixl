@@ -178,7 +178,7 @@ def project_page(files: list[dict[str, Any]]) -> str:
 
 def published(wheels_dir: pathlib.Path) -> list[dict[str, Any]]:
     """The index of each branch under wheels/, the one updated nightly first."""
-    found = []
+    found: list[dict[str, Any]] = []
     for index in sorted(wheels_dir.glob("*/index.json")):
         try:
             data = json.loads(index.read_text(encoding="utf-8"))
