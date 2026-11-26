@@ -18,11 +18,11 @@ DOCKER_BUILDKIT=1 docker build -f .ci/dockerfiles/Dockerfile.rocm \
     -t nixl-rocm .
 ```
 
-The default base is ROCm 7.14. ROCm 10.1 is selected through build args only.
-The torch layer installs `torch==${TORCH_VERSION}+rocm<X.Y.Z>`, where `X.Y.Z` is
-read from the base image (`/opt/rocm/core/.info/version`), so `TORCH_VERSION`
-and `TORCH_INDEX_URL` must name a torch that AMD publishes for that ROCm
-release. ROCm 10 wheels are not on the default index:
+The default base is ROCm 7.14. ROCm 10.1 and 10.2 are selected through build
+args only. The torch layer installs `torch==${TORCH_VERSION}+rocm<X.Y.Z>`, where
+`X.Y.Z` is read from the base image (`/opt/rocm/core/.info/version`), so
+`TORCH_VERSION` and `TORCH_INDEX_URL` must name a torch that AMD publishes for
+that ROCm release. ROCm 10 wheels are not on the default index:
 
 ```bash
 DOCKER_BUILDKIT=1 docker build -f .ci/dockerfiles/Dockerfile.rocm \
@@ -32,11 +32,24 @@ DOCKER_BUILDKIT=1 docker build -f .ci/dockerfiles/Dockerfile.rocm \
     -t nixl-rocm:10.1 .
 ```
 
-| Build arg | Default (ROCm 7.14) | ROCm 10.1 |
-| --- | --- | --- |
-| `ROCM_BASE_IMAGE` | `rocm/dev-ubuntu-24.04:7.14.0-full` | `rocm/dev-ubuntu-24.04:10.1.0-full` |
-| `TORCH_VERSION` | `2.11.0` | `2.14.0` |
-| `TORCH_INDEX_URL` | `https://repo.amd.com/rocm/whl-multi-arch/` | `https://stable.repo.amd.com/rocm/whl-next/` |
+ROCm 10.2 uses the same index with a newer torch:
+
+```bash
+DOCKER_BUILDKIT=1 docker build -f .ci/dockerfiles/Dockerfile.rocm \
+    --build-arg ROCM_BASE_IMAGE=rocm/dev-ubuntu-24.04:10.2.0-full \
+    --build-arg TORCH_VERSION=2.15.0 \
+    --build-arg TORCH_INDEX_URL=https://stable.repo.amd.com/rocm/whl-next/ \
+    -t nixl-rocm:10.2 .
+```
+
+AMD publishes torch for ROCm 10.2 for Python 3.11 and later only, so use an
+Ubuntu 24.04 base; Ubuntu 22.04 ships Python 3.10.
+
+| Build arg | Default (ROCm 7.14) | ROCm 10.1 | ROCm 10.2 |
+| --- | --- | --- | --- |
+| `ROCM_BASE_IMAGE` | `rocm/dev-ubuntu-24.04:7.14.0-full` | `rocm/dev-ubuntu-24.04:10.1.0-full` | `rocm/dev-ubuntu-24.04:10.2.0-full` |
+| `TORCH_VERSION` | `2.11.0` | `2.14.0` | `2.15.0` |
+| `TORCH_INDEX_URL` | `https://repo.amd.com/rocm/whl-multi-arch/` | `https://stable.repo.amd.com/rocm/whl-next/` | `https://stable.repo.amd.com/rocm/whl-next/` |
 
 The image is x86_64 only.
 
