@@ -160,6 +160,17 @@ RUN apt-get -qq update && \
     apt-mark hold liburing2 liburing-dev && \
     rm -rf /var/lib/apt/lists/*
 
+# Trusts the root CA of a TLS-intercepting proxy, passed as the "proxy_ca" build
+# secret; a no-op without it. Must follow the ca-certificates install and precede
+# the HTTPS fetches below. Secrets are not part of the layer cache key; the
+# checksum argument is.
+ARG PROXY_CA_SHA256=""
+RUN --mount=type=secret,id=proxy_ca,required=false \
+    if [ -s /run/secrets/proxy_ca ]; then \
+        install -m 0644 /run/secrets/proxy_ca /usr/local/share/ca-certificates/proxy-root-ca.crt && \
+        update-ca-certificates; \
+    fi
+
 # Ubuntu 22.04: upgrade pip for --break-system-packages support. From build.sh
 RUN if grep -q "Ubuntu 22.04" /etc/os-release 2>/dev/null; then \
         pip3 install --upgrade pip; \
@@ -191,7 +202,9 @@ RUN pip3 --no-cache-dir install --break-system-packages \
 
 # torch from the public ROCm wheel repo.
 # The wheel's local-version tag (+rocmX.Y.Z) is version-embedded, so we derive X.Y.Z from
-# the base image's ROCm install (/opt/rocm/core/.info/version, format "X.Y.Z-<build>").
+# the base image's ROCm install (/opt/rocm/core/.info/version, "X.Y.Z" with an optional
+# "-<build>" suffix). TORCH_VERSION/TORCH_INDEX_URL must name a torch that exists for
+# that ROCm version (docs/rocm-ci.md has the ROCm 10.1 values).
 ARG TORCH_VERSION=2.11.0
 ARG TORCH_INDEX_URL=https://repo.amd.com/rocm/whl-multi-arch/
 RUN set -eux; \
@@ -346,11 +359,15 @@ RUN set -eux; \
 # ============================================================================
 # libfabric-build  (independent, parallel with the abseil chain)
 # Release tarball, not a clone. Installs to ${NIXL_INSTALL_DIR}.
+# ROCr (FI_HMEM_ROCR): libhsa-runtime64.so is dlopen'ed at runtime, not linked.
 # ============================================================================
 FROM ${BUILDER_BASE_IMAGE} AS libfabric-build
 ARG NIXL_INSTALL_DIR=/opt/nixl
 ARG LIBFABRIC_VERSION=v1.21.0
 RUN set -eux; \
+    : "${ROCM_PATH:?ROCM_PATH is empty; the ROCm base image must set it (e.g. /opt/rocm)}"; \
+    rocr_prefix="${ROCM_PATH}/core"; \
+    [ -f "${rocr_prefix}/include/hsa/hsa.h" ] || { echo "ERROR: ${rocr_prefix}/include/hsa/hsa.h not found; cannot build libfabric with ROCr" >&2; exit 1; }; \
     NPROC=$(nproc); \
     cd /tmp; \
     ver="${LIBFABRIC_VERSION#v}"; \
@@ -365,7 +382,9 @@ RUN set -eux; \
         --disable-opx \
         --disable-usnic \
         --disable-rstream \
-        --enable-efa; \
+        --enable-efa \
+        --with-rocr="${rocr_prefix}" \
+        --enable-rocr-dlopen; \
     make -j"$NPROC"; \
     make install DESTDIR=/out
 
@@ -479,6 +498,7 @@ FROM ${BUILDER_BASE_IMAGE} AS ucx-build
 ARG NIXL_INSTALL_DIR=/opt/nixl
 ARG UCX_VERSION=v1.24.x
 RUN set -eux; \
+    : "${ROCM_PATH:?ROCM_PATH is empty; the ROCm base image must set it (e.g. /opt/rocm)}"; \
     NPROC=$(nproc); \
     UCX_INSTALL_DIR="${NIXL_INSTALL_DIR}"; \
     cd /tmp; \
@@ -499,7 +519,8 @@ RUN set -eux; \
         --with-dm \
         --without-gdrcopy; \
     make -j"$NPROC"; \
-    make -j install-strip DESTDIR=/out
+    make -j install-strip DESTDIR=/out; \
+    ls "/out${UCX_INSTALL_DIR}"/lib/ucx/*rocm*.so* >/dev/null 2>&1 || { echo "ERROR: UCX was built without its ROCm module (no *rocm* under /out${UCX_INSTALL_DIR}/lib/ucx)" >&2; exit 1; }
 
 # ============================================================================
 # toolchain-build  (I/O-bound: installers to $HOME; run as root, copy tree in final)
@@ -602,7 +623,8 @@ RUN chown -R "${_UID}":"${_GID}" ${NIXL_INSTALL_DIR} && ldconfig
 ENV INSTALL_DIR=${NIXL_INSTALL_DIR}
 ENV LIBFABRIC_INSTALL_DIR=${NIXL_INSTALL_DIR}
 ENV UCX_INSTALL_DIR=${NIXL_INSTALL_DIR}
-ENV LD_LIBRARY_PATH="${NIXL_INSTALL_DIR}/lib:${NIXL_INSTALL_DIR}/lib/${ARCH}-linux-gnu:${NIXL_INSTALL_DIR}/lib64:/usr/local/lib:/usr/local/lib/${ARCH}-linux-gnu"
+# libfabric dlopen()s libhsa-runtime64.so from the ROCm lib directory for FI_HMEM_ROCR.
+ENV LD_LIBRARY_PATH="${NIXL_INSTALL_DIR}/lib:${NIXL_INSTALL_DIR}/lib/${ARCH}-linux-gnu:${NIXL_INSTALL_DIR}/lib64:/usr/local/lib:/usr/local/lib/${ARCH}-linux-gnu:${ROCM_PATH:-/opt/rocm}/core/lib"
 ENV CPATH="${NIXL_INSTALL_DIR}/include:/usr/local/include"
 ENV PATH="${NIXL_INSTALL_DIR}/bin:${_HOME}/.local/bin:${_HOME}/.cargo/bin:/usr/local/bin:${PATH}"
 ENV PKG_CONFIG_PATH="${NIXL_INSTALL_DIR}/lib/pkgconfig:${NIXL_INSTALL_DIR}/lib64/pkgconfig:/usr/local/lib/pkgconfig"
