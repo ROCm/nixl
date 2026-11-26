@@ -22,7 +22,7 @@ probe workflow, is in [amd-bench.md](amd-bench.md).
 | `main-amd` | Upstream `main` plus the fork's CI: the workflows, the test scripts and these documents. No change to NIXL itself. The default branch. | Pull requests only. Nothing pushes to it, neither a person nor a workflow. |
 | `for-upstream/<name>` | A change to NIXL itself, based on `main`, until upstream takes it. | Whoever prepares the change for upstream. |
 | `amd-sync/upstream-main` | The head of the pull request that brings new upstream commits into `main-amd`. | The nightly, and a maintainer who has a conflict to resolve. |
-| `gh-pages` | The results site, the pip index of the nightly wheels, and the bench data and pages. | Three writers, one commit per run: the nightly, the wheel publisher and the bench publisher. |
+| `gh-pages` | The results site, the pip index of the nightly wheels, and the bench data and pages. | Four writers, one commit per run: the nightly, the wheel publisher, the bench publisher and the site publisher. |
 | `gh-pages-staging` | A copy of `gh-pages` on which the bench publisher rehearses its push. Not served, and a history of its own. | `AMD Bench Publish` started by hand with `target-branch=gh-pages-staging`. A maintainer deletes it to start over. |
 
 `main-amd` is the default branch because GitHub reads scheduled workflows,
@@ -362,9 +362,27 @@ nightly's report job writes the results part, with
   `<stamp>` is the UTC start of the run, as `YYYYMMDDTHHMMSSZ`.
 - `data/nightly/index.json` lists the nights, newest first, with each branch's
   result, version and commit.
-- `index.html` shows, per branch, a grid of every check by night (pass, fail,
+- `classic.html` shows, per branch, a grid of every check by night (pass, fail,
   skip, not run) and the trends: build and test durations, wheel sizes, and
-  transfer rates with the transport or storage path each one used.
+  transfer rates with the transport or storage path each one used. It is one
+  long page that works without a build step, and without JavaScript still
+  lists the runs. Until the app below is first published it is `index.html`.
+
+`AMD Results Site` ([`amd-site.yml`](../../.github/workflows/amd-site.yml))
+writes the root page, an app built from [`.ci/site`](../site/README.md):
+
+- `index.html` and `assets/` are the app. It opens on a summary of the latest
+  night and of the bench runs, and the rest is reached by choosing: a branch
+  and a night for its jobs, tests and checks; a metric, a branch and series
+  for a trend; a branch and a lane for the bench cases and ratios. A choice is
+  kept in the address, so it can be linked to.
+- `site.json` names the commit the app was built from. Its presence is what
+  moves the page of `amd_results_site.py` from `index.html` to `classic.html`.
+
+The app holds no data. In the browser it reads `data/nightly/` and
+`data/bench/v1/latest.json` and `manifest.json`, so a new night or bench run
+shows without a rebuild, and the workflow runs only when `.ci/site` changes on
+the default branch.
 
 `AMD Bench Publish` writes the bench part, with
 [`amd_bench_publish.py`](../scripts/amd_bench_publish.py):
@@ -376,18 +394,22 @@ nightly's report job writes the results part, with
   `latest.json`, the matrix of each run and one directory of gzip NDJSON
   files per branch of each bench run.
 
-The root page links to `bench/index.html` once a bench run is published; the
-link appears with the next nightly, which is what renders the root page. The
+The classic page links to `bench/index.html` once a bench run is published;
+the link appears with the next nightly, which is what renders that page. The
 layout is a contract and is described in
 [amd-bench.md](amd-bench.md#the-layout-on-gh-pages).
 
-Three jobs push to `gh-pages`, never forced: the nightly's report, the wheel
-publisher and the bench publisher. Each stages its own paths only: the root
-page and `data/nightly/`, `wheels/`, and `bench/` with `data/bench/v1/`. The
+Four jobs push to `gh-pages`, never forced: the nightly's report, the wheel
+publisher, the bench publisher and the site publisher. Each stages its own
+paths only: the classic page and `data/nightly/`; `wheels/`; `bench/` with
+`data/bench/v1/`; and `index.html`, `assets/` and `site.json` (the site
+publisher also renders the classic page, so that it is there before the next
+nightly, and removes nothing outside `assets/`). The
 first two share the job group `gh-pages`, which runs one job and lets one
 more wait; the bench publisher has a group of its own, `gh-pages-bench`, so
-that it can never take that waiting place from the wheel publisher; a dry run
-of it writes nowhere and is in no group. The groups only keep jobs from piling
+that it can never take that waiting place from the wheel publisher, and so
+has the site publisher, `gh-pages-site`; a dry run of the bench publisher
+writes nowhere and is in no group. The groups only keep jobs from piling
 up. What keeps the branch consistent is the push:
 a writer whose push is refused because another got there first starts again
 from a fresh shallow clone after a random pause of 5 to 24 seconds. After five

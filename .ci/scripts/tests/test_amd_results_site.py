@@ -116,9 +116,23 @@ class RootPage(unittest.TestCase):
             check=False,
         )
         self.assertEqual((done.returncode, done.stderr), (0, ""))
+        self.assertEqual(done.stdout, "index.html\n")
         page = (self.site / "index.html").read_text(encoding="utf-8")
         self.assertEqual(page.count(site.BENCH_LINK), 1)
         self.assertFalse((self.site / "index.html.tmp").exists())
+
+    def test_with_the_app_published_the_page_moves_to_classic(self) -> None:
+        plain = self.page()
+        app = "<!doctype html><div id=root></div>\n"
+        (self.site / "index.html").write_text(app, encoding="utf-8")
+        (self.site / site.APP_MARKER).write_text("{}\n", encoding="utf-8")
+        self.assertEqual(site.render(self.site), "classic.html")
+        self.assertEqual((self.site / "index.html").read_text(encoding="utf-8"), app)
+        self.assertEqual(
+            (self.site / "classic.html").read_text(encoding="utf-8"), plain
+        )
+        (self.site / site.APP_MARKER).unlink()
+        self.assertEqual(site.render(self.site), "index.html")
 
 
 if __name__ == "__main__":

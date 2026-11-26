@@ -459,8 +459,9 @@ jobs:
             fi
             if [ ! -f "$site/.nojekyll" ]; then : > "$site/.nojekyll"; fi
             python3 -I "$tool" add --site "$site" --summary "$summary"
-            python3 -I "$tool" render --site "$site"
-            git -C "$site" add .nojekyll index.html data/nightly
+            # index.html, or classic.html once the app of .ci/site holds the root.
+            page=$(python3 -I "$tool" render --site "$site")
+            git -C "$site" add .nojekyll "$page" data/nightly
             deleted=$(git -C "$site" diff --cached --name-only --diff-filter=D)
             if [ -n "$deleted" ]; then
               echo "::error::publishing would delete files from gh-pages; nothing was pushed"

@@ -9,8 +9,10 @@
 'add' copies the summary to DIR/data/nightly/<stamp>/summary.json and rebuilds
 DIR/data/nightly/index.json from the stamp directories on disk, newest first.
 It never removes anything; adding the same stamp again replaces that summary.
-'render' writes DIR/index.html, which lists the runs as plain HTML and, in a
-browser, loads index.json and the summaries to draw the history and trends.
+'render' writes one page, which lists the runs as plain HTML and, in a
+browser, loads index.json and the summaries to draw the history and trends,
+and prints its name: DIR/index.html, or DIR/classic.html once the app of
+.ci/site is published (DIR/site.json is there) and holds index.html itself.
 Every URL in the page is relative, so the site works from any sub-path.
 
 The summary is {"schema": 1, "run_id", "stamp": "YYYYMMDDTHHMMSSZ",
@@ -37,6 +39,9 @@ from typing import Any, Optional
 
 STAMP_RE = re.compile(r"\d{8}T\d{6}Z")
 NIGHTLY = pathlib.PurePath("data", "nightly")
+# Written by the "AMD Results Site" workflow next to the app it publishes. With
+# it there the app owns index.html, and this page moves aside to classic.html.
+APP_MARKER = "site.json"
 # Written only once the bench publisher has put its landing page on the site,
 # so that the page never links to a file that is not there.
 BENCH_LINK = (
@@ -199,11 +204,18 @@ def run_rows(runs: list[dict[str, Any]]) -> str:
     return "\n".join(rows)
 
 
-def render(site: pathlib.Path) -> None:
+def page_name(site: pathlib.Path) -> str:
+    """Where the page goes: the root, until the app of .ci/site holds it."""
+    return "classic.html" if (site / APP_MARKER).is_file() else "index.html"
+
+
+def render(site: pathlib.Path) -> str:
     site.mkdir(parents=True, exist_ok=True)
     bench = BENCH_LINK if (site / "bench" / "index.html").is_file() else ""
     page = PAGE.replace("@@BENCH@@", bench).replace("@@RUNS@@", run_rows(scan(site)))
-    write_text(site / "index.html", page)
+    name = page_name(site)
+    write_text(site / name, page)
+    return name
 
 
 def main() -> int:
@@ -220,7 +232,7 @@ def main() -> int:
             stamp = add(args.site, args.summary)
             sys.stdout.write(f"{NIGHTLY / stamp / 'summary.json'}\n")
         else:
-            render(args.site)
+            sys.stdout.write(f"{render(args.site)}\n")
     except (SiteError, OSError) as exc:
         warn(str(exc))
         return 1
