@@ -2,6 +2,61 @@
  "schema": 1,
  "runs": [
   {
+   "stamp": "20261126T033000Z",
+   "run_id": 45749225675,
+   "upstream_main_sha": "6fe13993a9d19d01c06f7188d17525a076e0f028",
+   "branches": [
+    {
+     "branch": "main",
+     "slug": "main",
+     "passed": false,
+     "supported": false,
+     "version": "1.6.0",
+     "sha": "c7439951f0c7a7d0e7cef7966405fd8893a22c57"
+    },
+    {
+     "branch": "for-upstream/ci/rocm-image",
+     "slug": "for-upstream-ci-rocm-image",
+     "passed": false,
+     "supported": false,
+     "version": "1.6.0",
+     "sha": "2368dfac7caa8f3390de776c2db918d5c0940508"
+    },
+    {
+     "branch": "for-upstream/feat/rocm-python-backends",
+     "slug": "for-upstream-feat-rocm-python-backends",
+     "passed": false,
+     "supported": false,
+     "version": "1.6.0",
+     "sha": "0b395c4c449a50337a6108fa3b5aacd2b00d0f05"
+    },
+    {
+     "branch": "for-upstream/feat/rocm-wheels",
+     "slug": "for-upstream-feat-rocm-wheels",
+     "passed": false,
+     "supported": true,
+     "version": "1.6.0.dev20261126",
+     "sha": "348d4ca14da8683c7dcc06d89594a5036f692b37"
+    },
+    {
+     "branch": "for-upstream/fix/nixlbench-consistency-detail",
+     "slug": "for-upstream-fix-nixlbench-consistency-detail",
+     "passed": false,
+     "supported": false,
+     "version": "1.6.0",
+     "sha": "76c4c9ca8a03cd29b52b02a5dcde1d8470fab84f"
+    },
+    {
+     "branch": "for-upstream/fix/nixlbench-vram-fill",
+     "slug": "for-upstream-fix-nixlbench-vram-fill",
+     "passed": false,
+     "supported": false,
+     "version": "1.6.0",
+     "sha": "4c07f036fbb8dc4564842aa8697db6b5c08bc2c6"
+    }
+   ]
+  },
+  {
    "stamp": "20261125T033057Z",
    "run_id": 45540439013,
    "upstream_main_sha": "e6843479d16fc4aba7aae34982300afa5752d5df",
