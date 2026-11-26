@@ -11,7 +11,8 @@ reads it:
 
   data/nightly/, classic.html  amd_results_site.py, from the nights below
   data/bench/v1/, bench/       amd_bench_publish.py, from the bench fixture
-  site.json, wheels/           placeholders for what the other writers own
+  wheels/                      amd_wheel_index.py, from wheel files made here
+  site.json                    a placeholder for what the site job writes
 
 The nights are made here, in the shape the report job of amd-nightly.yml gives
 nightly-summary.json. That job assembles the summary inline, so its shape is
@@ -30,6 +31,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import zipfile
 from typing import Any, Optional
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -234,6 +236,53 @@ def summary(night: int) -> dict[str, Any]:
     }
 
 
+def publish_wheels(site: pathlib.Path, ref: str, slug: str, night: int) -> None:
+    """The pip index of a branch, written by amd_wheel_index.py from wheel files."""
+    results = built(night)
+    version = results["version"]
+    with tempfile.TemporaryDirectory(prefix="amd-site-fixture-") as scratch:
+        files = []
+        for entry in results["wheels"]:
+            path = pathlib.Path(scratch) / entry["file"]
+            with zipfile.ZipFile(path, "w") as archive:
+                # A fixed date: the index records the digest of the file.
+                archive.writestr(
+                    zipfile.ZipInfo(
+                        f"rocm_nixl-{version}.dist-info/METADATA",
+                        (2026, 11, 16, 0, 0, 0),
+                    ),
+                    "Metadata-Version: 2.4\nName: rocm-nixl\n"
+                    f"Version: {version}\nRequires-Python: >=3.10\n",
+                )
+            files.append(str(path))
+        done = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                str(HERE / "amd_wheel_index.py"),
+                "update",
+                "--site",
+                str(site),
+                "--branch",
+                slug,
+                "--ref",
+                ref,
+                "--sha",
+                results["sha"],
+                "--date",
+                f"2026-11-{16 + night:02d}T04:12:40Z",
+                "--base-url",
+                f"https://github.com/{REPOSITORY}/releases/download/nightly-{slug}",
+                *files,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    if done.returncode != 0:
+        raise FixtureError(f"amd_wheel_index.py update failed:\n{done.stderr}")
+
+
 def build(site: pathlib.Path) -> None:
     site.mkdir(parents=True, exist_ok=True)
     if any(site.iterdir()):
@@ -264,10 +313,9 @@ def build(site: pathlib.Path) -> None:
         raise FixtureError(f"amd_bench_publish.py publish failed:\n{done.stderr}")
     (site / ".nojekyll").write_text("")
     (site / results_site.APP_MARKER).write_text('{"schema": 1, "source_sha": ""}\n')
-    (site / "wheels").mkdir()
-    (site / "wheels" / "index.html").write_text(
-        "<!DOCTYPE html>\n<title>rocm-nixl nightly wheels</title>\n"
-    )
+    # The branch that used to be published first: its index stays, older.
+    publish_wheels(site, RETIRED_BRANCH, RETIRED_BRANCH, 0)
+    publish_wheels(site, WHEELS_BRANCH, WHEELS_SLUG, NIGHTS - 1)
     name = results_site.render(site)
     if name != "classic.html":
         raise FixtureError(f"the page was rendered as {name}, not classic.html")

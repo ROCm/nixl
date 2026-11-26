@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { bytes, day, seconds, stampDate, when } from './format';
 import { branchHistory, branchNames, branchesOf, gridRows, latestNight, nightStatus, overall, testKey, trendSeries } from './nightly';
 import { attentionTotal, benchBranches, laneRows, ratioRows, runHref, statusOrder } from './bench';
+import { installCommand, installTarget, pythonVersion } from './wheels';
 import { assignSlots, formatHash, parseHash } from '../state';
 
 const check = (name, status, extra = {}) => ({ name, status, detail: '', duration_s: 1, bytes: null, path: null, ...extra });
@@ -198,5 +199,42 @@ describe('state', () => {
     expect(second).toEqual({ a: 0, c: 2, d: 1 });
     const many = assignSlots({}, 'abcdefghij'.split(''));
     expect(Object.keys(many)).toHaveLength(8);
+  });
+});
+
+describe('the wheels to install', () => {
+  const night = (stamp, passed) => ({
+    stamp,
+    summary: { branches: [{ branch: 'feat/wheels', slug: 'feat-wheels', sha: 'abc', passed, results: built(`1.6.0.dev${stamp.slice(0, 8)}`, []) }] },
+  });
+  const nights = [night('20261124T033000Z', true), night('20261125T033000Z', false)];
+
+  it('are those of the branch the publisher marks current', () => {
+    const listing = {
+      indexes: [
+        { slug: 'old', current: false, version: '1.5.0.dev1' },
+        { slug: 'feat-wheels', branch: 'feat/wheels', current: true, version: '1.6.0.dev20261124', sha: 'abc', date: '2026-11-24T04:12:40Z', python: ['cp310', 'cp39', 'cp314'] },
+      ],
+    };
+    const target = installTarget(listing, nights);
+    expect(target).toMatchObject({ slug: 'feat-wheels', branch: 'feat/wheels', version: '1.6.0.dev20261124', python: ['3.9', '3.10', '3.14'] });
+    expect(target.built.toISOString()).toBe('2026-11-24T04:12:40.000Z');
+  });
+
+  it('are none when the publisher lists no current branch', () => {
+    expect(installTarget({ indexes: [] }, nights)).toBeNull();
+  });
+
+  it('come from the last night a branch passed when nothing is listed', () => {
+    expect(installTarget(null, nights)).toMatchObject({ slug: 'feat-wheels', version: '1.6.0.dev20261124', python: ['3.10'] });
+    expect(installTarget(null, [nights[1]])).toBeNull();
+  });
+
+  it('are installed from the index of their branch', () => {
+    expect(installCommand('https://x.test/wheels/feat-wheels/simple/')).toBe(
+      'pip install --pre --index-url https://x.test/wheels/feat-wheels/simple/ --extra-index-url https://pypi.org/simple rocm-nixl',
+    );
+    expect(pythonVersion('cp312')).toBe('3.12');
+    expect(pythonVersion('3.12')).toBe('3.12');
   });
 });

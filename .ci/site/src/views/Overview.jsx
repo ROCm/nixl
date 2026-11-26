@@ -5,6 +5,8 @@ import { Link, Stack, Table, TableBody, TableCell, TableHead, TableRow, Typograp
 import { ago, stampDate, when } from '../data/format';
 import { branchHistory, branchNames, checkStatus, countBy, jobStatus, latestNight, nightDetail, nightStatus, overall } from '../data/nightly';
 import { attentionTotal, benchBranches } from '../data/bench';
+import { installTarget } from '../data/wheels';
+import InstallWheels from '../components/InstallWheels';
 import StatusGrid, { Legend } from '../components/StatusGrid';
 import { Commit, Empty, Mono, ScrollTable, Section, StatTile, StatusMark, Tiles } from '../components/shared';
 
@@ -25,6 +27,7 @@ export default function Overview({ site, go }) {
   const buildable = latest.counts.pass + latest.counts.fail;
   const attention = bench ? attentionTotal(bench.latest) : null;
   const benchRuns = bench ? benchBranches(bench.latest) : [];
+  const install = installTarget(site.wheels, runs);
 
   return (
     <Stack sx={{ gap: 2 }}>
@@ -62,6 +65,8 @@ export default function Overview({ site, go }) {
           sub={latest.sync ? `sync: ${latest.sync}` : ''}
         />
       </Tiles>
+
+      {install && <InstallWheels target={install} repository={latest.repository} go={go} />}
 
       <Section title={`Branches on ${when(latest.stamp)}`}>
         <ScrollTable>
