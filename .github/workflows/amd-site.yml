@@ -1,0 +1,174 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: AMD Results Site
+
+# Builds the results site of .ci/site (React), and on the default branch
+# publishes it to the root of gh-pages. The site holds no data: in the browser
+# it reads the JSON the nightly, wheel and bench publishers put on gh-pages, so
+# a new night needs no rebuild. See .ci/docs/amd-ci.md, "The results site".
+
+on:
+  pull_request:
+    paths:
+      - .ci/site/**
+      - .github/workflows/amd-site.yml
+  push:
+    branches:
+      - main-amd
+    paths:
+      - .ci/site/**
+      - .github/workflows/amd-site.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: amd-site-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: Lint, test and build
+    if: github.repository != 'ai-dynamo/nixl'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: .ci/site
+    steps:
+      - name: Check out code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          sparse-checkout: .ci/site
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: .ci/site/package-lock.json
+
+      - name: Install the locked dependencies
+        run: npm ci --no-fund --no-audit
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Run the unit tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Upload the site
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: amd-results-site
+          path: .ci/site/dist
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish to gh-pages
+    needs: build
+    if: >-
+      github.event_name != 'pull_request' &&
+      github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    # A group of its own: "gh-pages" holds one running and one waiting job, and
+    # a third would cancel the one waiting. It is not what keeps gh-pages
+    # consistent: the push below is never forced, so a writer that lost the
+    # race is refused and starts again.
+    concurrency:
+      group: gh-pages-site
+      cancel-in-progress: false
+    steps:
+      - name: Checkout the CI scripts
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          sparse-checkout: .ci/scripts
+          persist-credentials: false
+
+      - name: Download the site
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: amd-results-site
+          path: dist
+
+      # A commit on top of gh-pages, never a forced push. This job owns
+      # index.html, assets/ and site.json, and with site.json there the page
+      # of amd_results_site.py is classic.html, rendered here so that it is in
+      # place before the next nightly. Nothing outside assets/ is ever removed.
+      - name: Publish to gh-pages
+        env:
+          PAGES_TOKEN: ${{ github.token }}
+          SITE_URL: https://github.com/${{ github.repository }}.git
+        run: |
+          set -euo pipefail
+          header=$(printf 'x-access-token:%s' "$PAGES_TOKEN" | base64 -w0)
+          echo "::add-mask::${header}"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0="http.${SITE_URL}.extraheader"
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${header}"
+          export GIT_TERMINAL_PROMPT=0
+          export GIT_AUTHOR_NAME="github-actions[bot]"
+          export GIT_AUTHOR_EMAIL="41898282+github-actions[bot]@users.noreply.github.com"
+          export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+          export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+          tool="${GITHUB_WORKSPACE}/.ci/scripts/amd_results_site.py"
+          dist="${GITHUB_WORKSPACE}/dist"
+
+          if [ ! -f "$dist/index.html" ] || [ ! -d "$dist/assets" ]; then
+            echo "::error::the built site has no index.html or no assets/; nothing was pushed"
+            exit 1
+          fi
+          if ! git ls-remote --exit-code --heads "$SITE_URL" gh-pages > /dev/null; then
+            echo "::error::this repository has no gh-pages branch; the nightly creates it"
+            exit 1
+          fi
+
+          attempts=5
+          for attempt in $(seq "$attempts"); do
+            site="${RUNNER_TEMP}/site-${attempt}"
+            git clone -q --depth 1 --branch gh-pages --single-branch "$SITE_URL" "$site"
+            # The asset names carry a hash of their content, so the ones of
+            # the previous build are replaced, not added to.
+            rm -rf "$site/assets"
+            cp -R "$dist/assets" "$site/assets"
+            cp "$dist/index.html" "$site/index.html"
+            printf '{"schema": 1, "source_sha": "%s"}\n' "$GITHUB_SHA" > "$site/site.json"
+            if [ ! -f "$site/.nojekyll" ]; then : > "$site/.nojekyll"; fi
+            page=$(python3 -I "$tool" render --site "$site")
+            if [ "$page" != classic.html ]; then
+              echo "::error::amd_results_site.py rendered ${page}, not classic.html; nothing was pushed"
+              exit 1
+            fi
+            git -C "$site" add -A -- .nojekyll index.html site.json classic.html assets
+            deleted=$(git -C "$site" diff --cached --name-only --diff-filter=D | grep -v '^assets/' || true)
+            if [ -n "$deleted" ]; then
+              echo "::error::publishing would delete files outside assets/ from gh-pages; nothing was pushed"
+              echo "$deleted"
+              exit 1
+            fi
+            if git -C "$site" diff --cached --quiet; then
+              echo "gh-pages already holds this build"
+              break
+            fi
+            git -C "$site" commit -q -m "site: publish ${GITHUB_SHA::12}"
+            if git -C "$site" push -q origin HEAD:refs/heads/gh-pages; then
+              break
+            fi
+            if [ "$attempt" -eq "$attempts" ]; then
+              echo "::error::the push to gh-pages was refused on each of ${attempts} attempts; nothing was published"
+              exit 1
+            fi
+            delay=$((5 + RANDOM % 20))
+            echo "::warning::gh-pages refused the push (attempt ${attempt} of ${attempts}); trying again in ${delay}s"
+            sleep "$delay"
+          done
