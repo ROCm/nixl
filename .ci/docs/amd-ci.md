@@ -411,7 +411,9 @@ layout is a contract and is described in
 
 Four jobs push to `gh-pages`, never forced: the nightly's report, the wheel
 publisher, the bench publisher and the site publisher. Each stages its own
-paths only: the classic page and `data/nightly/`; `wheels/`; `bench/` with
+paths only: the classic page and `data/nightly/`; `wheels/` (with
+`wheels/index.json`, the list of pip indexes the app's overview reads to say
+how to install the wheels); `bench/` with
 `data/bench/v1/`; and `index.html`, `assets/` and `site.json` (the site
 publisher also renders the classic page, so that it is there before the next
 nightly, and removes nothing outside `assets/`). The

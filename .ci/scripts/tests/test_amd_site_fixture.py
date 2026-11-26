@@ -57,6 +57,7 @@ class Fixture(unittest.TestCase):
             "data/bench/v1/latest.json",
             "data/bench/v1/manifest.json",
             "bench/index.html",
+            "wheels/index.json",
         ):
             self.assertIn(name, files)
         # index.html is the app's: the fixture leaves it to the server.
@@ -95,6 +96,22 @@ class Fixture(unittest.TestCase):
     def test_the_bench_run_is_of_the_branch_the_nights_build(self) -> None:
         latest = load(self.site / "data" / "bench" / "v1" / "latest.json")
         self.assertEqual(list(latest["branches"]), [fixture.WHEELS_SLUG])
+
+    def test_the_wheel_listing_puts_the_published_branch_first(self) -> None:
+        listing = load(self.site / "wheels" / "index.json")
+        newest = fixture.built(fixture.NIGHTS - 1)
+        self.assertEqual(
+            [(entry["slug"], entry["current"]) for entry in listing["indexes"]],
+            [(fixture.WHEELS_SLUG, True), (fixture.RETIRED_BRANCH, False)],
+        )
+        current = listing["indexes"][0]
+        self.assertEqual(current["branch"], fixture.WHEELS_BRANCH)
+        self.assertEqual(current["version"], newest["version"])
+        self.assertEqual(current["sha"], newest["sha"])
+        self.assertEqual(current["wheels"], len(newest["wheels"]))
+        self.assertEqual(current["python"], ["cp310", "cp312"])
+        index = load(self.site / "wheels" / fixture.WHEELS_SLUG / "index.json")
+        self.assertEqual(index["version"], current["version"])
 
     def test_it_is_the_same_every_time(self) -> None:
         with tempfile.TemporaryDirectory(prefix="amd-site-fixture-test-") as scratch:

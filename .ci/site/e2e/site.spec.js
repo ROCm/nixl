@@ -164,6 +164,25 @@ test('the benchmarks follow latest.json and filter by lane', async ({ page, requ
   expect((await request.get(href)).ok()).toBe(true);
 });
 
+test('the overview says how to install the published wheels', async ({ page, request }) => {
+  const listing = await published(request, 'wheels/index.json');
+  const current = listing.indexes.find((entry) => entry.current);
+  expect(current.slug).toBe(SLUG);
+
+  await page.goto('#/overview');
+  const command = page.locator('[data-install="command"]');
+  await expect(command).toHaveText(new RegExp(`^pip install --pre --index-url \\S+/wheels/${SLUG}/simple/ --extra-index-url https://pypi.org/simple rocm-nixl$`));
+  await expect(page.locator('[data-install="summary"]')).toContainText(`rocm-nixl ${current.version}`);
+  await expect(page.locator('[data-install="summary"]')).toContainText(current.date.slice(0, 10));
+  // The index the command names is one the publisher wrote.
+  const index = (await command.textContent()).split(' ')[4];
+  expect((await request.get(`${index}rocm-nixl/`)).ok()).toBe(true);
+
+  await page.getByRole('button', { name: 'Wheel files and checksums' }).click();
+  expect(hash(page)).toContain('#/wheels');
+  await expect(page.getByRole('combobox', { name: 'Branch' })).toHaveText(BRANCH);
+});
+
 test('the wheels of a night are listed', async ({ page, request }) => {
   const index = await published(request, 'data/nightly/index.json');
   const summary = await published(request, `data/nightly/${index.runs[0].stamp}/summary.json`);

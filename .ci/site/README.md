@@ -14,7 +14,7 @@ sub-path.
 
 | View | Shows | Chosen by |
 | --- | --- | --- |
-| Overview | The latest night in numbers, every branch that night, and each branch night by night. | |
+| Overview | The latest night in numbers, how to install the published wheels, every branch that night, and each branch night by night. | |
 | Nightly runs | The jobs, tests and checks of one night, or the grid of every check by night. | Branch, night, failures only |
 | Trends | Job and test durations, wheel sizes, transfer rates. | Metric, branch, up to eight series |
 | Benchmarks | The headline nixlbench run: lanes, cases needing attention, declared ratios. | Branch, lane, status, kind |
@@ -25,7 +25,7 @@ A choice is kept in the address (`#/nightly?branch=...&run=...`).
 ## Layout
 
 ```text
-src/data/      what the JSON means: nightly.js, bench.js, format.js (unit tested), load.js
+src/data/      what the JSON means: nightly.js, bench.js, wheels.js, format.js (unit tested), load.js
 src/state.js   the address fragment and the colour slots of chosen series
 src/views/     one file per view
 src/components shared pieces, the status grid, the chart
@@ -34,6 +34,11 @@ src/components shared pieces, the status grid, the chart
 `src/data/nightly.js` follows the rules of
 [`amd_results_site.py`](../scripts/amd_results_site.py), which renders the same
 summaries as `classic.html`; a change to what a summary means belongs in both.
+
+The install command on the overview names the branch that
+[`amd_wheel_index.py`](../scripts/amd_wheel_index.py) marks current in
+`wheels/index.json`. On a site from before that file the app takes the last
+night a branch passed with wheels, which is when the wheels are published.
 
 ## Working on it
 

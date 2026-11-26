@@ -18,10 +18,11 @@ async function json(path, { optional = false, mutable = false } = {}) {
 }
 
 export async function loadSite({ nights = NIGHTS } = {}) {
-  const [index, latest, manifest] = await Promise.all([
+  const [index, latest, manifest, wheels] = await Promise.all([
     json('data/nightly/index.json', { mutable: true }),
     json('data/bench/v1/latest.json', { optional: true, mutable: true }).catch(() => null),
     json('data/bench/v1/manifest.json', { optional: true, mutable: true }).catch(() => null),
+    json('wheels/index.json', { optional: true, mutable: true }).catch(() => null),
   ]);
   const stamps = (Array.isArray(index.runs) ? index.runs : [])
     .slice(0, nights)
@@ -35,5 +36,5 @@ export async function loadSite({ nights = NIGHTS } = {}) {
       ),
     ),
   );
-  return { runs, bench: latest ? { latest, manifest } : null, loadedAt: new Date() };
+  return { runs, bench: latest ? { latest, manifest } : null, wheels, loadedAt: new Date() };
 }

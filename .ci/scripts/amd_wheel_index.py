@@ -176,8 +176,9 @@ def project_page(files: list[dict[str, Any]]) -> str:
     return page(f"Links for {PROJECT}", body)
 
 
-def landing_page(wheels_dir: pathlib.Path) -> str:
-    indexes = []
+def published(wheels_dir: pathlib.Path) -> list[dict[str, Any]]:
+    """The index of each branch under wheels/, the one updated nightly first."""
+    found: list[dict[str, Any]] = []
     for index in sorted(wheels_dir.glob("*/index.json")):
         try:
             data = json.loads(index.read_text(encoding="utf-8"))
@@ -185,22 +186,48 @@ def landing_page(wheels_dir: pathlib.Path) -> str:
             continue
         if not isinstance(data, dict):
             continue
-        indexes.append((index.parent.name, data))
+        files = [entry for entry in data.get("files") or [] if isinstance(entry, dict)]
+        found.append(
+            {
+                "slug": index.parent.name,
+                "branch": str(data.get("branch") or ""),
+                "version": str(data.get("version") or ""),
+                "sha": str(data.get("sha") or ""),
+                "date": str(data.get("date") or ""),
+                "wheels": len(files),
+                "python": sorted(
+                    {str(entry["python"]) for entry in files if entry.get("python")},
+                    key=lambda tag: (len(tag), tag),
+                ),
+            }
+        )
     # One branch is published at a time, so an index older than the newest
     # belongs to a branch that is no longer published.
-    newest = max((str(data.get("date") or "") for _, data in indexes), default="")
+    newest = max((entry["date"] for entry in found), default="")
+    for entry in found:
+        entry["current"] = entry["date"] == newest
+    return sorted(found, key=lambda entry: not entry["current"])
+
+
+def landing_json(wheels_dir: pathlib.Path) -> str:
+    """wheels/index.json: what landing_page() shows, for the results site."""
+    listing = {"schema": 1, "project": PROJECT, "indexes": published(wheels_dir)}
+    return json.dumps(listing, indent=2) + "\n"
+
+
+def landing_page(wheels_dir: pathlib.Path) -> str:
     rows = []
-    for slug, data in indexes:
-        date = str(data.get("date") or "")
+    for entry in sorted(published(wheels_dir), key=lambda entry: entry["slug"]):
+        slug = entry["slug"]
         cells = [
             f'<a href="{html.escape(urllib.parse.quote(slug), quote=True)}/simple/">'
             f"{html.escape(slug)}</a>",
-            html.escape(str(data.get("branch") or "")),
-            f"<code>{html.escape(str(data.get('version') or ''))}</code>",
-            f"<code>{html.escape(str(data.get('sha') or '')[:12])}</code>",
-            html.escape(date),
-            html.escape(str(len(data.get("files") or []))),
-            "updated nightly" if date == newest else "no longer updated",
+            html.escape(entry["branch"]),
+            f"<code>{html.escape(entry['version'])}</code>",
+            f"<code>{html.escape(entry['sha'][:12])}</code>",
+            html.escape(entry["date"]),
+            html.escape(str(entry["wheels"])),
+            "updated nightly" if entry["current"] else "no longer updated",
         ]
         rows.append("<tr>" + "".join(f"<td>{cell}</td>" for cell in cells) + "</tr>")
     head = ["Index", "Branch", "Version", "Commit", "Built (UTC)", "Wheels", "Status"]
@@ -306,6 +333,7 @@ def update(args: argparse.Namespace) -> int:
     }
     write_text(slug_dir / "index.json", json.dumps(summary, indent=2) + "\n")
     write_text(site / "wheels" / "index.html", landing_page(site / "wheels"))
+    write_text(site / "wheels" / "index.json", landing_json(site / "wheels"))
     sys.stdout.write(f"{slug_dir / 'index.json'}\n")
     return 0
 
