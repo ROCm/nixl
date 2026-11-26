@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "project": "nixl-rocm",
+  "indexes": [
+    {
+      "slug": "for-upstream-feat-rocm-wheels",
+      "project": "nixl-rocm",
+      "branch": "for-upstream/feat/rocm-wheels",
+      "version": "1.6.0.dev20261126",
+      "sha": "0ee8a91b08c5cf516428964fbf01fed070cae42c",
+      "date": "2026-11-26T21:18:59Z",
+      "wheels": 5,
+      "python": [
+        "cp310",
+        "cp311",
+        "cp312",
+        "cp313",
+        "cp314"
+      ],
+      "current": true
+    },
+    {
+      "slug": "main-amd",
+      "project": "rocm-nixl",
+      "branch": "main-amd",
+      "version": "1.6.0.dev20261119",
+      "sha": "0e316f20135aa3043ebb44357d60a92523b858e2",
+      "date": "2026-11-19T04:13:57Z",
+      "wheels": 5,
+      "python": [
+        "cp310",
+        "cp311",
+        "cp312",
+        "cp313",
+        "cp314"
+      ],
+      "current": false
+    }
+  ]
+}
