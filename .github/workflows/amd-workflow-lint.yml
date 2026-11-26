@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: AMD Workflow Lint
+
+# actionlint over the AMD and ROCm workflows: their syntax, the expressions,
+# the inputs and outputs passed between jobs and reusable workflows, and the
+# shell of every run step (shellcheck). Upstream's workflows are not checked;
+# they are not this repository's to change.
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/amd-*.yml
+      - .github/workflows/rocm-*.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: amd-workflow-lint-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ACTIONLINT_VERSION: 1.7.12
+  ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+
+jobs:
+  actionlint:
+    name: actionlint
+    if: github.repository != 'ai-dynamo/nixl'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          sparse-checkout: .github/workflows
+          persist-credentials: false
+
+      - name: Install actionlint
+        run: |
+          set -euo pipefail
+          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL --retry 3 -o "${RUNNER_TEMP}/${archive}" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${archive}"
+          echo "${ACTIONLINT_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum --check --strict
+          mkdir -p "${RUNNER_TEMP}/actionlint"
+          tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}/actionlint" actionlint
+          echo "${RUNNER_TEMP}/actionlint" >> "$GITHUB_PATH"
+
+      # The runner image has shellcheck, which actionlint runs on each script.
+      - name: Lint the workflows
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(.github/workflows/amd-*.yml .github/workflows/rocm-*.yml)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::found no AMD or ROCm workflow to lint"
+            exit 1
+          fi
+          actionlint -color "${files[@]}"

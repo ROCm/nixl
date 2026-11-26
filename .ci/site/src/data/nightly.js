@@ -195,7 +195,10 @@ export const METRICS = [
 
 function collect(data, metric) {
   if (metric === 'jobs') {
-    return data.jobs.map((job) => ({ name: job.name, value: job.duration_s, note: job.result }));
+    // A skipped job reports no time worth plotting.
+    return data.jobs
+      .filter((job) => jobStatus(job.result) !== 'skip')
+      .map((job) => ({ name: job.name, value: job.duration_s, note: job.result }));
   }
   if (metric === 'tests') {
     return data.tests.map((test) => ({ name: testKey(test), value: testDuration(test) }));

@@ -53,3 +53,30 @@ dev or preview server at a checkout of `gh-pages`:
 git worktree add /tmp/nixl-pages gh-pages
 SITE_DATA_DIR=/tmp/nixl-pages npm run dev
 ```
+
+## Browser tests
+
+`e2e/` drives the built app in a browser (Playwright) against a small site
+that the publishers themselves write, so the tests also hold the app to the
+data: a publisher that changes the shape of `summary.json` or `latest.json`
+fails here, before it reaches the site.
+
+```bash
+python3 ../scripts/amd_site_fixture.py --site /tmp/nixl-fixture   # an empty directory
+npx playwright install chromium
+npm run build
+SITE_DATA_DIR=/tmp/nixl-fixture npm run test:e2e
+```
+
+What a test expects is read from that site's JSON where it can be. The nights
+of the fixture are made in
+[`amd_site_fixture.py`](../scripts/amd_site_fixture.py), in the shape the
+nightly's report job gives its summary; the bench half is published from the
+bench fixture by `amd_bench_publish.py`.
+
+## What runs on a pull request
+
+`AMD Results Site` runs on a change to this directory or to `.ci/scripts`: an
+audit of the dependencies the site ships, lint, the unit tests, the build and
+the browser tests. Dependabot (`.github/dependabot.yml`) proposes updates
+once a week, the shipped dependencies and the tooling apart.

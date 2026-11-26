@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Only the results site of .ci/site. The workflows are left out: most of them
+# are upstream's and come with the nightly sync, and the AMD ones pin their
+# actions by hand.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /.ci/site
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: ci
+    groups:
+      # One pull request a week for what the site ships and one for what
+      # builds and tests it.
+      site:
+        dependency-type: production
+      tooling:
+        dependency-type: development

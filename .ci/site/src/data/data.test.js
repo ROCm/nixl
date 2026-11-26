@@ -118,6 +118,8 @@ describe('nightly', () => {
     const jobs = trendSeries(history, 'jobs');
     expect(jobs.map((entry) => entry.name)).toEqual(['plan', 'build']);
     expect(jobs[1].points.map((point) => point.value)).toEqual([1800, 1800]);
+    const skipped = [{ stamp: 's', data: { jobs: [{ name: 'plan', result: 'success', duration_s: 4 }, { name: 'build', result: 'skipped', duration_s: 0 }], tests: [], wheels: [] } }];
+    expect(trendSeries(skipped, 'jobs').map((entry) => entry.name)).toEqual(['plan']);
     const rates = trendSeries(history, 'rates');
     expect(rates).toEqual([{ name: 'test · 10.1.0 · xfer', points: [{ stamp: '20261124T032953Z', value: 2048, note: 'ucx' }] }]);
     expect(trendSeries(history, 'wheels')[0].name).toBe('Python 3.10');

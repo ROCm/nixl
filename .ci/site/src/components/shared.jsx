@@ -73,6 +73,7 @@ export function StatTile({ label, value, sub, tone, onClick }) {
     <Paper
       component={onClick ? 'button' : 'div'}
       onClick={onClick}
+      data-tile={label}
       sx={{
         p: 2,
         textAlign: 'left',
