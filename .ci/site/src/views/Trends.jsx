@@ -31,7 +31,10 @@ export default function Trends({ site, params, patch }) {
   }, [runs, names, metric.id]);
   // Branches with nothing to plot for this metric are not offered.
   const offered = names.filter((name) => all[name].length);
-  const branch = offered.includes(params.branch) ? params.branch : offered[0];
+  // Unless one is chosen, the branch with the most to show: a branch that
+  // cannot build wheels has the duration of its plan job and nothing else.
+  const fullest = offered.reduce((best, name) => (best && all[best].length >= all[name].length ? best : name), '');
+  const branch = offered.includes(params.branch) ? params.branch : fullest;
   const available = useMemo(() => (branch ? all[branch] : []), [all, branch]);
 
   const key = `${branch}/${metric.id}`;

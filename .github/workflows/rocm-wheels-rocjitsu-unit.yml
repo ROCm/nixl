@@ -245,6 +245,8 @@ jobs:
           scp -F "$QEMU_TOOL_SSH_CONFIG" \
             guest:nixl-unit/unit-test.log \
             "$out/" || true
+          # The guest expands $HOME, not this shell.
+          # shellcheck disable=SC2016
           g 'LD_LIBRARY_PATH=$HOME/nixl-unit/ucx/lib $HOME/nixl-unit/ucx/bin/ucx_info -v' > "$out/ucx-info.txt" 2>&1 || true
         fi
         if [ -f "$STACK_DIR/docker-compose.yml" ]; then

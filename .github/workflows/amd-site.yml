@@ -8,10 +8,16 @@ name: AMD Results Site
 # it reads the JSON the nightly, wheel and bench publishers put on gh-pages, so
 # a new night needs no rebuild. See .ci/docs/amd-ci.md, "The results site".
 
+#
+# A pull request that touches the publishers runs it too: the browser tests
+# read a site those scripts write (amd_site_fixture.py), so a publisher that
+# changes the shape of its data is tested against the app that reads it.
+
 on:
   pull_request:
     paths:
       - .ci/site/**
+      - .ci/scripts/**
       - .github/workflows/amd-site.yml
   push:
     branches:
@@ -33,7 +39,7 @@ jobs:
     name: Lint, test and build
     if: github.repository != 'ai-dynamo/nixl'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: .ci/site
@@ -41,7 +47,9 @@ jobs:
       - name: Check out code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          sparse-checkout: .ci/site
+          sparse-checkout: |
+            .ci/site
+            .ci/scripts
           persist-credentials: false
 
       - name: Set up Node
@@ -54,6 +62,11 @@ jobs:
       - name: Install the locked dependencies
         run: npm ci --no-fund --no-audit
 
+      # What is served, not what builds it: a finding in a build tool does not
+      # reach a reader of the site, and Dependabot raises those.
+      - name: Audit the dependencies the site ships
+        run: npm audit --omit=dev --audit-level=high
+
       - name: Lint
         run: npm run lint
 
@@ -62,6 +75,27 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Write a site with the publishers
+        working-directory: ${{ github.workspace }}
+        run: |
+          python3 -I .ci/scripts/amd_site_fixture.py --site "${RUNNER_TEMP}/published"
+          echo "SITE_DATA_DIR=${RUNNER_TEMP}/published" >> "$GITHUB_ENV"
+
+      - name: Install the browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Run the browser tests
+        run: npm run test:e2e
+
+      - name: Upload the traces of the failed browser tests
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: amd-results-site-traces
+          path: .ci/site/test-results
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Upload the site
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

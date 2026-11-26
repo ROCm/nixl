@@ -381,8 +381,18 @@ writes the root page, an app built from [`.ci/site`](../site/README.md):
 
 The app holds no data. In the browser it reads `data/nightly/` and
 `data/bench/v1/latest.json` and `manifest.json`, so a new night or bench run
-shows without a rebuild, and the workflow runs only when `.ci/site` changes on
-the default branch.
+shows without a rebuild, and the workflow publishes only when `.ci/site`
+changes on the default branch.
+
+On a pull request that touches `.ci/site` or `.ci/scripts` the same workflow
+lints, tests and builds the app and then drives it in a browser against a site
+written by the publishers
+([`amd_site_fixture.py`](../scripts/amd_site_fixture.py)). That is the check
+that the app and the data agree: a publisher that changes the shape of what it
+writes fails there. `AMD Workflow Lint`
+([`amd-workflow-lint.yml`](../../.github/workflows/amd-workflow-lint.yml))
+runs actionlint, with shellcheck, over the `amd-*` and `rocm-*` workflows on a
+pull request that touches one.
 
 `AMD Bench Publish` writes the bench part, with
 [`amd_bench_publish.py`](../scripts/amd_bench_publish.py):
