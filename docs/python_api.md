@@ -23,6 +23,14 @@ The nixl python API and libraries, including UCX, are available directly through
 pip install nixl
 ```
 
+For AMD ROCm (x86_64 only), install `nixl-rocm` instead:
+
+```bash
+pip install nixl-rocm
+```
+
+Do not install `nixl-rocm` and `nixl` in the same environment. See [PyPI Wheel](../README.md#pypi-wheel) for the requirements and for installing AMD's ROCm build of PyTorch with it.
+
 ### From Source
 
 To build from source, follow the main build instructions in the README.md, then install the Python bindings:

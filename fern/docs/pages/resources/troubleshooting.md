@@ -98,6 +98,21 @@ export LD_LIBRARY_PATH=/path/to/nixl/build:$LD_LIBRARY_PATH
 pip install nixl
 ```
 
+On AMD ROCm (x86_64 only), install `nixl-rocm` instead:
+
+```bash
+pip install nixl-rocm
+```
+
+If `import nixl` then fails, or warns that it could not tell which ROCm install to use, the usual causes are:
+
+- No ROCm install was found, or several versions are installed side by side: set `ROCM_PATH` to your ROCm install.
+- The ROCm version found is not supported. The error says where the version was read from. If that is PyTorch, install AMD's PyTorch for a supported ROCm version; `ROCM_PATH` does not change it.
+- A CUDA build of PyTorch was found: `torch` was installed from PyPI. Replace it with AMD's ROCm build; the error lists the command for each ROCm version.
+- `nixl` and `nixl-rocm` are both installed: they cannot share an environment.
+
+The [nixl-rocm README](https://github.com/ai-dynamo/nixl/blob/main/src/bindings/python/nixl-meta/README.rocm.md) has the commands for each case, the supported ROCm versions and the order in which `import nixl` looks for ROCm.
+
 ### Plug-in Shared Library Not Found at Runtime
 
 If NIXL cannot find backend plug-ins at runtime, set the plug-in directory:

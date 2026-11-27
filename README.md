@@ -47,6 +47,20 @@ Install with:
 pip install nixl
 ```
 
+For AMD ROCm (Linux x86_64), install the `nixl-rocm` package instead of `nixl`:
+
+```bash
+pip install nixl-rocm
+```
+
+`nixl-rocm` needs a supported ROCm version, from AMD's pip packages or installed on the host, and OpenSSL 3 on the host. `import nixl` selects the NIXL build for the ROCm it finds.
+
+`nixl-rocm` does not depend on PyTorch. To install AMD's ROCm build of PyTorch with it, add the extra for your ROCm version and AMD's package index for that version: see [Install with PyTorch](src/bindings/python/nixl-meta/README.rocm.md#install-with-pytorch) for the command.
+
+Do not install `torch` from PyPI on a ROCm system: it is the CUDA build. Do not install `nixl-rocm` and `nixl` in the same environment either: both provide the `nixl` import package.
+
+The [nixl-rocm README](src/bindings/python/nixl-meta/README.rocm.md) lists the supported ROCm versions, and explains how `import nixl` finds ROCm and what to do when it fails.
+
 ## Prerequisites for source build (Linux)
 
 NIXL requires a C++20 compatible compiler (GCC >= 11 or Clang >= 14).
@@ -240,6 +254,12 @@ The preferred way to install the Python bindings is through pip from PyPI:
 pip install nixl
 ```
 
+For AMD ROCm, install `nixl-rocm` instead of `nixl` (see [PyPI Wheel](#pypi-wheel) for the requirements and for PyTorch):
+
+```bash
+pip install nixl-rocm
+```
+
 #### Installation from source
 
 Prerequisites:
@@ -292,6 +312,23 @@ After installing the prerequisites, you can build and install the NIXL binaries 
 ```
 pip install .
 meson setup build
+ninja -C build install
+pip install build/src/bindings/python/nixl-meta/nixl-*-py3-none-any.whl
+```
+
+**For AMD ROCm:**
+
+The three steps are the same, with these differences:
+
+- PyTorch is not a prerequisite. Do not use the CUDA commands above on a ROCm host: they install the CUDA build of PyTorch from PyPI.
+- The platform-specific package is named after the ROCm version: `nixl-rocm<X>.<Y>`. Replace `10.1` below with the major and minor version of your ROCm install.
+- The first command installs the build requirements, and `--no-build-isolation` makes pip use them instead of downloading `torch` as a build requirement.
+
+```
+pip install meson meson-python pybind11 patchelf pyyaml
+./contrib/tomlutil.py --wheel-name nixl-rocm10.1 --remove-dependency torch pyproject.toml
+pip install --no-build-isolation -Csetup-args=-Drocm_path=/opt/rocm .
+meson setup build -Drocm_path=/opt/rocm
 ninja -C build install
 pip install build/src/bindings/python/nixl-meta/nixl-*-py3-none-any.whl
 ```
@@ -383,6 +420,8 @@ The contrib folder also includes a script to build the python wheel with the UCX
 ```
 ./contrib/build-wheel.sh
 ```
+
+For AMD ROCm, pass `--rocm-path <ROCm prefix>` to build the wheel for that ROCm install instead of for CUDA. The published `nixl-rocm` wheel combines such wheels for several ROCm versions; see [Build ROCm wheels](contrib/README.md#build-rocm-wheels).
 
 ## Running with ETCD
 NIXL can use ETCD for metadata exchange between distributed nodes. This is especially useful in containerized or cloud-native environments.
