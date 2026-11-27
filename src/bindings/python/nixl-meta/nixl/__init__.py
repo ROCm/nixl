@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import importlib
+import pathlib
 import sys
 import warnings
 from typing import TYPE_CHECKING
@@ -29,6 +30,14 @@ from nixl_meta_utils import (
     load_rocm,
 )
 
+# In the nixl-rocm wheel only: the pip commands that install it with AMD's
+# PyTorch, written by contrib/wheel_merge_rocm.py for the backends it merged.
+_ROCM_PYTORCH_INSTALL = "rocm_pytorch_install.txt"
+_ROCM_README_URL = (
+    "https://github.com/ai-dynamo/nixl/blob/main/"
+    "src/bindings/python/nixl-meta/README.rocm.md"
+)
+
 
 def _cuda_torch_with_rocm_backends_error() -> ImportError | None:
     """The error for a CUDA PyTorch next to ROCm-only NIXL backends, if that applies."""
@@ -38,11 +47,19 @@ def _cuda_torch_with_rocm_backends_error() -> ImportError | None:
     torch_cuda = detect_torch_cuda()
     if torch_cuda is None:
         return None
-    return ImportError(
+    message = (
         f"found a CUDA build of PyTorch (CUDA {torch_cuda}) but only ROCm NIXL "
         f"backends are installed ({', '.join(rocm_backends)}). NIXL for ROCm "
-        "needs AMD's ROCm build of PyTorch, which is not on PyPI: install it "
-        "in place of the CUDA build"
+        "needs AMD's ROCm build of PyTorch, which is not on PyPI. "
+    )
+    try:
+        install = pathlib.Path(__file__).with_name(_ROCM_PYTORCH_INSTALL).read_text()
+    except OSError:
+        # Not the nixl-rocm wheel: a backend built from source has no extras.
+        return ImportError(f"{message}Replace the CUDA build: see {_ROCM_README_URL}")
+    return ImportError(
+        f'{message}Run "pip uninstall torch", then the command for your ROCm '
+        f"version:\n{install.strip()}"
     )
 
 
