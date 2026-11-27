@@ -31,6 +31,9 @@ ARG BASE_IMAGE_TAG="13.4.2-devel-ubi8"
 # When overridden to an Artifactory URL, the wheel stage pulls the pre-built deps
 # image instead of building wheel_base locally (CI caching). Default builds wheel_base here.
 ARG wheel_base=wheel_base
+# The image nixlbench is built in: the wheel stage, or a pre-built wheel image
+# (build-container.sh --nixlbench-base-image) so that it is not built again.
+ARG nixlbench_base=wheel
 # "cuda" (default) or "rocm"; selects the wheel_base_<stack> stage.
 ARG GPU_STACK="cuda"
 
@@ -748,6 +751,61 @@ RUN if [ "$GPU_STACK" != "rocm" ]; then \
 # (build-container.sh --wheel-output-dir).
 FROM scratch AS wheel_dist
 COPY --from=wheel /workspace/nixl/dist /
+
+# nixlbench as a wheel of its own that requires the NIXL wheel built above, for
+# "--target nixlbench_wheel_dist" (build-container.sh --nixlbench-wheel-output-dir).
+# Nothing the NIXL wheels are built from depends on these stages, so a nixlbench
+# build failure cannot keep the NIXL wheels from being built: that relies on the
+# builder skipping the stages a target does not need, as choosing between
+# wheel_base_cuda and wheel_base_rocm already does. They take their files from
+# nixlbench_wheel, never from wheel, so a pre-built nixlbench_base does not make
+# the wheel stage build again.
+FROM ${nixlbench_base} AS nixlbench_wheel
+
+ARG GPU_STACK
+ARG ARCH="x86_64"
+ARG NPROC=1
+ARG WHL_PLATFORM="manylinux_2_28_$ARCH"
+
+WORKDIR /workspace/nixl
+
+# gflags-devel is installed here rather than in wheel_base, whose layers the
+# NIXL wheels are built from. nixl-wheels.sha256 lists the NIXL wheels nixlbench
+# was linked and tested against, to compare with the ones that are published.
+RUN if [ "$GPU_STACK" != "rocm" ]; then \
+        echo "ERROR: the nixlbench wheel is only built for ROCm so far (GPU_STACK=$GPU_STACK)" >&2; \
+        exit 1; \
+    fi && \
+    dnf install -y gflags-devel && \
+    dnf clean all && \
+    ./contrib/build-nixlbench-wheel.sh \
+        --nixl-path /usr/local/nixl \
+        --nixl-wheel-dir dist \
+        --rocm-path "$ROCM_PATH" \
+        --platform "$WHL_PLATFORM" \
+        --output-dir /wheels/nixlbench && \
+    (cd dist && sha256sum -- *.whl) > /wheels/nixlbench/nixl-wheels.sha256
+
+# Installs and runs the nixlbench wheel where neither NIXL nor gflags is
+# installed: on the ROCm base stage, which is therefore built (or taken from the
+# cache) even with a pre-built nixlbench_base. Like the NIXL wheel it needs
+# OpenSSL 3 on the host, which EL8 does not have: the one built for the wheels
+# stands in, registered with ldconfig because the test runs nixlbench without
+# LD_LIBRARY_PATH.
+FROM wheel_base_${GPU_STACK} AS nixlbench_wheel_test
+
+COPY --from=nixlbench_wheel /usr/local/openssl/ /usr/local/openssl/
+COPY --from=nixlbench_wheel /etc/ld.so.conf.d/nixl-openssl.conf /etc/ld.so.conf.d/nixl-openssl.conf
+COPY --from=nixlbench_wheel /workspace/nixl/dist/ /wheels/nixl/
+COPY --from=nixlbench_wheel /wheels/nixlbench/ /wheels/nixlbench/
+COPY --from=nixlbench_wheel /workspace/nixl/contrib/test-nixlbench-wheel.sh /usr/local/bin/
+
+RUN ldconfig && \
+    test-nixlbench-wheel.sh --nixl-wheel-dir /wheels/nixl --nixlbench-wheel-dir /wheels/nixlbench
+
+# Just the tested nixlbench wheel and nixl-wheels.sha256.
+FROM scratch AS nixlbench_wheel_dist
+COPY --from=nixlbench_wheel_test /wheels/nixlbench /
 
 # Keeps the wheel image as the default target.
 FROM wheel

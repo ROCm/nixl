@@ -172,3 +172,101 @@ says, `uv` and `auditwheel`. The `--output-dir` directory must exist.
   installed. That is the case if it contains a copy of a ROCm library (the
   backend must use the ROCm of the machine it runs on, not a copy of the
   build's), the `nixl` dispatcher (the merge adds it), or `nixl_ep` (CUDA-only).
+
+#### nixlbench wheel
+
+`nixlbench-rocm` installs the `nixlbench` command. Like `nixl-rocm`, it holds
+one build per ROCm version. It requires `nixl-rocm` at exactly its own
+version, because `nixlbench` uses the NIXL library and plugins of that wheel.
+One wheel serves every Python version.
+
+Each nixlbench build is linked against the NIXL backend wheels of the same
+ROCm version. Build those first, as in step 1 of
+[Build ROCm wheels](#build-rocm-wheels), with `$out` outside the checkout.
+Run the nixlbench build for a ROCm version directly after the NIXL build for
+that version, and leave the checkout untouched in between; the reason is given
+[below](#why-the-checkout-must-not-change).
+
+1. Build the nixlbench backend wheel. Repeat this for each ROCm version, with
+   the options of the NIXL build:
+
+   ```bash
+   ./contrib/build-container.sh \
+       --dockerfile contrib/Dockerfile.manylinux \
+       --rocm-version "$rocm" \
+       --python-versions 3.10,3.11,3.12,3.13,3.14 \
+       --nixlbench-wheel-output-dir "$out/nixlbench-rocm$rocm" \
+       --nixlbench-nixl-wheel-dir "$out/nixl-rocm$rocm"
+   ```
+
+   This writes
+   `nixlbench_rocm<X>_<Y>-<version>-py3-none-manylinux_2_28_x86_64.whl`, which
+   is not published either. The build installs the wheel and runs it against
+   every NIXL wheel of step 1, and fails if that does not work.
+
+2. Merge the nixlbench backend wheels, and the NIXL backend wheels as in step
+   2 of [Build ROCm wheels](#build-rocm-wheels):
+
+   ```bash
+   ./contrib/wheel_nixlbench.py merge --output-dir "$out/dist" \
+       "$out"/nixlbench-rocm*/nixlbench_rocm*.whl
+   ```
+
+   The result is
+   `nixlbench_rocm-<version>-py3-none-manylinux_2_28_x86_64.whl`.
+
+3. Install it with the `nixl-rocm` wheel of the same build for your Python
+   version (3.12 here), and run it:
+
+   ```bash
+   pip install "$out"/dist/nixl_rocm-*-cp312-*.whl "$out"/dist/nixlbench_rocm-*.whl
+   mkdir -p /tmp/nixlbench
+   nixlbench --backend POSIX --filepath /tmp/nixlbench --op_type WRITE \
+       --total_buffer_size 80000000 --max_block_size 16384
+   ```
+
+   `./contrib/test-nixlbench-wheel.sh --installed "$(command -v nixlbench)"`
+   tests the installed command.
+
+##### Why the checkout must not change
+
+The nixlbench build does not build NIXL again. It takes the NIXL build of step
+1 from the Docker build cache, and the cache key is the content of the
+checkout, `.git` and test caches included. Any change to the checkout between
+the two builds makes Docker build NIXL again, and nixlbench is then linked
+against NIXL wheels other than the ones you have. So do not fetch, commit,
+switch branches or run the tests in between, and keep the output directories
+outside the checkout. There are two safeguards:
+
+- Both nixlbench options refuse a directory inside the checkout.
+- The build writes `nixl-wheels.sha256` beside the nixlbench wheel. It lists
+  the NIXL wheels nixlbench was linked and tested against.
+  `--nixlbench-nixl-wheel-dir` compares that list with the wheels of step 1
+  and fails the build if they differ. Do not use the nixlbench wheel then.
+
+Without a build cache, for example on a fresh CI machine, build the NIXL
+wheels as an image instead: run step 1 with `--tag IMAGE` in place of
+`--wheel-output-dir`. Then pass `--nixlbench-base-image IMAGE` to the
+nixlbench build in place of `--nixlbench-nixl-wheel-dir`. The NIXL wheels are
+in `/workspace/nixl/dist` of that image.
+
+Running `nixlbench` from the wheel:
+
+- It needs ROCm and OpenSSL 3, like `nixl-rocm`. Neither is in the wheel.
+- It looks for ROCm on disk only: `$ROCM_PATH`, then AMD's pip ROCm packages,
+  then `/opt/rocm`, with the rules of
+  [How ROCm is found](../src/bindings/python/nixl-meta/README.rocm.md#how-rocm-is-found).
+  It does not look at PyTorch. It puts the `lib` directory of that ROCm on the
+  loader path itself, so `LD_LIBRARY_PATH` is not needed.
+- A ROCm version with no build in the wheel is an error. If no ROCm is found,
+  `nixlbench` warns and runs the build for the newest ROCm version.
+- The wheel is built without the ETCD runtime, which is nixlbench's default
+  runtime. Network backends such as UCX therefore need
+  `--runtime_type ASIO --asio_address <IP address>`. Storage backends need no
+  runtime.
+- `NIXL_PLUGIN_DIR`, when set, still overrides the plugins of the `nixl-rocm`
+  wheel. `nixlbench` warns about it.
+- `NIXLBENCH_WHEEL_DEBUG=1` prints what was selected.
+
+Do not install a `nixlbench-rocm<X>.<Y>` backend wheel and `nixlbench-rocm` in
+the same environment. Both install the `nixlbench` command.

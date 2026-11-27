@@ -52,7 +52,7 @@ def run_script(tmp_path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     docker = bin_dir / "docker"
-    docker.write_text('#!/bin/sh\necho "DOCKER $*"\n')
+    docker.write_text('#!/bin/sh\necho "DOCKER $*"\nexit "${DOCKER_RC:-0}"\n')
     docker.chmod(docker.stat().st_mode | stat.S_IXUSR)
 
     def run(*args, env=None):
@@ -187,3 +187,188 @@ def test_wheel_output_dir_needs_a_dockerfile_with_a_wheel_dist_stage(run_script)
     assert result.returncode != 0
     assert "requires a dockerfile with a wheel_dist stage" in result.stderr
     assert "DOCKER build" not in result.stdout
+
+
+def test_nixlbench_wheel_output_dir(run_script, tmp_path_factory):
+    output_dir = tmp_path_factory.mktemp("nixlbench-wheels")
+    result = run_script(*ROCM, "--nixlbench-wheel-output-dir", str(output_dir))
+    assert result.returncode == 0, result.stderr
+    args = _docker_build_args(result)
+    assert args[args.index("--target") + 1] == "nixlbench_wheel_dist"
+    assert args[args.index("--output") + 1] == f"type=local,dest={output_dir}"
+    assert args.count("--target") == 1
+    assert not [a for a in args if a.startswith("nixlbench_base=")]
+    assert f"nixlbench wheel: {output_dir}" in result.stdout
+
+
+@pytest.mark.parametrize("output_dir", ["dist-nixlbench", ".", "contrib/../out"])
+def test_nixlbench_wheel_output_dir_must_be_outside_the_context(
+    run_script, tmp_path, output_dir
+):
+    result = run_script(*ROCM, "--nixlbench-wheel-output-dir", output_dir)
+    assert result.returncode != 0
+    assert (
+        "--nixlbench-wheel-output-dir must be outside the build context "
+        f"({tmp_path.resolve()})" in result.stderr
+    )
+    assert "DOCKER build" not in result.stdout
+
+
+def test_nixlbench_base_image(run_script, tmp_path_factory):
+    output_dir = tmp_path_factory.mktemp("nixlbench-wheels")
+    result = run_script(
+        *ROCM,
+        "--nixlbench-wheel-output-dir",
+        str(output_dir),
+        "--nixlbench-base-image",
+        "nixl:wheel-rocm10.1.0",
+    )
+    assert result.returncode == 0, result.stderr
+    args = _docker_build_args(result)
+    assert "nixlbench_base=nixl:wheel-rocm10.1.0" in args
+    assert args[args.index("--target") + 1] == "nixlbench_wheel_dist"
+
+
+@pytest.mark.parametrize(
+    "args, message",
+    [
+        (
+            [*MANYLINUX, "--nixlbench-wheel-output-dir", "/tmp/out"],
+            "--nixlbench-wheel-output-dir requires --rocm-version",
+        ),
+        (
+            [
+                *ROCM,
+                "--nixlbench-wheel-output-dir",
+                "/tmp/out",
+                "--wheel-output-dir",
+                "/tmp/wheels",
+            ],
+            "cannot be used with --wheel-output-dir",
+        ),
+        (
+            [*ROCM, "--nixlbench-base-image", "nixl:wheel"],
+            "--nixlbench-base-image requires --nixlbench-wheel-output-dir",
+        ),
+        (
+            [
+                "--dockerfile",
+                "contrib/Dockerfile",
+                "--nixlbench-wheel-output-dir",
+                "/tmp/out",
+            ],
+            "requires a dockerfile with a nixlbench_wheel_dist stage",
+        ),
+        (["--nixlbench-wheel-output-dir"], "requires an argument"),
+        (
+            [*ROCM, "--nixlbench-nixl-wheel-dir", "/tmp"],
+            "--nixlbench-nixl-wheel-dir requires --nixlbench-wheel-output-dir",
+        ),
+        (
+            [
+                *ROCM,
+                "--nixlbench-wheel-output-dir",
+                "/tmp/out",
+                "--nixlbench-nixl-wheel-dir",
+                "/nonexistent/nixl-wheels",
+            ],
+            "--nixlbench-nixl-wheel-dir: /nonexistent/nixl-wheels is not a directory",
+        ),
+    ],
+)
+def test_rejected_nixlbench_combinations(run_script, args, message):
+    result = run_script(*args)
+    assert result.returncode != 0
+    assert message in result.stderr
+    assert "DOCKER build" not in result.stdout
+
+
+@pytest.fixture
+def exported(tmp_path_factory):
+    """A NIXL wheel directory and the nixlbench output directory built from it."""
+    nixl_dir = tmp_path_factory.mktemp("nixl-wheels")
+    output_dir = tmp_path_factory.mktemp("nixlbench-wheels")
+    wheel = nixl_dir / "nixl_rocm10_1-1.6.0-cp312-cp312-manylinux_2_28_x86_64.whl"
+    wheel.write_bytes(b"the NIXL build nixlbench was linked against")
+    digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    (output_dir / "nixl-wheels.sha256").write_text(f"{digest}  {wheel.name}\n")
+    return nixl_dir, output_dir, wheel
+
+
+def _verify_args(nixl_dir, output_dir):
+    return [
+        *ROCM,
+        "--nixlbench-wheel-output-dir",
+        str(output_dir),
+        "--nixlbench-nixl-wheel-dir",
+        str(nixl_dir),
+    ]
+
+
+def test_nixlbench_nixl_wheel_dir_accepts_the_wheels_built_against(
+    run_script, exported
+):
+    nixl_dir, output_dir, _ = exported
+    result = run_script(*_verify_args(nixl_dir, output_dir))
+    assert result.returncode == 0, result.stderr
+    assert f"was built against the NIXL wheels in {nixl_dir}" in result.stdout
+    assert str(nixl_dir) not in " ".join(_docker_build_args(result))
+
+
+@pytest.mark.parametrize("change", ["rebuilt", "missing"])
+def test_nixlbench_nixl_wheel_dir_refuses_other_wheels(run_script, exported, change):
+    nixl_dir, output_dir, wheel = exported
+    if change == "rebuilt":
+        wheel.write_bytes(b"another NIXL build")
+    else:
+        wheel.unlink()
+    result = run_script(*_verify_args(nixl_dir, output_dir))
+    assert result.returncode != 0
+    assert "DOCKER build" in result.stdout
+    assert (
+        f"the nixlbench wheel in {output_dir} was not built against the NIXL "
+        f"wheels in {nixl_dir}" in result.stderr
+    )
+
+
+def test_nixlbench_nixl_wheel_dir_is_not_checked_after_a_failed_build(
+    run_script, exported
+):
+    nixl_dir, output_dir, wheel = exported
+    wheel.write_bytes(b"another NIXL build")
+    result = run_script(*_verify_args(nixl_dir, output_dir), env={"DOCKER_RC": "7"})
+    assert result.returncode == 7
+    assert "was not built against" not in result.stderr
+
+
+def test_a_failed_build_fails_the_script(run_script):
+    result = run_script(*ROCM, env={"DOCKER_RC": "7"})
+    assert result.returncode == 7
+
+
+def test_nixlbench_nixl_wheel_dir_in_the_context(run_script, tmp_path, exported):
+    _, output_dir, wheel = exported
+    in_context = tmp_path / "dist"
+    in_context.mkdir()
+    (in_context / wheel.name).write_bytes(wheel.read_bytes())
+    args = _verify_args("dist", output_dir)
+    result = run_script(*args)
+    assert result.returncode != 0
+    assert (
+        "--nixlbench-nixl-wheel-dir is inside the build context "
+        f"({tmp_path.resolve()})" in result.stderr
+    )
+    assert "DOCKER build" not in result.stdout
+
+    # A pre-built wheel image does not depend on the context.
+    result = run_script(*args, "--nixlbench-base-image", "nixl:wheel-rocm10.1.0")
+    assert result.returncode == 0, result.stderr
+
+
+def test_wheel_output_dir_does_not_build_nixlbench(run_script, tmp_path_factory):
+    output_dir = tmp_path_factory.mktemp("wheels")
+    result = run_script(*ROCM, "--wheel-output-dir", str(output_dir))
+    assert result.returncode == 0, result.stderr
+    args = _docker_build_args(result)
+    assert args[args.index("--target") + 1] == "wheel_dist"
+    assert "nixlbench" not in " ".join(args)
