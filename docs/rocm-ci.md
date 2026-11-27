@@ -38,6 +38,9 @@ as a CUDA build does. The script copies it to
 `dist/nixl-<version>-py3-none-any.whl`. It requires the `nixl-rocm<X>.<Y>`
 package of this image and is for local use only.
 
+This image is for CI and development. The `nixl-rocm` release wheel is built
+separately: see [Build ROCm wheels](../contrib/README.md#build-rocm-wheels).
+
 ## AIS on AMD GPU (docker + nixlbench)
 
 For an interactive AIS run on VRAM with an NVMe-backed directory mounted

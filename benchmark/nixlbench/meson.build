@@ -195,7 +195,7 @@ endif
 openmp_dep = dependency('openmp', required: true)
 
 # Check for etcd-cpp-api - use multiple methods for discovery
-etcd_dep = dependency('etcd-cpp-api', required : false)
+etcd_dep = dependency('etcd-cpp-api', required : get_option('etcd'))
 
 # GFlags
 gflags_dep = dependency('gflags', required: true)
