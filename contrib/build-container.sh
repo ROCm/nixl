@@ -1,6 +1,7 @@
 #!/bin/bash
 
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -46,10 +47,18 @@ UCX_REF=${UCX_REF:-v1.24.x}
 UCX_SONAME_SUFFIX=${UCX_SONAME_SUFFIX:-}
 PRIVATE_UCX_SONAME_SUFFIX="nixl"
 BUILD_NIXL_EP="true"
+BUILD_NIXL_EP_SET="false"
 OS="ubuntu24"
 NPROC=${NPROC:-$(nproc)}
 GRPC_NPROC=${GRPC_NPROC:-$(nproc)}
 BUILD_TYPE="release"
+# ROCm X.Y.Z for the manylinux wheel build. Setting it builds a ROCm wheel
+# instead of a CUDA one, for that ROCm release only: the backend package is
+# named nixl_rocm<X>_<Y>.
+ROCM_VERSION=""
+WHL_BASE_SET="false"
+PROXY_CA_CERT=""
+WHEEL_OUTPUT_DIR=""
 BUILD_INFINIA="false"
 INFINIA_LIBS_IMAGE="il.artifactory.nvidia.com/sw-nbu-swx-nixl-docker-local/static/infinia-libs:v2.5.0-rcx.1"
 APT_MIRROR=""
@@ -84,6 +93,7 @@ get_options() {
         --wheel-base)
             if [ "$2" ]; then
                 WHL_BASE=$2
+                WHL_BASE_SET="true"
                 shift
             else
                 missing_requirement $1
@@ -148,6 +158,30 @@ get_options() {
                 missing_requirement $1
             fi
             ;;
+        --rocm-version)
+            if [ "$2" ]; then
+                ROCM_VERSION=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --proxy-ca-cert)
+            if [ "$2" ]; then
+                PROXY_CA_CERT=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --wheel-output-dir)
+            if [ "$2" ]; then
+                WHEEL_OUTPUT_DIR=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
         --manylinux-image)
             if [ "$2" ]; then
                 MANYLINUX_IMAGE=$2
@@ -193,6 +227,7 @@ get_options() {
             ;;
         --build-nixl-ep)
             BUILD_NIXL_EP=true
+            BUILD_NIXL_EP_SET="true"
             ;;
         --build-ucx-spcx-plugin)
             BUILD_UCX_SPCX_PLUGIN="true"
@@ -293,6 +328,9 @@ show_build_options() {
     echo "Container arch: ${ARCH}"
     echo "Python Versions for wheel build: ${WHL_PYTHON_VERSIONS}"
     echo "Wheel Platform: ${WHL_PLATFORM}"
+    if [ -n "$ROCM_VERSION" ]; then
+        echo "GPU stack: ROCm ${ROCM_VERSION}"
+    fi
     echo "UCX Repo: ${UCX_REPO}"
     echo "UCX Ref: ${UCX_REF}"
     if [ -n "$UCX_SONAME_SUFFIX" ]; then
@@ -361,6 +399,12 @@ WHL_PYTHON_VERSIONS="${WHL_PYTHON_VERSIONS}"
 WHL_PLATFORM="${WHL_PLATFORM}"
 TAG="${TAG}"
 EOF
+    if [ -n "$ROCM_VERSION" ]; then
+        cat >> "$BUILD_OPTIONS_FILE" <<EOF
+GPU_STACK="rocm"
+ROCM_VERSION="${ROCM_VERSION}"
+EOF
+    fi
 }
 
 show_help() {
@@ -384,7 +428,10 @@ show_help() {
     echo "  [--arch [x86_64|aarch64] to select target architecture]"
     echo "  [--dockerfile path to a dockerfile to use]"
     echo "  [--torch-versions torch versions to build for, comma separated (default: uses Dockerfile ARG default)]"
-    echo "  [--manylinux-image PyPA manylinux image prefix (default: ${MANYLINUX_IMAGE})]
+    echo "  [--rocm-version ROCm X.Y.Z, e.g. 10.1.0: build the manylinux wheel for that ROCm release instead of for CUDA; x86_64 only, and defaults --wheel-base to manylinux_2_28]
+  [--proxy-ca-cert optional root CA certificate (PEM file) of a TLS-intercepting proxy, passed to the manylinux wheel build as the proxy_ca secret; the build is unchanged without it]
+  [--wheel-output-dir directory to write the manylinux wheels to instead of creating an image (BuildKit local output)]
+  [--manylinux-image PyPA manylinux image prefix (default: ${MANYLINUX_IMAGE})]
   [--manylinux-image-tag pinned PyPA manylinux image tag (default: ${MANYLINUX_IMAGE_TAG})]"
     echo "  [--wheel-base-image pre-built wheel base image URL; skips wheel_base stage and builds only the wheel stage]"
     echo "  [--build-infinia build and bundle the Infinia DDN plugin (requires --dockerfile contrib/Dockerfile.manylinux; il.artifactory.nvidia.com must be reachable)]"
@@ -411,12 +458,52 @@ if [ -d "$NIXL_DIR/build" ]; then
     exit 1
 fi
 
+if [ -n "$ROCM_VERSION" ]; then
+    # Ask the dockerfile itself rather than matching paths, as for the spcx flag.
+    if ! grep -q '^ARG GPU_STACK' "$DOCKER_FILE"; then
+        error "ERROR:" "--rocm-version requires a dockerfile that supports ROCm (contrib/Dockerfile.manylinux); $DOCKER_FILE does not"
+    fi
+    if [ "$ARCH" != "x86_64" ]; then
+        error "ERROR:" "--rocm-version is only supported on x86_64 (requested arch: $ARCH)"
+    fi
+    if ! [[ "$ROCM_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        error "ERROR:" "invalid --rocm-version '$ROCM_VERSION' (expected X.Y.Z)"
+    fi
+    if [ -n "$WHL_TORCH_VERSIONS" ]; then
+        error "ERROR:" "--torch-versions cannot be used with --rocm-version (it selects the PyTorch versions nixl_ep is built against, and nixl_ep is CUDA-only)"
+    fi
+    if [ "$BUILD_NIXL_EP_SET" = "true" ]; then
+        error "ERROR:" "--build-nixl-ep cannot be used with --rocm-version (nixl_ep is CUDA-only)"
+    fi
+    # On by default for CUDA.
+    BUILD_NIXL_EP="false"
+    # ROCm supports distributions with glibc older than 2.39 (EL9, Ubuntu 22.04).
+    if [ "$WHL_BASE_SET" = "false" ]; then
+        WHL_BASE=manylinux_2_28
+        WHL_PLATFORM=${WHL_BASE}_${ARCH}
+    fi
+fi
+
+if [ -n "$PROXY_CA_CERT" ]; then
+    if [ ! -f "$PROXY_CA_CERT" ] || [ ! -r "$PROXY_CA_CERT" ]; then
+        error "ERROR:" "--proxy-ca-cert file not found or not readable: $PROXY_CA_CERT"
+    fi
+    if ! grep -q 'id=proxy_ca' "$DOCKER_FILE"; then
+        error "ERROR:" "--proxy-ca-cert requires a dockerfile that consumes the proxy_ca secret (contrib/Dockerfile.manylinux); $DOCKER_FILE does not"
+    fi
+    BUILD_ARGS+=" --secret id=proxy_ca,src=$(readlink -f "$PROXY_CA_CERT")"
+    BUILD_ARGS+=" --build-arg PROXY_CA_SHA256=$(sha256sum < "$PROXY_CA_CERT" | cut -d' ' -f1)"
+fi
+
 BUILD_ARGS+="${BASE_IMAGE:+ --build-arg BASE_IMAGE=$BASE_IMAGE}"
 BUILD_ARGS+="${BASE_IMAGE_TAG:+ --build-arg BASE_IMAGE_TAG=$BASE_IMAGE_TAG}"
 BUILD_ARGS+=" --build-arg MANYLINUX_IMAGE=$MANYLINUX_IMAGE --build-arg MANYLINUX_IMAGE_TAG=$MANYLINUX_IMAGE_TAG"
 BUILD_ARGS+=" --build-arg WHL_PYTHON_VERSIONS=$WHL_PYTHON_VERSIONS"
 BUILD_ARGS+="${DEFAULT_PYTHON_VERSION:+ --build-arg DEFAULT_PYTHON_VERSION=$DEFAULT_PYTHON_VERSION}"
 BUILD_ARGS+="${WHL_TORCH_VERSIONS:+ --build-arg WHL_TORCH_VERSIONS=$WHL_TORCH_VERSIONS}"
+if [ -n "$ROCM_VERSION" ]; then
+    BUILD_ARGS+=" --build-arg GPU_STACK=rocm --build-arg ROCM_VERSION=$ROCM_VERSION"
+fi
 BUILD_ARGS+=" --build-arg WHL_PLATFORM=$WHL_PLATFORM"
 BUILD_ARGS+=" --build-arg ARCH=$ARCH"
 BUILD_ARGS+=" --build-arg UCX_REPO=$UCX_REPO"
@@ -511,6 +598,13 @@ if [ -n "$WHEEL_BASE_IMAGE" ]; then
     # Not named BUILD_TARGET: Jenkins exports a BUILD_TARGET job parameter
     # (nixl/nixlbench) that would leak into the docker command line.
     DOCKER_BUILD_TARGET="--target wheel"
+fi
+
+if [ -n "$WHEEL_OUTPUT_DIR" ]; then
+    if ! grep -q '^FROM .* AS wheel_dist$' "$DOCKER_FILE"; then
+        error "ERROR:" "--wheel-output-dir requires a dockerfile with a wheel_dist stage (contrib/Dockerfile.manylinux); $DOCKER_FILE has none"
+    fi
+    DOCKER_BUILD_TARGET="--target wheel_dist --output type=local,dest=$WHEEL_OUTPUT_DIR"
 fi
 
 # Infinia DDN libs: pre-pulled from Artifactory on the host and placed flat into

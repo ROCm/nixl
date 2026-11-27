@@ -1,6 +1,7 @@
 #!/bin/bash
 
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -23,6 +24,10 @@ NIXL_PLUGINS_DIR="/usr/local/nixl/lib/$ARCH-linux-gnu/plugins"
 OUTPUT_DIR="dist"
 BUILD_NIXL_EP="false"
 TORCH_VERSIONS=""
+# Set by --rocm-path only: a ROCM_PATH in the environment must not turn a
+# CUDA build into a ROCm one.
+ROCM_PATH=""
+WHL_FILE_PREFIX="nixl"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -60,6 +65,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --nixl-plugins-dir: Directory to find NIXL plugins in (default: $NIXL_PLUGINS_DIR)"
             echo "  --build-nixl-ep: Include the NIXL EP example (sm_90 or newer) and the experimental topology-aware API shell"
             echo "  --torch-versions: Comma-separated list of torch versions to build the wheel for (default: $TORCH_VERSIONS)"
+            echo "  --rocm-path: ROCm installation prefix, e.g. /opt/rocm; build the wheel for that ROCm install instead of for CUDA (x86_64 only)"
             echo "  --help: Show this help message"
             echo ""
             echo "Must be executed from the root of the NIXL repository."
@@ -71,6 +77,11 @@ while [[ $# -gt 0 ]]; do
             ;;
         --torch-versions)
             TORCH_VERSIONS=$2
+            shift
+            shift
+            ;;
+        --rocm-path)
+            ROCM_PATH=$2
             shift
             shift
             ;;
@@ -86,32 +97,112 @@ if [ "$BUILD_NIXL_EP" = "true" ] && [ -z "$TORCH_VERSIONS" ]; then
     exit 1
 fi
 
+# The ROCm runtime comes from the host installation and must never be vendored.
+ROCM_RUNTIME_LIBS=(
+    "libamdhip64"
+    "libhipfile"
+    "libhsa-runtime64"
+    "librocm_sysdeps"
+    "librocprofiler-register"
+    "libamd_comgr"
+)
+ROCM_PREFIX_LIBS=()
+
+# Names of the shared libraries at the top level of <rocm-path>/lib, without
+# the .so suffix. A name the system library directories also provide is left
+# out: excluding it would stop auditwheel from vendoring the system copy too.
+rocm_prefix_libs() {
+    local lib name sysdir known
+    shopt -s nullglob
+    for lib in "$ROCM_PATH"/lib/lib*.so*; do
+        name=$(basename "$lib")
+        name=${name%%.so*}
+        known="false"
+        for sysdir in /lib64 /usr/lib64 /lib /usr/lib "/usr/lib/$ARCH-linux-gnu" /usr/local/lib64 /usr/local/lib; do
+            if compgen -G "$sysdir/$name.so*" >/dev/null; then
+                known="true"
+                break
+            fi
+        done
+        if [ "$known" = "false" ]; then
+            echo "$name"
+        fi
+    done | sort -u
+    shopt -u nullglob
+}
+
+GPU_STACK="cuda"
+if [ -n "$ROCM_PATH" ]; then
+    GPU_STACK="rocm"
+    if [ "$ARCH" != "x86_64" ]; then
+        echo "ERROR: --rocm-path is only supported on x86_64 (this machine is $ARCH)" >&2
+        exit 1
+    fi
+    if [ "$BUILD_NIXL_EP" = "true" ]; then
+        echo "ERROR: --build-nixl-ep is not supported with --rocm-path (nixl_ep is CUDA-only)" >&2
+        exit 1
+    fi
+    if [ ! -d "$ROCM_PATH/lib" ]; then
+        echo "ERROR: no ROCm installation at '$ROCM_PATH' (given with --rocm-path)" >&2
+        exit 1
+    fi
+    ROCM_VERSION=$(cat "$ROCM_PATH/.info/version" "$ROCM_PATH/core/.info/version" 2>/dev/null | grep -Eom1 '^[0-9]+\.[0-9]+(\.[0-9]+)?')
+    if ! [[ "$ROCM_VERSION" =~ ^([0-9]+)\.([0-9]+)(\.[0-9]+)?$ ]]; then
+        echo "ERROR: cannot read the ROCm version from $ROCM_PATH/.info/version or $ROCM_PATH/core/.info/version" >&2
+        exit 1
+    fi
+    ROCM_MAJOR="${BASH_REMATCH[1]}"
+    ROCM_MINOR="${BASH_REMATCH[2]}"
+    ROCM_VARIANT="rocm${ROCM_MAJOR}_${ROCM_MINOR}"
+    mapfile -t ROCM_PREFIX_LIBS < <(rocm_prefix_libs)
+fi
+
 set -e
 set -x
 
 TMP_DIR=$(mktemp -d)
 
-CUDA_MAJOR=$(nvcc --version | grep -Eo 'release [0-9]+\.[0-9]+' | cut -d' ' -f2 | cut -d'.' -f1)
-if [ "$CUDA_MAJOR" != "13" ]; then
-    echo "ERROR: NIXL requires CUDA 13, found CUDA '${CUDA_MAJOR}'" >&2
-    exit 1
-fi
-AUDITWHEEL_EXCLUDES="--exclude libcuda* --exclude libcufile* --exclude libcuobjclient* --exclude libssl* --exclude libcrypto* --exclude libefa* --exclude libhwloc* --exclude libfabric* --exclude libtorch* --exclude libc10* --exclude libdoca* --exclude libred_client* --exclude libred_async* --exclude liblz4*"
+if [ "$GPU_STACK" = "rocm" ]; then
+    AUDITWHEEL_EXCLUDES="--exclude libssl* --exclude libcrypto* --exclude libefa*"
+    AUDITWHEEL_EXCLUDES+=" --exclude libhwloc* --exclude libfabric* --exclude libdoca*"
+    AUDITWHEEL_EXCLUDES+=" --exclude libred_client* --exclude libred_async* --exclude liblz4*"
+    for LIB in "${ROCM_RUNTIME_LIBS[@]}"; do
+        AUDITWHEEL_EXCLUDES+=" --exclude ${LIB}*"
+    done
+    for LIB in "${ROCM_PREFIX_LIBS[@]}"; do
+        AUDITWHEEL_EXCLUDES+=" --exclude ${LIB}.so*"
+    done
+    # Distribution nixl-rocm<X>.<Y>; its normalized name, which prefixes the wheel
+    # file, is the import package nixl_rocm<X>_<Y>.
+    PKG_NAME="nixl-rocm${ROCM_MAJOR}.${ROCM_MINOR}"
+    WHL_FILE_PREFIX="nixl_${ROCM_VARIANT}-"
+    echo "=== Building ${PKG_NAME} for ROCm ${ROCM_VERSION} (import package nixl_${ROCM_VARIANT}) ==="
+    echo "=== auditwheel excludes: ${AUDITWHEEL_EXCLUDES} ==="
 
-PKG_NAME="nixl-cu13"
-# torch wheel index, pinned in Dockerfile.manylinux.
-CU_TAG="${TORCH_CUDA_INDEX:-cu132}"
-case "$CU_TAG" in
-    cu13[0-9]*) ;;
-    *)
-        echo "ERROR: torch index '$CU_TAG' is not a CUDA 13 index" >&2
+    ./contrib/tomlutil.py --wheel-name "$PKG_NAME" --remove-dependency torch pyproject.toml
+else
+    CUDA_MAJOR=$(nvcc --version | grep -Eo 'release [0-9]+\.[0-9]+' | cut -d' ' -f2 | cut -d'.' -f1)
+    if [ "$CUDA_MAJOR" != "13" ]; then
+        echo "ERROR: NIXL requires CUDA 13, found CUDA '${CUDA_MAJOR}'" >&2
         exit 1
-        ;;
-esac
-./contrib/tomlutil.py --wheel-name $PKG_NAME pyproject.toml
+    fi
+    AUDITWHEEL_EXCLUDES="--exclude libcuda* --exclude libcufile* --exclude libcuobjclient* --exclude libssl* --exclude libcrypto* --exclude libefa* --exclude libhwloc* --exclude libfabric* --exclude libtorch* --exclude libc10* --exclude libdoca* --exclude libred_client* --exclude libred_async* --exclude liblz4*"
 
-TORCH_STABLE_INDEX="https://download.pytorch.org/whl/${CU_TAG}"
-TORCH_NIGHTLY_INDEX="https://download.pytorch.org/whl/nightly/${CU_TAG}"
+    PKG_NAME="nixl-cu13"
+    # torch wheel index, pinned in Dockerfile.manylinux.
+    CU_TAG="${TORCH_CUDA_INDEX:-cu132}"
+    case "$CU_TAG" in
+        cu13[0-9]*) ;;
+        *)
+            echo "ERROR: torch index '$CU_TAG' is not a CUDA 13 index" >&2
+            exit 1
+            ;;
+    esac
+    ./contrib/tomlutil.py --wheel-name $PKG_NAME pyproject.toml
+
+    TORCH_STABLE_INDEX="https://download.pytorch.org/whl/${CU_TAG}"
+    TORCH_NIGHTLY_INDEX="https://download.pytorch.org/whl/nightly/${CU_TAG}"
+fi
 
 # Build deps for the per-iteration venv; torch is installed separately.
 BUILD_DEPS=(
@@ -271,6 +362,12 @@ build_wheel() {
             -Csetup-args=-Dbuild_examples=true
         )
     fi
+    if [ "$GPU_STACK" = "rocm" ]; then
+        BUILD_ARGS+=(
+            -Csetup-args=-Drocm_path="$ROCM_PATH"
+            -Csetup-args=-Dwheel_variant="$ROCM_VARIANT"
+        )
+    fi
     uv build "${BUILD_ARGS[@]}"
 
     deactivate
@@ -283,8 +380,73 @@ repair_wheel() {
     local IN_DIR=$1
     local OUT_DIR=$2
     mkdir -p "$OUT_DIR"
-    auditwheel repair $AUDITWHEEL_EXCLUDES "$IN_DIR"/nixl*.whl --plat "$WHL_PLATFORM" --wheel-dir "$OUT_DIR"
+    auditwheel repair $AUDITWHEEL_EXCLUDES "$IN_DIR"/"$WHL_FILE_PREFIX"*.whl --plat "$WHL_PLATFORM" --wheel-dir "$OUT_DIR"
     ./contrib/wheel_add_ucx_plugins.py --ucx-plugins-dir "$UCX_PLUGINS_DIR" --nixl-plugins-dir "$NIXL_PLUGINS_DIR" "$OUT_DIR"/*.whl
+    if [ "$GPU_STACK" = "rocm" ]; then
+        check_rocm_wheel "$OUT_DIR"/"$WHL_FILE_PREFIX"*.whl
+    fi
+}
+
+# A backend wheel is later merged with those for the other ROCm versions into
+# the nixl-rocm wheel (wheel_merge_rocm.py). Fail here, in the build that went
+# wrong, rather than in the merge or on a user's machine, if the repaired wheel:
+# - vendors a ROCm runtime library. auditwheel copies in every library that no
+#   --exclude matches; such a copy would be loaded next to the host's ROCm,
+#   which the backend was selected for and the application (e.g. PyTorch) uses;
+# - vendors a DOCA library, which comes from the host as in the CUDA wheels;
+# - has an import package other than nixl_<variant>, the name the dispatcher
+#   imports and what lets the backends for several ROCm versions share a wheel;
+# - carries the nixl dispatcher (nixl/, nixl_meta_utils.py), which
+#   wheel_merge_rocm.py adds once and which would collide between backends;
+# - carries nixl_ep, which is CUDA-only.
+check_rocm_wheel() {
+    python3 - "$1" "$ROCM_VARIANT" "${ROCM_RUNTIME_LIBS[*]}" "${ROCM_PREFIX_LIBS[*]}" <<'EOF'
+import os
+import re
+import sys
+import zipfile
+
+wheel, variant, runtime_libs, prefix_libs = sys.argv[1:5]
+with zipfile.ZipFile(wheel) as whl:
+    names = whl.namelist()
+
+patterns = [re.compile(re.escape(lib)) for lib in runtime_libs.split()]
+# auditwheel renames what it vendors to <name>-<hash>.so[.N].
+patterns += [
+    re.compile(re.escape(lib) + r"(-[0-9a-f]{8})?\.so")
+    for lib in prefix_libs.split()
+]
+vendored = sorted(
+    n for n in names if any(p.match(os.path.basename(n)) for p in patterns)
+)
+
+top_dirs = {n.split("/", 1)[0] for n in names if "/" in n}
+# \w* keeps out nixl_<variant>.libs and nixl_<variant>-<version>.dist-info.
+backends = sorted(d for d in top_dirs if re.fullmatch(r"nixl_(rocm|cu)\w*", d))
+expected = "nixl_" + variant
+
+errors = []
+if "nixl" in top_dirs:
+    errors.append("the nixl dispatcher package must not be in a ROCm backend wheel")
+if "nixl_meta_utils.py" in names:
+    errors.append("nixl_meta_utils.py must not be in a ROCm backend wheel")
+ep = sorted(d for d in top_dirs if d == "nixl_ep" or d.startswith("nixl_ep_"))
+if ep:
+    errors.append("nixl_ep must not be in a ROCm backend wheel: " + ", ".join(ep))
+if vendored:
+    errors.append("ROCm runtime libraries were vendored: " + ", ".join(vendored))
+doca = sorted(n for n in names if os.path.basename(n).startswith("libdoca"))
+if doca:
+    errors.append("DOCA libraries were vendored: " + ", ".join(doca))
+if backends != [expected]:
+    errors.append(
+        "expected import package '%s', found: %s"
+        % (expected, ", ".join(backends) or "none")
+    )
+for error in errors:
+    print("ERROR: %s: %s" % (os.path.basename(wheel), error), file=sys.stderr)
+sys.exit(1 if errors else 0)
+EOF
 }
 
 # Echo the path of the single .whl in $1, or exit if the count is not 1.
