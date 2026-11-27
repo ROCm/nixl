@@ -148,6 +148,17 @@ boot guests do so with
 [`fleet-overlay-common.xml`](../rocjitsu/fleet-overlay-common.xml), which
 pins the images by digest.
 
+The same call builds the CUDA wheel too, in the `CUDA build` job: the wheels
+branch adds its ROCm path to the files NVIDIA's CUDA wheels are built with
+(`contrib/Dockerfile.manylinux`, `build-container.sh`, `build-wheel.sh`), so
+the job runs that flow with no ROCm option, from the same commit, for one
+Python and one PyTorch version. It checks that what comes out is a CUDA wheel:
+`nixl-cu13`, requiring `torch`, with the CUDA-only plugins and `nixl_ep`, and
+the `nixl` meta wheel. The wheel is built and not run, as no runner has an
+NVIDIA GPU, and it is not published. Its dependency stage has a build cache of
+its own, `cuda-wheel-base`, written under the same rule as the ROCm ones; it
+holds the CUDA toolkit, so watch its size against the repository's limit.
+
 Every branch is built for all three ROCm versions. The merge fails for a
 branch whose `contrib/wheel_merge_rocm.py` has no PyTorch pin for one of them,
 so a ROCm version is added to the wheels branch before it is added to the
@@ -162,10 +173,12 @@ wheels branch is the exception: the run fails if it cannot build them.
 
 The run fails when the sync fails, or when a branch that can build ROCm wheels
 does not pass. A branch passes when the `plan`, `build`, `merge`, `test` and
-`rocjitsu` jobs of its wheel workflow all succeed and wheels came out. Two
-things are allowed to fail and are only reported:
+`rocjitsu` jobs of its wheel workflow all succeed and wheels came out. These
+are allowed to fail and are only reported:
 
 - the two-guest job, `rocjitsu-2vm`;
+- the C++ unit tests in the guest, `unit`;
+- the CUDA build, `cuda` (below);
 - everything about the nixlbench wheel: its steps in `build`, which cannot
   fail that job, and the `nixlbench wheel` job. A branch whose nixlbench wheel
   did not build passes as if it had none, and the `nixl-rocm` wheels are

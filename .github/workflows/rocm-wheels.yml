@@ -610,6 +610,133 @@ jobs:
           fi
           exit 0
 
+  # The wheels branch adds the ROCm path to the files NVIDIA's CUDA wheels are
+  # built with (Dockerfile.manylinux, build-container.sh, build-wheel.sh), so
+  # the CUDA wheel is built from the same commit, with no ROCm option, to see
+  # that it still builds. One Python and one PyTorch: enough to go through
+  # every stage. It is built, not run: no runner has an NVIDIA GPU. Not one of
+  # the nightly's required jobs.
+  cuda:
+    name: CUDA build
+    needs: plan
+    if: needs.plan.outputs.supported == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      CUDA_PYTHON_VERSION: '3.12'
+      CUDA_TORCH_VERSION: '2.14'
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/share/swift /usr/local/lib/android \
+            /usr/local/.ghcup /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          df -h /
+
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Expose the Actions cache to BuildKit
+        uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
+
+      # As in the ROCm build: only the dependency stage is cached, and the plan
+      # job decides which build writes the cache.
+      - name: Build the dependency stage
+        env:
+          CACHE_SCOPE: cuda-wheel-base
+          WRITE_CACHE: ${{ needs.plan.outputs.write-cache }}
+        run: |
+          set -euo pipefail
+          cache="--cache-from type=gha,scope=${CACHE_SCOPE}"
+          if [ "$WRITE_CACHE" = "true" ]; then
+            cache+=" --cache-to type=gha,mode=max,ignore-error=true,scope=${CACHE_SCOPE}"
+          fi
+          DOCKER_BUILD_EXTRA_ARGS="--target wheel_base ${cache}" \
+            ./contrib/build-container.sh \
+              --dockerfile contrib/Dockerfile.manylinux \
+              --python-versions "$CUDA_PYTHON_VERSION" \
+              --tag nixl-wheel-base:cuda
+
+      - name: Build the wheels
+        run: |
+          set -euo pipefail
+          ./contrib/build-container.sh \
+            --dockerfile contrib/Dockerfile.manylinux \
+            --python-versions "$CUDA_PYTHON_VERSION" \
+            --torch-versions "$CUDA_TORCH_VERSION" \
+            --wheel-output-dir dist
+
+      # What tells a CUDA wheel from one the ROCm path produced by mistake:
+      # its name, its torch requirement, the CUDA-only plugins and nixl_ep.
+      - name: Check the wheels
+        run: |
+          set -euo pipefail
+          df -h /
+          ls -l dist
+          python3 -I - <<'EOF'
+          import email.parser
+          import pathlib
+          import sys
+          import zipfile
+
+          errors = []
+          dist = pathlib.Path("dist")
+          backends = sorted(dist.glob("nixl_cu13-*.whl"))
+          metas = sorted(dist.glob("nixl-*-py3-none-any.whl"))
+          others = sorted(set(dist.glob("*.whl")) - set(backends) - set(metas))
+          if len(backends) != 1:
+              errors.append(f"expected one nixl_cu13 wheel, found {[p.name for p in backends]}")
+          if len(metas) != 1:
+              errors.append(f"expected one nixl meta wheel, found {[p.name for p in metas]}")
+          if others:
+              errors.append(f"unexpected wheels: {[p.name for p in others]}")
+
+
+          def metadata(wheel, names):
+              (member,) = [n for n in names if n.endswith(".dist-info/METADATA")]
+              return email.parser.BytesHeaderParser().parsebytes(wheel.read(member))
+
+
+          for path in backends:
+              with zipfile.ZipFile(path) as wheel:
+                  names = wheel.namelist()
+                  headers = metadata(wheel, names)
+              plugins = {
+                  pathlib.PurePosixPath(n).name[len("libplugin_"):-len(".so")]
+                  for n in names
+                  if "/plugins/libplugin_" in n and n.endswith(".so")
+              }
+              print(f"{path.name}: plugins {', '.join(sorted(plugins))}")
+              missing = {"UCX", "POSIX", "LIBFABRIC", "GDS", "OBJ"} - plugins
+              if missing:
+                  errors.append(f"{path.name}: no {', '.join(sorted(missing))} plugin")
+              if headers["Name"] != "nixl-cu13":
+                  errors.append(f"{path.name}: METADATA Name is {headers['Name']}")
+              requires = [r.split(";")[0].strip() for r in headers.get_all("Requires-Dist") or []]
+              if "torch" not in requires:
+                  errors.append(f"{path.name}: does not require torch ({requires})")
+              if not any(n.startswith("nixl_ep_cu13/") and n.endswith(".so") for n in names):
+                  errors.append(f"{path.name}: no nixl_ep_cu13 extension")
+              if any(n.split("/")[0].startswith("nixl_rocm") for n in names):
+                  errors.append(f"{path.name}: holds a ROCm package")
+          for path in metas:
+              with zipfile.ZipFile(path) as wheel:
+                  headers = metadata(wheel, wheel.namelist())
+              requires = headers.get_all("Requires-Dist") or []
+              print(f"{path.name}: requires {requires}")
+              if not any(r.startswith("nixl-cu13==") for r in requires):
+                  errors.append(f"{path.name}: does not require nixl-cu13 ({requires})")
+          for error in errors:
+              print(f"::error::{error}")
+          sys.exit(1 if errors else 0)
+          EOF
+
   build-unit-tests:
     name: Build unit tests (${{ matrix.rocm-version }})
     needs: plan
@@ -1243,7 +1370,7 @@ jobs:
   # wheels, so that a caller always finds one results.json per ref.
   results:
     name: Results
-    needs: [plan, build, build-unit-tests, merge, test, rocjitsu, rocjitsu-2vm, unit, nixlbench]
+    needs: [plan, build, cuda, build-unit-tests, merge, test, rocjitsu, rocjitsu-2vm, unit, nixlbench]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -1306,6 +1433,7 @@ jobs:
               "rocjitsu": "rocjitsu (",
               "rocjitsu-2vm": "rocjitsu two guests (",
               "unit": "unit (",
+              "cuda": "CUDA build",
           }
           OWN_NAME = "Results"
 
