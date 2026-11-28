@@ -2,6 +2,69 @@
  "schema": 1,
  "runs": [
   {
+   "stamp": "20261128T032929Z",
+   "run_id": 46103037993,
+   "upstream_main_sha": "aa6d5f29f2bda86b7971821d364bfaa26c478f29",
+   "branches": [
+    {
+     "branch": "main",
+     "slug": "main",
+     "passed": false,
+     "supported": false,
+     "version": "1.6.0",
+     "sha": "89c26f2ed09d4b2d12efc67248b56f2494ea254b"
+    },
+    {
+     "branch": "for-upstream/ci/rocm-image",
+     "slug": "for-upstream-ci-rocm-image",
+     "passed": false,
+     "supported": false,
+     "version": "1.6.0",
+     "sha": "2bc393bab46450d8b86652556fbdebc02990505d"
+    },
+    {
+     "branch": "for-upstream/feat/rocm-wheels",
+     "slug": "for-upstream-feat-rocm-wheels",
+     "passed": true,
+     "supported": true,
+     "version": "1.6.0.dev20261128",
+     "sha": "1f848318154736aea70a11dd8d9bde9312a8fc89"
+    },
+    {
+     "branch": "for-upstream/fix/libfabric-hip-nodiscard",
+     "slug": "for-upstream-fix-libfabric-hip-nodiscard",
+     "passed": false,
+     "supported": false,
+     "version": "1.6.0",
+     "sha": "e945e4994a57c1645b8813156e334e5fb846d8ee"
+    },
+    {
+     "branch": "for-upstream/fix/nixlbench-consistency-detail",
+     "slug": "for-upstream-fix-nixlbench-consistency-detail",
+     "passed": false,
+     "supported": false,
+     "version": "1.6.0",
+     "sha": "76c4c9ca8a03cd29b52b02a5dcde1d8470fab84f"
+    },
+    {
+     "branch": "for-upstream/fix/nixlbench-vram-fill",
+     "slug": "for-upstream-fix-nixlbench-vram-fill",
+     "passed": false,
+     "supported": false,
+     "version": "1.6.0",
+     "sha": "4c07f036fbb8dc4564842aa8697db6b5c08bc2c6"
+    },
+    {
+     "branch": "for-upstream/fix/rocm-import-without-torch",
+     "slug": "for-upstream-fix-rocm-import-without-torch",
+     "passed": false,
+     "supported": false,
+     "version": "1.6.0",
+     "sha": "609ec640018bab7555437629345c2646eb07b9a4"
+    }
+   ]
+  },
+  {
    "stamp": "20261127T033007Z",
    "run_id": 45934479232,
    "upstream_main_sha": "9b6e8edfc8140e1a3cda6611e3b90b673dfebb5a",
