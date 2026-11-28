@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>nixlbench run 2026-11-28 03:29 UTC · for-upstream/feat/rocm-wheels</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff; --fg: #1f2328; --muted: #59636e; --rule: #d1d9e0;
+  --card: #f6f8fa; --series: #2a78d6;
+  --pass: #1baf7a; --fail: #d03b3b; --skip: #fab219; --blocked: #8c959f;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117; --fg: #e6edf3; --muted: #9198a1; --rule: #3d444d;
+    --card: #151b23; --series: #5b9dea;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0 auto; padding: 1.5rem 1rem 3rem; max-width: 84rem;
+  background: var(--bg); color: var(--fg);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
+h2 { font-size: 1.25rem; margin: 2.5rem 0 .25rem; padding-top: 1rem;
+     border-top: 1px solid var(--rule); }
+h3 { font-size: 1rem; margin: 1.5rem 0 .5rem; }
+p { margin: .4rem 0; }
+ul { margin: .4rem 0; padding-left: 1.3rem; }
+a { color: var(--series); }
+code, pre { font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+code { overflow-wrap: anywhere; }
+pre { margin: .2rem 0 .5rem; padding: .4rem .6rem; max-height: 16rem;
+  overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  background: var(--card); border: 1px solid var(--rule); border-radius: 6px; }
+.muted { color: var(--muted); }
+.note { border-left: 3px solid var(--skip); padding: .4rem .8rem;
+        background: var(--card); margin: .8rem 0; }
+.verdict { margin: .8rem 0; padding: .6rem .9rem; border-radius: 8px;
+  font-size: 1.15rem; font-weight: 600; background: var(--card);
+  border: 1px solid var(--rule); border-left: .5rem solid var(--pass); }
+.verdict.fail { background: var(--fail); border-color: var(--fail);
+  color: #ffffff; }
+.verdict a { color: inherit; }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; vertical-align: top;
+  padding: .3rem .9rem .3rem 0; border-bottom: 1px solid var(--rule); }
+thead th { font-weight: 600; vertical-align: bottom; }
+td.num, th.num { text-align: right; }
+td.num { white-space: nowrap; }
+td.key { min-width: 13rem; }
+td.nowrap { white-space: nowrap; }
+td.wrap { overflow-wrap: anywhere; }
+table.grid { font-size: 12px; }
+table.grid th, table.grid td { padding-right: .45rem; }
+tr.main > td { border-bottom: 0; padding-bottom: .1rem; }
+tr.more > td { padding-top: 0; }
+.label { font-size: 12px; color: var(--muted); margin: .3rem 0 0; }
+.st { display: inline-block; padding: 0 .4rem; border-radius: 4px;
+  font-weight: 600; white-space: nowrap; border: 1px solid transparent; }
+.st.pass { background: var(--pass); color: #04281b; }
+.st.fail { background: var(--fail); color: #ffffff; }
+.st.skip { background: var(--skip); color: #3a2800; }
+.st.blocked { background: var(--blocked); color: #0d1117; }
+.st.none, .st.muted { border-color: var(--rule); color: var(--muted); }
+.badge { display: inline-block; padding: 0 .35rem; border-radius: 4px;
+  border: 1px solid var(--fail); font-size: 11px; font-weight: 600; }
+details { margin: .3rem 0; }
+summary { cursor: pointer; }
+summary > h2 { display: inline; border: 0; margin: 0; padding: 0; }
+details.section { margin-top: 2.5rem; padding-top: 1rem;
+  border-top: 1px solid var(--rule); }
+.legend { font-size: 12px; color: var(--muted); list-style: none;
+  padding: 0; display: flex; flex-wrap: wrap; gap: .3rem 1.4rem; }
+footer { margin-top: 2.5rem; padding-top: 1rem; font-size: 13px;
+  border-top: 1px solid var(--rule); }
+</style>
+</head>
+<body>
+<p class="muted"><a href="../../index.html">NIXL on ROCm: nightly results</a> › <a href="../index.html">nixlbench runs</a> › this run</p>
+<h1>nixlbench run of 2026-11-28 03:29 UTC</h1>
+<p>branch <b>for-upstream/feat/rocm-wheels</b> · commit <a href="https://github.com/ROCm/nixl/commit/1f848318154736aea70a11dd8d9bde9312a8fc89"><code>1f84831815</code></a> · NIXL 1.6.0.dev20261128 · tier nightly · reason nightly · started 2026-11-28 04:59 UTC · took 10m 01s</p>
+<p><a href="https://github.com/ROCm/nixl/actions/runs/46109922344/attempts/1">Actions run 46109922344 attempt 1</a> · <a href="https://github.com/ROCm/nixl/actions/runs/46103037993">nightly run</a> · <a href="https://github.com/ROCm/nixl/releases/download/bench-raw-2026-11/bench-20261128T032929Z-for-upstream-feat-rocm-wheels-46109922344.a1.ndjson.gz">raw records</a> · <a href="https://github.com/ROCm/nixl/releases/download/bench-raw-2026-11/bench-20261128T032929Z-for-upstream-feat-rocm-wheels-46109922344.a1.logs.tar.gz">logs tarball</a> · <a href="https://github.com/ROCm/nixl/releases/tag/bench-raw-2026-11">release of the raw files</a> · <a href="../../data/bench/v1/matrix/4a0cda6a0b132c019de6263d1e23bdf54e4c25c6161ce9e7d2e326f30435d9da.json">matrix</a> · <a href="../../data/bench/v1/night/20261128T032929Z/for-upstream-feat-rocm-wheels/46109922344.a1/index.json">index.json</a></p>
+<p class="verdict fail"><a href="#failures">2 of 307 cases crashed · 37 skipped · 82 blocked · 186 passed</a></p>
+<p>Jump to: <a href="#failures">failures (2)</a> · <a href="#skipped">skipped (37)</a> · <a href="#lanes">lanes</a> · <a href="#coverage">blocked</a> · <a href="#ratios">ratios</a></p>
+<h2 id="failures">Failed, timed out, crashed or not run (2)</h2>
+<h3 id="groups">By cause (2 groups)</h3>
+<div class="scroll">
+<table>
+<thead><tr><th class="num">Count</th><th>Status</th><th>Reason</th><th>Backend</th><th>Engine / transport</th><th>Memory</th><th>Lanes</th><th>ROCm</th><th>Rows seen/expected</th><th>Duration</th></tr></thead>
+<tbody>
+<tr class="main"><td class="num">1</td><td><span class="st fail">crash</span></td><td>asio</td><td>UCX</td><td>tcp</td><td>VRAM→VRAM ×1</td><td>vm2-net ×1</td><td>10.2.0</td><td>10/11</td><td>210.3 s</td></tr>
+<tr class="more"><td></td><td colspan="9"><div class="label">error excerpt of the first case</div><pre>nixlbench: SG mode — set NEURON_RT_NUM_CORES=1
+terminate called after throwing an instance of &#x27;std::runtime_error&#x27;
+what(): ASIO Receive timeout
+bash: line 10: 6680 Aborted (core dumped)</pre></td></tr>
+<tr class="main"><td class="num">1</td><td><span class="st fail">crash</span></td><td>signal</td><td>UCX</td><td>rc</td><td>VRAM→VRAM ×1</td><td>vm1-loop ×1</td><td>10.2.0</td><td>10/10</td><td>110.2 s</td></tr>
+<tr class="more"><td></td><td colspan="9"><div class="label">error excerpt of the first case</div><pre>nixlbench: SG mode — set NEURON_RT_NUM_CORES=1
+munmap_chunk(): invalid pointer
+bash: line 10: 13894 Aborted (core dumped)</pre></td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="cases">Every case (2)</h3>
+<div class="scroll">
+<table>
+<thead><tr><th>Status</th><th>Case</th><th>Lane</th><th>ROCm</th><th>Backend</th><th>Engine</th><th>Transport (asked → seen)</th><th>Memory</th><th>Op</th><th>Reason</th><th>Exit init / tgt</th><th class="num">Rows seen/expected</th><th class="num">Duration</th></tr></thead>
+<tbody>
+<tr class="main" id="case-10-2-0-vm1-loop-ucx-rc-VV-WRITE-N-r-head-0"><td><span class="st fail">crash</span></td><td class="key"><code>vm1-loop/ucx/rc/VV/WRITE/N-r</code></td><td>vm1-loop</td><td>10.2.0</td><td>UCX</td><td>-</td><td>rc → rc</td><td>VRAM→VRAM</td><td>WRITE</td><td>signal</td><td>134 (signal 6 ABRT) / 134 (signal 6 ABRT)</td><td class="num">10/10</td><td class="num">110.2 s</td></tr>
+<tr class="more"><td></td><td colspan="12"><div class="label">error excerpt</div><pre>nixlbench: SG mode — set NEURON_RT_NUM_CORES=1
+munmap_chunk(): invalid pointer
+bash: line 10: 13894 Aborted (core dumped)</pre><div>Both sides exited non-zero; the record does not say which side the excerpt is from: read <code>tgt.stderr.log</code> and <code>init.stderr.log</code>.</div><details><summary>Command line</summary><pre>UCX_LOG_FILE=/home/ubuntu/amd-bench/run/331e7704b934413df03e/018-vm1-loop__ucx__rc__VV__WRITE__N-r/init.ucx.log UCX_NET_DEVICES=ernic0:1 UCX_PROTO_INFO=y UCX_TLS=rc,rocm /home/ubuntu/amd-bench/venv/bin/nixlbench --backend=UCX --runtime_type=ASIO --asio_address=127.0.0.1 --asio_port=21018 --op_type=WRITE --initiator_seg_type=VRAM --target_seg_type=VRAM --scheme=pairwise --num_threads=1 --check_consistency=true --large_blk_iter_ftr=4 --max_batch_size=4 --max_block_size=2097152 --num_iter=128 --start_batch_size=4 --start_block_size=4096 --total_buffer_size=67108864 --warmup_iter=16</pre></details><div>Logs: <code>vm1-loop-10.2.0/logs/018-vm1-loop__ucx__rc__VV__WRITE__N-r/</code> in the <a href="https://github.com/ROCm/nixl/releases/download/bench-raw-2026-11/bench-20261128T032929Z-for-upstream-feat-rocm-wheels-46109922344.a1.logs.tar.gz">logs tarball</a> (<code>init.stdout.log</code>, <code>init.stderr.log</code>; two-sided cases also <code>init.ucx.log</code> and <code>tgt.*</code>).</div></td></tr>
+<tr class="main" id="case-10-2-0-vm2-net-ucx-tcp-VV-WRITE-N-head-0"><td><span class="st fail">crash</span></td><td class="key"><code>vm2-net/ucx/tcp/VV/WRITE/N</code></td><td>vm2-net</td><td>10.2.0</td><td>UCX</td><td>-</td><td>tcp → tcp</td><td>VRAM→VRAM</td><td>WRITE</td><td>asio</td><td>134 (signal 6 ABRT) / 137 (signal 9 KILL)</td><td class="num">10/11</td><td class="num">210.3 s</td></tr>
+<tr class="more"><td></td><td colspan="12"><div class="label">error excerpt</div><pre>nixlbench: SG mode — set NEURON_RT_NUM_CORES=1
+terminate called after throwing an instance of &#x27;std::runtime_error&#x27;
+what(): ASIO Receive timeout
+bash: line 10: 6680 Aborted (core dumped)</pre><div>Both sides exited non-zero; the record does not say which side the excerpt is from: read <code>tgt.stderr.log</code> and <code>init.stderr.log</code>.</div><details><summary>Command line</summary><pre>UCX_LOG_FILE=/home/ubuntu/amd-bench/run/25e8dc27112663a3a93c/012-vm2-net__ucx__tcp__VV__WRITE__N/init.ucx.log UCX_NET_DEVICES=rocm-ernic0,ernic0:1 UCX_PROTO_INFO=y UCX_TLS=tcp,rocm /home/ubuntu/amd-bench/venv/bin/nixlbench --backend=UCX --runtime_type=ASIO --asio_address=192.168.100.11 --asio_port=21012 --op_type=WRITE --initiator_seg_type=VRAM --target_seg_type=VRAM --scheme=pairwise --num_threads=1 --check_consistency=true --large_blk_iter_ftr=4 --max_batch_size=4 --max_block_size=4194304 --num_iter=128 --start_batch_size=4 --start_block_size=4096 --total_buffer_size=67108864 --warmup_iter=16</pre></details><div>Logs: <code>vm2-net-10.2.0/logs/012-vm2-net__ucx__tcp__VV__WRITE__N/</code> in the <a href="https://github.com/ROCm/nixl/releases/download/bench-raw-2026-11/bench-20261128T032929Z-for-upstream-feat-rocm-wheels-46109922344.a1.logs.tar.gz">logs tarball</a> (<code>init.stdout.log</code>, <code>init.stderr.log</code>; two-sided cases also <code>init.ucx.log</code> and <code>tgt.*</code>).</div></td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="skipped">Skipped (37)</h2>
+<div class="scroll">
+<table>
+<thead><tr><th class="num">Cases</th><th>Reason</th><th>Why</th><th>Lane</th><th>ROCm</th><th>Case keys</th></tr></thead>
+<tbody>
+<tr><td class="num">13</td><td><span class="st skip">skip</span> device-suspect</td><td>suspect after a failed probe or a kill: gpu</td><td>vm2-net</td><td>10.2.0</td><td><details><summary>13 case keys</summary><code>vm2-net/ucx/rc/DV/READ/S</code><br><code>vm2-net/ucx/rc/DV/WRITE/S</code><br><code>vm2-net/ucx/rc/VD/READ/S</code><br><code>vm2-net/ucx/rc/VD/WRITE/S</code><br><code>vm2-net/ucx/rc/VV/READ/S</code><br><code>vm2-net/ucx/rc/VV/WRITE/N-r</code><br><code>vm2-net/ucx/rc/VV/WRITE/S</code><br><code>vm2-net/ucx/ud/DV/READ/S</code><br><code>vm2-net/ucx/ud/DV/WRITE/S</code><br><code>vm2-net/ucx/ud/VD/READ/S</code><br><code>vm2-net/ucx/ud/VD/WRITE/S</code><br><code>vm2-net/ucx/ud/VV/READ/S</code><br><code>vm2-net/ucx/ud/VV/WRITE/S</code></details></td></tr>
+<tr><td class="num">8</td><td><span class="st skip">skip</span> env</td><td>needs s3</td><td>bench-container</td><td>10.1.0</td><td><details><summary>8 case keys</summary><code>bench-container/obj/crt/READ/N</code><br><code>bench-container/obj/crt/READ/S</code><br><code>bench-container/obj/crt/WRITE/N</code><br><code>bench-container/obj/crt/WRITE/S</code><br><code>bench-container/obj/std/READ/N</code><br><code>bench-container/obj/std/READ/S</code><br><code>bench-container/obj/std/WRITE/N</code><br><code>bench-container/obj/std/WRITE/S</code></details></td></tr>
+<tr><td class="num">8</td><td><span class="st skip">skip</span> env</td><td>needs s3</td><td>bench-container</td><td>10.2.0</td><td><details><summary>8 case keys</summary><code>bench-container/obj/crt/READ/N</code><br><code>bench-container/obj/crt/READ/S</code><br><code>bench-container/obj/crt/WRITE/N</code><br><code>bench-container/obj/crt/WRITE/S</code><br><code>bench-container/obj/std/READ/N</code><br><code>bench-container/obj/std/READ/S</code><br><code>bench-container/obj/std/WRITE/N</code><br><code>bench-container/obj/std/WRITE/S</code></details></td></tr>
+<tr><td class="num">8</td><td><span class="st skip">skip</span> env</td><td>needs s3</td><td>bench-container</td><td>7.14.1</td><td><details><summary>8 case keys</summary><code>bench-container/obj/crt/READ/N</code><br><code>bench-container/obj/crt/READ/S</code><br><code>bench-container/obj/crt/WRITE/N</code><br><code>bench-container/obj/crt/WRITE/S</code><br><code>bench-container/obj/std/READ/N</code><br><code>bench-container/obj/std/READ/S</code><br><code>bench-container/obj/std/WRITE/N</code><br><code>bench-container/obj/std/WRITE/S</code></details></td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="lanes">Lanes</h2>
+<div class="scroll">
+<table>
+<thead><tr><th>Lane</th><th>ROCm</th><th>Environment</th><th>Timing</th><th>Run</th><th class="num">pass</th><th class="num">fail</th><th class="num">timeout</th><th class="num">crash</th><th class="num">skip</th><th class="num">blocked</th><th class="num">not-run</th><th class="num">Tests p/f/s/t</th><th class="num">Calibration GB/s</th><th class="num">Started (UTC)</th><th class="num">Took</th></tr></thead>
+<tbody>
+<tr id="lane-bench-container-10-1-0"><td>bench-container</td><td>10.1.0</td><td>gha-container</td><td>container</td><td><span class="st pass">complete</span></td><td class="num">26</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">8</td><td class="num">7</td><td class="num">0</td><td class="num">0/0/0/0</td><td class="num">15.39</td><td class="num">04:59</td><td class="num">46s</td></tr>
+<tr id="lane-bench-container-10-2-0"><td>bench-container</td><td>10.2.0</td><td>gha-container</td><td>container</td><td><span class="st pass">complete</span></td><td class="num">26</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">8</td><td class="num">7</td><td class="num">0</td><td class="num">0/0/0/0</td><td class="num">14.25</td><td class="num">04:59</td><td class="num">47s</td></tr>
+<tr id="lane-bench-container-7-14-1"><td>bench-container</td><td>7.14.1</td><td>gha-container</td><td>container</td><td><span class="st pass">complete</span></td><td class="num">26</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">8</td><td class="num">7</td><td class="num">0</td><td class="num">0/0/0/0</td><td class="num">14.10</td><td class="num">04:59</td><td class="num">47s</td></tr>
+<tr id="lane-vm1-fabric-10-2-0"><td>vm1-fabric</td><td>10.2.0</td><td>gha-kvm-vm1-nvmeof</td><td>emulated</td><td><span class="st pass">complete</span></td><td class="num">28</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">11</td><td class="num">0</td><td class="num">7/0/0/0</td><td class="num">8.38</td><td class="num">05:01</td><td class="num">1m 00s</td></tr>
+<tr id="lane-vm1-local-10-2-0"><td>vm1-local</td><td>10.2.0</td><td>gha-kvm-vm1</td><td>emulated</td><td><span class="st pass">complete</span></td><td class="num">40</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">13/0/0/0</td><td class="num">9.71</td><td class="num">05:01</td><td class="num">7m 26s</td></tr>
+<tr id="lane-vm1-loop-10-2-0"><td>vm1-loop</td><td>10.2.0</td><td>gha-kvm-vm1-loopback</td><td>emulated</td><td><span class="st pass">complete</span></td><td class="num">20</td><td class="num">0</td><td class="num">0</td><td class="num">1</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">35/0/0/0</td><td class="num">21.70</td><td class="num">05:01</td><td class="num">3m 48s</td></tr>
+<tr id="lane-vm1-pcie-none"><td>vm1-pcie</td><td>none</td><td>gha-kvm-vm1-spdk</td><td>emulated</td><td><span class="st blocked">blocked</span> (W10)</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">36</td><td class="num">0</td><td class="num">0/0/0/0</td><td class="num">-</td><td class="num">-</td><td class="num">-</td></tr>
+<tr id="lane-vm1-s3-none"><td>vm1-s3</td><td>none</td><td>gha-kvm-vm1-s3</td><td>emulated</td><td><span class="st blocked">blocked</span> (W4)</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">8</td><td class="num">0</td><td class="num">0/0/0/0</td><td class="num">-</td><td class="num">-</td><td class="num">-</td></tr>
+<tr id="lane-vm2-lfverbs-none"><td>vm2-lfverbs</td><td>none</td><td>gha-kvm-vm2</td><td>emulated</td><td><span class="st blocked">blocked</span> (W15, W11)</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">4</td><td class="num">0</td><td class="num">0/0/0/0</td><td class="num">-</td><td class="num">-</td><td class="num">-</td></tr>
+<tr id="lane-vm2-net-10-2-0"><td>vm2-net</td><td>10.2.0</td><td>gha-kvm-vm2</td><td>emulated</td><td><span class="st pass">complete</span></td><td class="num">20</td><td class="num">0</td><td class="num">0</td><td class="num">1</td><td class="num">13</td><td class="num">2</td><td class="num">0</td><td class="num">32/0/0/0</td><td class="num">13.73</td><td class="num">05:02</td><td class="num">6m 36s</td></tr>
+</tbody>
+</table>
+</div>
+<ul class="muted">
+<li>bench-container 10.1.0: guest and NIC diagnostics: artifact <code>bench-diagnostics-bench-container-10.1.0-for-upstream-feat-rocm-wheels</code> on the <a href="https://github.com/ROCm/nixl/actions/runs/46109922344/attempts/1">Actions run</a>; expires with the run</li>
+<li>bench-container 10.2.0: guest and NIC diagnostics: artifact <code>bench-diagnostics-bench-container-10.2.0-for-upstream-feat-rocm-wheels</code> on the <a href="https://github.com/ROCm/nixl/actions/runs/46109922344/attempts/1">Actions run</a>; expires with the run</li>
+<li>bench-container 7.14.1: guest and NIC diagnostics: artifact <code>bench-diagnostics-bench-container-7.14.1-for-upstream-feat-rocm-wheels</code> on the <a href="https://github.com/ROCm/nixl/actions/runs/46109922344/attempts/1">Actions run</a>; expires with the run</li>
+<li>vm1-fabric 10.2.0: guest and NIC diagnostics: artifact <code>bench-diagnostics-vm1-fabric-10.2.0-for-upstream-feat-rocm-wheels</code> on the <a href="https://github.com/ROCm/nixl/actions/runs/46109922344/attempts/1">Actions run</a>; expires with the run</li>
+<li>vm1-local 10.2.0: guest and NIC diagnostics: artifact <code>bench-diagnostics-vm1-local-10.2.0-for-upstream-feat-rocm-wheels</code> on the <a href="https://github.com/ROCm/nixl/actions/runs/46109922344/attempts/1">Actions run</a>; expires with the run</li>
+<li>vm1-loop 10.2.0: guest and NIC diagnostics: artifact <code>bench-diagnostics-vm1-loop-10.2.0-for-upstream-feat-rocm-wheels</code> on the <a href="https://github.com/ROCm/nixl/actions/runs/46109922344/attempts/1">Actions run</a>; expires with the run</li>
+<li>vm2-net 10.2.0: guest and NIC diagnostics: artifact <code>bench-diagnostics-vm2-net-10.2.0-for-upstream-feat-rocm-wheels</code> on the <a href="https://github.com/ROCm/nixl/actions/runs/46109922344/attempts/1">Actions run</a>; expires with the run</li>
+</ul>
+<h2 id="coverage">Blocked: what each lane waits for (68 cases)</h2>
+<p class="muted">82 records over 3 ROCm versions.</p>
+<div class="scroll">
+<table>
+<thead><tr><th>Lane</th><th>Waits for</th><th class="num">Cases</th><th>ROCm</th><th>Case keys</th></tr></thead>
+<tbody>
+<tr><td>bench-container</td><td><a href="https://github.com/ROCm/nixl/blob/main-amd/.ci/docs/amd-bench.md#blocker-codes">E8</a></td><td class="num">2</td><td>10.1.0, 10.2.0, 7.14.1</td><td><details><summary>2 case keys</summary><code>bench-container/libfabric/tcp/DD/READ/S</code><br><code>bench-container/libfabric/tcp/DD/WRITE/S</code></details></td></tr>
+<tr><td>bench-container</td><td><a href="https://github.com/ROCm/nixl/blob/main-amd/.ci/docs/amd-bench.md#blocker-codes">nixlbench-redis-read-sweep</a></td><td class="num">1</td><td>10.1.0, 10.2.0, 7.14.1</td><td><details><summary>1 case key</summary><code>bench-container/redis/READ/N</code></details></td></tr>
+<tr><td>bench-container</td><td><a href="https://github.com/ROCm/nixl/blob/main-amd/.ci/docs/amd-bench.md#blocker-codes">ucx-shm-ep</a></td><td class="num">4</td><td>10.1.0, 10.2.0, 7.14.1</td><td><details><summary>4 case keys</summary><code>bench-container/ucx/shm/DD/READ/N</code><br><code>bench-container/ucx/shm/DD/READ/S</code><br><code>bench-container/ucx/shm/DD/WRITE/N</code><br><code>bench-container/ucx/shm/DD/WRITE/S</code></details></td></tr>
+<tr><td>vm1-fabric</td><td><a href="https://github.com/ROCm/nixl/blob/main-amd/.ci/docs/amd-bench.md#blocker-codes">W13</a>, <a href="https://github.com/ROCm/nixl/blob/main-amd/.ci/docs/amd-bench.md#blocker-codes">W11</a></td><td class="num">11</td><td>10.2.0</td><td><details><summary>11 case keys</summary><code>vm1-fabric/kv/DRAM/QUERY/KV-R-4096</code><br><code>vm1-fabric/kv/DRAM/READ/KV-R-131072</code><br><code>vm1-fabric/kv/DRAM/READ/KV-R-16384</code><br><code>vm1-fabric/kv/DRAM/READ/KV-R-4096</code><br><code>vm1-fabric/kv/DRAM/READ/KV-R-65536</code><br><code>vm1-fabric/kv/DRAM/WRITE/KV-W</code><br><code>vm1-fabric/kv/VRAM/READ/KV-R-131072</code><br><code>vm1-fabric/kv/VRAM/READ/KV-R-16384</code><br><code>vm1-fabric/kv/VRAM/READ/KV-R-4096</code><br><code>vm1-fabric/kv/VRAM/READ/KV-R-65536</code><br><code>vm1-fabric/kv/VRAM/WRITE/KV-W</code></details></td></tr>
+<tr><td>vm1-pcie</td><td><a href="https://github.com/ROCm/nixl/blob/main-amd/.ci/docs/amd-bench.md#blocker-codes">W10</a></td><td class="num">25</td><td>none</td><td><details><summary>25 case keys</summary><code>vm1-pcie/ais/compat-allowed/READ/S</code><br><code>vm1-pcie/ais/compat-allowed/WRITE/N</code><br><code>vm1-pcie/ais/compat-allowed/WRITE/S</code><br><code>vm1-pcie/ais/fast-required/READ/S</code><br><code>vm1-pcie/ais/fast-required/WRITE/S</code><br><code>vm1-pcie/gusli/K/READ/S</code><br><code>vm1-pcie/gusli/K/WRITE/S</code><br><code>vm1-pcie/posix/AIO/buffered/QUERY/S</code><br><code>vm1-pcie/posix/AIO/buffered/READ/S</code><br><code>vm1-pcie/posix/AIO/buffered/WRITE/N</code><br><code>vm1-pcie/posix/AIO/buffered/WRITE/S</code><br><code>vm1-pcie/posix/AIO/direct/READ/S</code><br><code>vm1-pcie/posix/AIO/direct/WRITE/S</code><br><code>vm1-pcie/posix/POSIXAIO/buffered/READ/S</code><br><code>vm1-pcie/posix/POSIXAIO/buffered/WRITE/S</code><br><code>vm1-pcie/posix/POSIXAIO/direct/READ/S</code><br><code>vm1-pcie/posix/POSIXAIO/direct/WRITE/S</code><br><code>vm1-pcie/posix/URING/buffered/READ/S</code><br><code>vm1-pcie/posix/URING/buffered/WRITE/S</code><br><code>vm1-pcie/posix/URING/direct-blockaligned/READ/S</code><br><code>vm1-pcie/posix/URING/direct-blockaligned/WRITE/S</code><br><code>vm1-pcie/posix/URING/direct/READ/N</code><br><code>vm1-pcie/posix/URING/direct/READ/S</code><br><code>vm1-pcie/posix/URING/direct/WRITE/N</code><br><code>vm1-pcie/posix/URING/direct/WRITE/S</code></details></td></tr>
+<tr><td>vm1-pcie</td><td><a href="https://github.com/ROCm/nixl/blob/main-amd/.ci/docs/amd-bench.md#blocker-codes">W10</a>, <a href="https://github.com/ROCm/nixl/blob/main-amd/.ci/docs/amd-bench.md#blocker-codes">W13</a>, <a href="https://github.com/ROCm/nixl/blob/main-amd/.ci/docs/amd-bench.md#blocker-codes">W11</a></td><td class="num">11</td><td>none</td><td><details><summary>11 case keys</summary><code>vm1-pcie/kv/DRAM/QUERY/KV-R-4096</code><br><code>vm1-pcie/kv/DRAM/READ/KV-R-131072</code><br><code>vm1-pcie/kv/DRAM/READ/KV-R-16384</code><br><code>vm1-pcie/kv/DRAM/READ/KV-R-4096</code><br><code>vm1-pcie/kv/DRAM/READ/KV-R-65536</code><br><code>vm1-pcie/kv/DRAM/WRITE/KV-W</code><br><code>vm1-pcie/kv/VRAM/READ/KV-R-131072</code><br><code>vm1-pcie/kv/VRAM/READ/KV-R-16384</code><br><code>vm1-pcie/kv/VRAM/READ/KV-R-4096</code><br><code>vm1-pcie/kv/VRAM/READ/KV-R-65536</code><br><code>vm1-pcie/kv/VRAM/WRITE/KV-W</code></details></td></tr>
+<tr><td>vm1-s3</td><td><a href="https://github.com/ROCm/nixl/blob/main-amd/.ci/docs/amd-bench.md#blocker-codes">W4</a></td><td class="num">2</td><td>none</td><td><details><summary>2 case keys</summary><code>vm1-s3/obj/std/READ/small</code><br><code>vm1-s3/obj/std/WRITE/small</code></details></td></tr>
+<tr><td>vm1-s3</td><td><a href="https://github.com/ROCm/nixl/blob/main-amd/.ci/docs/amd-bench.md#blocker-codes">W4</a>, <a href="https://github.com/ROCm/nixl/blob/main-amd/.ci/docs/amd-bench.md#blocker-codes">W14</a>, <a href="https://github.com/ROCm/nixl/blob/main-amd/.ci/docs/amd-bench.md#blocker-codes">W11</a></td><td class="num">6</td><td>none</td><td><details><summary>6 case keys</summary><code>vm1-s3/obj/hipobj/DRAM/READ/S</code><br><code>vm1-s3/obj/hipobj/DRAM/WRITE/N</code><br><code>vm1-s3/obj/hipobj/DRAM/WRITE/S</code><br><code>vm1-s3/obj/hipobj/VRAM/READ/S</code><br><code>vm1-s3/obj/hipobj/VRAM/WRITE/N</code><br><code>vm1-s3/obj/hipobj/VRAM/WRITE/S</code></details></td></tr>
+<tr><td>vm2-lfverbs</td><td><a href="https://github.com/ROCm/nixl/blob/main-amd/.ci/docs/amd-bench.md#blocker-codes">W15</a>, <a href="https://github.com/ROCm/nixl/blob/main-amd/.ci/docs/amd-bench.md#blocker-codes">W11</a></td><td class="num">4</td><td>none</td><td><details><summary>4 case keys</summary><code>vm2-lfverbs/libfabric/verbs/DD/READ/S</code><br><code>vm2-lfverbs/libfabric/verbs/DD/WRITE/S</code><br><code>vm2-lfverbs/libfabric/verbs/VV/READ/S</code><br><code>vm2-lfverbs/libfabric/verbs/VV/WRITE/S</code></details></td></tr>
+<tr><td>vm2-net</td><td><a href="https://github.com/ROCm/nixl/blob/main-amd/.ci/docs/amd-bench.md#blocker-codes">E8</a></td><td class="num">2</td><td>10.2.0</td><td><details><summary>2 case keys</summary><code>vm2-net/libfabric/tcp/DD/READ/S</code><br><code>vm2-net/libfabric/tcp/DD/WRITE/S</code></details></td></tr>
+</tbody>
+</table>
+</div>
+<details class="section">
+<summary><h2 id="ratios">Declared ratios (37)</h2></summary>
+<p class="note">Everything here runs on emulated devices on shared GitHub runners. A failure is a real failure. A rate only shows change from one run to the next and says nothing about real hardware.</p>
+<p class="muted">Each point is block size × batch size: the ratio, then the two rates in GB/s it was taken from, each the median over the rounds of that case.</p>
+<div class="scroll">
+<table>
+<thead><tr><th>Pair</th><th>Kind</th><th>Lane</th><th>ROCm</th><th>Numerator over denominator</th><th>Points</th></tr></thead>
+<tbody>
+<tr><td class="key"><code>bench-container/direct-buffered/AIO/WRITE/S</code></td><td>direct-buffered</td><td>bench-container</td><td>10.1.0</td><td class="key"><code>bench-container/posix/AIO/direct/WRITE/S</code> over <code>bench-container/posix/AIO/buffered/WRITE/S</code></td><td class="nowrap">65536×4: <b>0.0131</b> (0.279 / 21.237)</td></tr>
+<tr><td class="key"><code>bench-container/direct-buffered/AIO/READ/S</code></td><td>direct-buffered</td><td>bench-container</td><td>10.1.0</td><td class="key"><code>bench-container/posix/AIO/direct/READ/S</code> over <code>bench-container/posix/AIO/buffered/READ/S</code></td><td class="nowrap">65536×4: <b>0.0261</b> (0.553 / 21.183)</td></tr>
+<tr><td class="key"><code>bench-container/direct-buffered/URING/WRITE/S</code></td><td>direct-buffered</td><td>bench-container</td><td>10.1.0</td><td class="key"><code>bench-container/posix/URING/direct/WRITE/S</code> over <code>bench-container/posix/URING/buffered/WRITE/S</code></td><td class="nowrap">65536×4: <b>0.0252</b> (0.279 / 11.081)</td></tr>
+<tr><td class="key"><code>bench-container/direct-buffered/URING/READ/S</code></td><td>direct-buffered</td><td>bench-container</td><td>10.1.0</td><td class="key"><code>bench-container/posix/URING/direct/READ/S</code> over <code>bench-container/posix/URING/buffered/READ/S</code></td><td class="nowrap">65536×4: <b>0.0499</b> (0.548 / 10.980)</td></tr>
+<tr><td class="key"><code>bench-container/direct-buffered/POSIXAIO/WRITE/S</code></td><td>direct-buffered</td><td>bench-container</td><td>10.1.0</td><td class="key"><code>bench-container/posix/POSIXAIO/direct/WRITE/S</code> over <code>bench-container/posix/POSIXAIO/buffered/WRITE/S</code></td><td class="nowrap">65536×4: <b>0.0418</b> (0.279 / 6.674)</td></tr>
+<tr><td class="key"><code>bench-container/direct-buffered/POSIXAIO/READ/S</code></td><td>direct-buffered</td><td>bench-container</td><td>10.1.0</td><td class="key"><code>bench-container/posix/POSIXAIO/direct/READ/S</code> over <code>bench-container/posix/POSIXAIO/buffered/READ/S</code></td><td class="nowrap">65536×4: <b>0.0568</b> (0.399 / 7.037)</td></tr>
+<tr><td class="key"><code>bench-container/direct-buffered/AIO/WRITE/S</code></td><td>direct-buffered</td><td>bench-container</td><td>10.2.0</td><td class="key"><code>bench-container/posix/AIO/direct/WRITE/S</code> over <code>bench-container/posix/AIO/buffered/WRITE/S</code></td><td class="nowrap">65536×4: <b>0.0142</b> (0.289 / 20.361)</td></tr>
+<tr><td class="key"><code>bench-container/direct-buffered/AIO/READ/S</code></td><td>direct-buffered</td><td>bench-container</td><td>10.2.0</td><td class="key"><code>bench-container/posix/AIO/direct/READ/S</code> over <code>bench-container/posix/AIO/buffered/READ/S</code></td><td class="nowrap">65536×4: <b>0.0285</b> (0.594 / 20.867)</td></tr>
+<tr><td class="key"><code>bench-container/direct-buffered/URING/WRITE/S</code></td><td>direct-buffered</td><td>bench-container</td><td>10.2.0</td><td class="key"><code>bench-container/posix/URING/direct/WRITE/S</code> over <code>bench-container/posix/URING/buffered/WRITE/S</code></td><td class="nowrap">65536×4: <b>0.0262</b> (0.279 / 10.632)</td></tr>
+<tr><td class="key"><code>bench-container/direct-buffered/URING/READ/S</code></td><td>direct-buffered</td><td>bench-container</td><td>10.2.0</td><td class="key"><code>bench-container/posix/URING/direct/READ/S</code> over <code>bench-container/posix/URING/buffered/READ/S</code></td><td class="nowrap">65536×4: <b>0.0415</b> (0.562 / 13.519)</td></tr>
+<tr><td class="key"><code>bench-container/direct-buffered/POSIXAIO/WRITE/S</code></td><td>direct-buffered</td><td>bench-container</td><td>10.2.0</td><td class="key"><code>bench-container/posix/POSIXAIO/direct/WRITE/S</code> over <code>bench-container/posix/POSIXAIO/buffered/WRITE/S</code></td><td class="nowrap">65536×4: <b>0.0547</b> (0.297 / 5.431)</td></tr>
+<tr><td class="key"><code>bench-container/direct-buffered/POSIXAIO/READ/S</code></td><td>direct-buffered</td><td>bench-container</td><td>10.2.0</td><td class="key"><code>bench-container/posix/POSIXAIO/direct/READ/S</code> over <code>bench-container/posix/POSIXAIO/buffered/READ/S</code></td><td class="nowrap">65536×4: <b>0.0855</b> (0.571 / 6.676)</td></tr>
+<tr><td class="key"><code>bench-container/direct-buffered/AIO/WRITE/S</code></td><td>direct-buffered</td><td>bench-container</td><td>7.14.1</td><td class="key"><code>bench-container/posix/AIO/direct/WRITE/S</code> over <code>bench-container/posix/AIO/buffered/WRITE/S</code></td><td class="nowrap">65536×4: <b>0.0092</b> (0.171 / 18.518)</td></tr>
+<tr><td class="key"><code>bench-container/direct-buffered/AIO/READ/S</code></td><td>direct-buffered</td><td>bench-container</td><td>7.14.1</td><td class="key"><code>bench-container/posix/AIO/direct/READ/S</code> over <code>bench-container/posix/AIO/buffered/READ/S</code></td><td class="nowrap">65536×4: <b>0.0252</b> (0.559 / 22.221)</td></tr>
+<tr><td class="key"><code>bench-container/direct-buffered/URING/WRITE/S</code></td><td>direct-buffered</td><td>bench-container</td><td>7.14.1</td><td class="key"><code>bench-container/posix/URING/direct/WRITE/S</code> over <code>bench-container/posix/URING/buffered/WRITE/S</code></td><td class="nowrap">65536×4: <b>0.0247</b> (0.247 / 9.998)</td></tr>
+<tr><td class="key"><code>bench-container/direct-buffered/URING/READ/S</code></td><td>direct-buffered</td><td>bench-container</td><td>7.14.1</td><td class="key"><code>bench-container/posix/URING/direct/READ/S</code> over <code>bench-container/posix/URING/buffered/READ/S</code></td><td class="nowrap">65536×4: <b>0.0371</b> (0.487 / 13.148)</td></tr>
+<tr><td class="key"><code>bench-container/direct-buffered/POSIXAIO/WRITE/S</code></td><td>direct-buffered</td><td>bench-container</td><td>7.14.1</td><td class="key"><code>bench-container/posix/POSIXAIO/direct/WRITE/S</code> over <code>bench-container/posix/POSIXAIO/buffered/WRITE/S</code></td><td class="nowrap">65536×4: <b>0.0489</b> (0.298 / 6.088)</td></tr>
+<tr><td class="key"><code>bench-container/direct-buffered/POSIXAIO/READ/S</code></td><td>direct-buffered</td><td>bench-container</td><td>7.14.1</td><td class="key"><code>bench-container/posix/POSIXAIO/direct/READ/S</code> over <code>bench-container/posix/POSIXAIO/buffered/READ/S</code></td><td class="nowrap">65536×4: <b>0.0982</b> (0.537 / 5.470)</td></tr>
+<tr><td class="key"><code>vm1-fabric/direct-buffered/AIO/WRITE/S</code></td><td>direct-buffered</td><td>vm1-fabric</td><td>10.2.0</td><td class="key"><code>vm1-fabric/posix/AIO/direct/WRITE/S</code> over <code>vm1-fabric/posix/AIO/buffered/WRITE/S</code></td><td class="nowrap">65536×4: <b>0.0403</b> (0.556 / 13.786)</td></tr>
+<tr><td class="key"><code>vm1-fabric/direct-buffered/AIO/READ/S</code></td><td>direct-buffered</td><td>vm1-fabric</td><td>10.2.0</td><td class="key"><code>vm1-fabric/posix/AIO/direct/READ/S</code> over <code>vm1-fabric/posix/AIO/buffered/READ/S</code></td><td class="nowrap">65536×4: <b>0.0670</b> (0.723 / 10.803)</td></tr>
+<tr><td class="key"><code>vm1-fabric/direct-buffered/URING/WRITE/S</code></td><td>direct-buffered</td><td>vm1-fabric</td><td>10.2.0</td><td class="key"><code>vm1-fabric/posix/URING/direct/WRITE/S</code> over <code>vm1-fabric/posix/URING/buffered/WRITE/S</code></td><td class="nowrap">65536×4: <b>0.0920</b> (0.672 / 7.307)</td></tr>
+<tr><td class="key"><code>vm1-fabric/direct-buffered/URING/READ/S</code></td><td>direct-buffered</td><td>vm1-fabric</td><td>10.2.0</td><td class="key"><code>vm1-fabric/posix/URING/direct/READ/S</code> over <code>vm1-fabric/posix/URING/buffered/READ/S</code></td><td class="nowrap">65536×4: <b>0.0206</b> (0.649 / 31.477)</td></tr>
+<tr><td class="key"><code>vm1-fabric/direct-buffered/POSIXAIO/WRITE/S</code></td><td>direct-buffered</td><td>vm1-fabric</td><td>10.2.0</td><td class="key"><code>vm1-fabric/posix/POSIXAIO/direct/WRITE/S</code> over <code>vm1-fabric/posix/POSIXAIO/buffered/WRITE/S</code></td><td class="nowrap">65536×4: <b>0.0321</b> (0.181 / 5.638)</td></tr>
+<tr><td class="key"><code>vm1-fabric/direct-buffered/POSIXAIO/READ/S</code></td><td>direct-buffered</td><td>vm1-fabric</td><td>10.2.0</td><td class="key"><code>vm1-fabric/posix/POSIXAIO/direct/READ/S</code> over <code>vm1-fabric/posix/POSIXAIO/buffered/READ/S</code></td><td class="nowrap">65536×4: <b>0.0585</b> (0.165 / 2.817)</td></tr>
+<tr><td class="key"><code>vm1-local/vram-dram/tcp/WRITE/N</code></td><td>vram-dram</td><td>vm1-local</td><td>10.2.0</td><td class="key"><code>vm1-local/ucx/tcp/VV/WRITE/N</code> over <code>vm1-local/ucx/tcp/DD/WRITE/N</code></td><td class="nowrap">4096×4: <b>0.0010</b> (0.000 / 0.330)<br>8192×4: <b>0.0010</b> (0.001 / 0.691)<br>16384×4: <b>0.0012</b> (0.001 / 1.053)<br>32768×4: <b>0.0014</b> (0.002 / 1.698)<br>65536×4: <b>0.0016</b> (0.004 / 2.415)<br>131072×4: <b>0.0023</b> (0.009 / 3.936)<br>262144×4: <b>0.0035</b> (0.016 / 4.447)<br>524288×4: <b>0.0055</b> (0.024 / 4.465)<br>1048576×4: <b>0.0057</b> (0.029 / 4.997)<br>2097152×4: <b>0.0066</b> (0.034 / 5.115)<br>4194304×4: <b>0.0081</b> (0.039 / 4.859)</td></tr>
+<tr><td class="key"><code>vm1-local/direct-buffered/AIO/WRITE/S</code></td><td>direct-buffered</td><td>vm1-local</td><td>10.2.0</td><td class="key"><code>vm1-local/posix/AIO/direct/WRITE/S</code> over <code>vm1-local/posix/AIO/buffered/WRITE/S</code></td><td class="nowrap">65536×4: <b>0.0130</b> (0.244 / 18.745)</td></tr>
+<tr><td class="key"><code>vm1-local/direct-buffered/AIO/READ/S</code></td><td>direct-buffered</td><td>vm1-local</td><td>10.2.0</td><td class="key"><code>vm1-local/posix/AIO/direct/READ/S</code> over <code>vm1-local/posix/AIO/buffered/READ/S</code></td><td class="nowrap">65536×4: <b>0.0327</b> (0.245 / 7.493)</td></tr>
+<tr><td class="key"><code>vm1-local/direct-buffered/URING/WRITE/S</code></td><td>direct-buffered</td><td>vm1-local</td><td>10.2.0</td><td class="key"><code>vm1-local/posix/URING/direct/WRITE/S</code> over <code>vm1-local/posix/URING/buffered/WRITE/S</code></td><td class="nowrap">65536×4: <b>0.0383</b> (0.245 / 6.377)</td></tr>
+<tr><td class="key"><code>vm1-local/direct-buffered/URING/READ/S</code></td><td>direct-buffered</td><td>vm1-local</td><td>10.2.0</td><td class="key"><code>vm1-local/posix/URING/direct/READ/S</code> over <code>vm1-local/posix/URING/buffered/READ/S</code></td><td class="nowrap">65536×4: <b>0.0326</b> (0.250 / 7.661)</td></tr>
+<tr><td class="key"><code>vm1-local/direct-buffered/POSIXAIO/WRITE/S</code></td><td>direct-buffered</td><td>vm1-local</td><td>10.2.0</td><td class="key"><code>vm1-local/posix/POSIXAIO/direct/WRITE/S</code> over <code>vm1-local/posix/POSIXAIO/buffered/WRITE/S</code></td><td class="nowrap">65536×4: <b>0.0344</b> (0.115 / 3.345)</td></tr>
+<tr><td class="key"><code>vm1-local/direct-buffered/POSIXAIO/READ/S</code></td><td>direct-buffered</td><td>vm1-local</td><td>10.2.0</td><td class="key"><code>vm1-local/posix/POSIXAIO/direct/READ/S</code> over <code>vm1-local/posix/POSIXAIO/buffered/READ/S</code></td><td class="nowrap">65536×4: <b>0.0173</b> (0.094 / 5.452)</td></tr>
+<tr><td class="key"><code>vm1-loop/vram-dram/rc/WRITE/N-r</code></td><td>vram-dram</td><td>vm1-loop</td><td>10.2.0</td><td class="key"><code>vm1-loop/ucx/rc/VV/WRITE/N-r</code> over <code>vm1-loop/ucx/rc/DD/WRITE/N-r</code></td><td class="nowrap">unavailable: num crash</td></tr>
+<tr><td class="key"><code>vm1-s3/vram-dram/hipobj/WRITE/N</code></td><td>vram-dram</td><td>vm1-s3</td><td>none</td><td class="key"><code>vm1-s3/obj/hipobj/VRAM/WRITE/N</code> over <code>vm1-s3/obj/hipobj/DRAM/WRITE/N</code></td><td class="nowrap">unavailable: num blocked</td></tr>
+<tr><td class="key"><code>vm2-net/vram-dram/tcp/WRITE/N</code></td><td>vram-dram</td><td>vm2-net</td><td>10.2.0</td><td class="key"><code>vm2-net/ucx/tcp/VV/WRITE/N</code> over <code>vm2-net/ucx/tcp/DD/WRITE/N</code></td><td class="nowrap">unavailable: num crash</td></tr>
+<tr><td class="key"><code>vm2-net/vram-dram/rc/WRITE/N-r</code></td><td>vram-dram</td><td>vm2-net</td><td>10.2.0</td><td class="key"><code>vm2-net/ucx/rc/VV/WRITE/N-r</code> over <code>vm2-net/ucx/rc/DD/WRITE/N-r</code></td><td class="nowrap">unavailable: num skip</td></tr>
+<tr><td class="key"><code>vm2-net/rc-tcp/DD/WRITE/N</code></td><td>rc-tcp</td><td>vm2-net</td><td>10.2.0</td><td class="key"><code>vm2-net/ucx/rc/DD/WRITE/N-r</code> over <code>vm2-net/ucx/tcp/DD/WRITE/N</code></td><td class="nowrap">4096×4: <b>2.2222</b> (0.035 / 0.016)<br>8192×4: <b>2.4621</b> (0.063 / 0.026)<br>16384×4: <b>3.1581</b> (0.137 / 0.043)<br>32768×4: <b>2.6624</b> (0.193 / 0.072)<br>65536×4: <b>3.3474</b> (0.334 / 0.100)<br>131072×4: <b>5.6387</b> (0.700 / 0.124)<br>262144×4: <b>7.6497</b> (1.162 / 0.152)<br>524288×4: <b>8.8304</b> (1.501 / 0.170)<br>1048576×4: <b>6.0380</b> (1.110 / 0.184)<br>2097152×4: <b>5.0580</b> (0.969 / 0.192)</td></tr>
+<tr><td class="key"><code>vm2-net/rc-tcp/VV/WRITE/N</code></td><td>rc-tcp</td><td>vm2-net</td><td>10.2.0</td><td class="key"><code>vm2-net/ucx/rc/VV/WRITE/N-r</code> over <code>vm2-net/ucx/tcp/VV/WRITE/N</code></td><td class="nowrap">unavailable: num skip</td></tr>
+</tbody>
+</table>
+</div>
+</details>
+<footer>
+<p>Collector: 0 rejected, 0 warnings, 0 required failures.</p>
+<p>Data of this run: <a href="../../data/bench/v1/night/20261128T032929Z/for-upstream-feat-rocm-wheels/46109922344.a1/runs.ndjson.gz">runs.ndjson.gz</a> · <a href="../../data/bench/v1/night/20261128T032929Z/for-upstream-feat-rocm-wheels/46109922344.a1/cases.ndjson.gz">cases.ndjson.gz</a> · <a href="../../data/bench/v1/night/20261128T032929Z/for-upstream-feat-rocm-wheels/46109922344.a1/samples.ndjson.gz">samples.ndjson.gz</a> · <a href="../../data/bench/v1/night/20261128T032929Z/for-upstream-feat-rocm-wheels/46109922344.a1/counters.ndjson.gz">counters.ndjson.gz</a> · <a href="../../data/bench/v1/night/20261128T032929Z/for-upstream-feat-rocm-wheels/46109922344.a1/tests.ndjson.gz">tests.ndjson.gz</a> · <a href="../../data/bench/v1/night/20261128T032929Z/for-upstream-feat-rocm-wheels/46109922344.a1/index.json">index.json</a> · <a href="../../data/bench/v1/matrix/4a0cda6a0b132c019de6263d1e23bdf54e4c25c6161ce9e7d2e326f30435d9da.json">matrix</a> · <a href="../../data/bench/v1/manifest.json">manifest.json</a>.</p>
+<p><a href="https://github.com/ROCm/nixl/blob/main-amd/.ci/docs/amd-bench.md">How the bench programme works</a> · <a href="../index.html">all runs</a></p>
+</footer>
+</body>
+</html>
