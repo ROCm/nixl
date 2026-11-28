@@ -6,9 +6,9 @@
       "slug": "for-upstream-feat-rocm-wheels",
       "project": "nixl-rocm",
       "branch": "for-upstream/feat/rocm-wheels",
-      "version": "1.6.0.dev20261127",
-      "sha": "0ee8a91b08c5cf516428964fbf01fed070cae42c",
-      "date": "2026-11-27T04:03:46Z",
+      "version": "1.6.0.dev20261128",
+      "sha": "1f848318154736aea70a11dd8d9bde9312a8fc89",
+      "date": "2026-11-28T04:58:27Z",
       "wheels": 5,
       "python": [
         "cp310",
